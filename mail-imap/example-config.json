@@ -1,0 +1,7 @@
+{
+    "server": "imap.example.com",
+    "port": 993,
+    "username": "your-email@example.com",
+    "password": "your-password",
+    "ssl": true
+}
