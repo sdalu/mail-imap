@@ -1,55 +1,95 @@
 use crate::config::Config;
-use crate::imap::ImapClient;
-use anyhow::Result;
+use crate::imap::{ImapBackend, ImapClient};
+use anyhow::{bail, Result};
 
-pub async fn list_folders(config: &Config) -> Result<()> {
-    let client = ImapClient::connect(config).await?;
-    let folders = client.list_folders().await?;
-    
-    println!("Folders:");
-    for folder in folders {
-        println!("  - {}", folder);
+pub fn list_folders(config: &Config) -> Result<()> {
+    let mut client = ImapClient::connect(config)?;
+    let folders = client.list_folders()?;
+
+    if folders.is_empty() {
+        println!("No folders found.");
+        return Ok(());
     }
-    
+
+    println!("Folders ({}):", folders.len());
+    for f in folders {
+        let mut meta = Vec::new();
+        if let Some(d) = &f.delimiter {
+            if !d.is_empty() {
+                meta.push(format!("delim='{}'", d));
+            }
+        }
+        if f.no_inferiors {
+            meta.push("\\Noinferiors".to_string());
+        }
+        meta.extend(f.attrs.iter().cloned());
+        let extra = meta.join(" ");
+        if extra.is_empty() {
+            println!("  - {}", f.name);
+        } else {
+            println!("  - {} ({})", f.name, extra);
+        }
+    }
     Ok(())
 }
 
-pub async fn search_emails(config: &Config, query: &str) -> Result<()> {
-    let client = ImapClient::connect(config).await?;
-    let emails = client.search_emails(query).await?;
-    
-    println!("Found {} emails:", emails.len());
-    for email_id in emails {
-        println!("  - {}", email_id);
+pub fn search_emails(config: &Config, query: &str) -> Result<()> {
+    let mut client = ImapClient::connect(config)?;
+    let results = client.search_emails(&config.folder, query)?;
+
+    if results.is_empty() {
+        println!("No emails matched query: {}", query);
+        return Ok(());
     }
-    
+
+    println!(
+        "Found {} email(s) in '{}' matching: {}",
+        results.len(),
+        config.folder,
+        query
+    );
+    for r in results {
+        let date = r.date.as_deref().unwrap_or("unknown date");
+        let size = r
+            .size
+            .map(|s| format!("  [{} bytes]", s))
+            .unwrap_or_default();
+        let flags = if r.flags.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", r.flags.join(" "))
+        };
+        println!(
+            "  UID {} | {} | {} | {}{}{}",
+            r.uid, date, r.subject, r.from, size, flags
+        );
+    }
     Ok(())
 }
 
-pub async fn read_email(config: &Config, id: u32) -> Result<()> {
-    let client = ImapClient::connect(config).await?;
-    let content = client.get_email(id).await?;
-    
-    println!("Email {} content:", id);
+pub fn read_email(config: &Config, id: u32) -> Result<()> {
+    let mut client = ImapClient::connect(config)?;
+    let content = client.get_email(&config.folder, id)?;
     println!("{}", content);
-    
     Ok(())
 }
 
-pub async fn move_email(config: &Config, id: u32, folder: &str) -> Result<()> {
-    let client = ImapClient::connect(config).await?;
-    client.move_email(id, folder).await?;
-    
-    println!("Email {} moved to folder '{}'", id, folder);
-    
+pub fn move_email(config: &Config, id: u32, folder: &str) -> Result<()> {
+    let mut client = ImapClient::connect(config)?;
+    client.move_email(&config.folder, id, folder)?;
+    println!(
+        "Email (UID {}) moved from '{}' to '{}'",
+        id, config.folder, folder
+    );
     Ok(())
 }
 
-pub async fn tag_email(config: &Config, id: u32, tags: &[String]) -> Result<()> {
-    let client = ImapClient::connect(config).await?;
-    client.tag_email(id, tags).await?;
-    
-    println!("Email {} tagged with: {:?}", id, tags);
-    
+pub fn tag_email(config: &Config, id: u32, tags: &[String]) -> Result<()> {
+    if tags.is_empty() {
+        bail!("no tags given");
+    }
+    let mut client = ImapClient::connect(config)?;
+    client.tag_email(&config.folder, id, tags)?;
+    println!("Email (UID {}) tagged with: {}", id, tags.join(", "));
     Ok(())
 }

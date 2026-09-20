@@ -1,106 +1,80 @@
-# IMAP Implementation Guide
+# IMAP Implementation
 
-This document explains how to implement real IMAP functionality for the mail-imap project.
+This document describes how mail-imap implements real IMAP access.
 
-## Current State
+## Backends
 
-The project currently has a mock implementation in `src/imap/mod.rs` that demonstrates the structure and API but doesn't connect to real IMAP servers.
+Operations are exposed through the `ImapBackend` trait (`src/imap/mod.rs`).
+Two implementations exist and are selected by `Config::mock`:
 
-## Real Implementation Steps
+| Backend | File | Used by |
+|---------|------|---------|
+| `RealClient` | `src/imap/real.rs` | The released binary (real servers) |
+| `MockClient` | `src/imap/mock.rs` | Tests / demos (in-memory, the original mockup) |
 
-To implement real IMAP functionality, follow these steps:
-
-### 1. Dependencies
-
-Make sure you have the following in your `Cargo.toml`:
-
-```toml
-[dependencies]
-imap = "2.4"
-tokio = { version = "1.0", features = ["full"] }
-tokio-native-tls = "0.3"
-native-tls = "0.2"
-```
-
-### 2. Connection Logic
-
-Replace the mock implementation with real connection logic:
+The CLI always calls the trait; it does not know which backend is active.
+`ImapClient::connect` picks one:
 
 ```rust
-use crate::config::Config;
-use anyhow::Result;
-use imap::Client;
-use std::net::TcpStream;
-use tokio_native_tls::TlsConnector;
-
-pub struct ImapClient {
-    client: Client<TcpStream>,
-}
-
-impl ImapClient {
-    pub async fn connect(config: &Config) -> Result<Self> {
-        let addr = format!("{}:{}", config.server, config.port);
-        let stream = TcpStream::connect(addr).await?;
-        
-        let client = if config.ssl {
-            let connector = TlsConnector::new()?;
-            let client = Client::new(stream);
-            let client = client.starttls(connector).await?;
-            client
-        } else {
-            Client::new(stream)
-        };
-        
-        client.login(&config.username, &config.password).await?;
-        
-        Ok(ImapClient { client })
-    }
-    
-    // ... rest of the methods would use the real IMAP API
-}
+if config.mock { MockClient::connect(cfg) } else { RealClient::connect(cfg) }
 ```
 
-### 3. Key IMAP Operations
+## Real backend (`real.rs`)
 
-The following operations need to be implemented using the imap crate:
+Uses the `imap` crate (v2.4) over `std::net::TcpStream` + `native-tls`.
 
-- `list_folders()` → IMAP LIST command
-- `search_emails()` → IMAP SEARCH command  
-- `get_email()` → IMAP FETCH command
-- `move_email()` → IMAP COPY + STORE + EXPUNGE sequence
-- `tag_email()` → IMAP STORE command
+### Connection
+1. Resolve the host and `TcpStream::connect_timeout` (10 s).
+2. Branch on config:
+   - `ssl: true` → implicit TLS via `TlsConnector::connect` (port 993 style).
+   - `ssl: false, starttls: true` → plain connect then `Client::secure` (STARTTLS).
+   - otherwise → plain TCP.
+3. `read_greeting` then `login(username, password)`.
 
-### 4. Error Handling
+The session is stored as either a TLS or plain variant in an enum so a single
+operation body can be shared by a `with_backend!` macro.
 
-Use proper error handling with the `anyhow` crate for graceful error management.
+### Operations
+
+| CLI command | IMAP commands used |
+|-------------|--------------------|
+| `folders` | `LIST "" *` (non-`\Noselect` names) |
+| `search` | `SELECT` + `UID SEARCH <query>` + batched `UID FETCH` (envelope/flags/date/size) |
+| `read` | `SELECT` + `UID FETCH <uid> (UID ENVELOPE FLAGS INTERNALDATE RFC822)` |
+| `move` | `SELECT` + (`UID MOVE` if `MOVE` capability, else `UID COPY` + `UID STORE \Deleted` + `EXPUNGE`) |
+| `tag` | `SELECT` + `UID STORE <uid> +FLAGS (tag1 tag2 ...)` |
+
+Search results are shown most-recent-first and capped by `Config::max` (default
+50) to keep large mailboxes fast.
+
+### RFC 2047 subject decoding
+ENVELOPE subjects may be encoded-words (e.g. `=?utf-8?Q?Votre=20facture?=`).
+`decode_rfc2047` finds each well-formed encoded word in the value and decodes
+it (UTF-8, ISO-8859-1/Latin-1, `B` and `Q` encodings, padding restored for
+base64). Plain text is left untouched.
+
+## Mock backend (`mock.rs`)
+
+The original mockup, preserved. Returns a fixed set of folders and five sample
+messages so every operation can be exercised offline. It is what the unit
+tests drive.
 
 ## Testing
 
-After implementing the real functionality, test with:
+`cargo test` runs entirely against the mock backend (no network). Coverage:
+- backend selection (`mock` vs `real`)
+- list / search / read / move / tag happy + error paths
+- RFC 2047 decoder (plain, Q, Q-with-underscore, B, Latin-1, mixed text)
+- the real backend returns an error (no fabricated data) when unreachable
+
+To exercise the real backend manually:
 
 ```bash
-# Build the project
-cargo build
-
-# Run tests
-cargo test
-
-# Test with a real configuration file
-cargo run -- --config your-config.json folders
+cargo run --release -- -c incal.conf folders
+cargo run --release -- -c incal.conf -f INBOX search "SINCE 01-Jan-2026"
 ```
 
-## Sample Configuration
+## Error handling
 
-Create a configuration file like `real-config.json`:
-
-```json
-{
-    "server": "imap.gmail.com",
-    "port": 993,
-    "username": "your-email@gmail.com",
-    "password": "your-app-password",
-    "ssl": true
-}
-```
-
-Note: For Gmail, you'll need to use an App Password instead of your regular password.
+Connection, TLS, authentication and server (BAD/NO) errors surface as
+`anyhow::Error` with context; the CLI prints them and exits non-zero.

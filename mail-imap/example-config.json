@@ -1,7 +1,12 @@
 {
     "server": "imap.example.com",
     "port": 993,
-    "username": "your-email@example.com",
-    "password": "your-password",
-    "ssl": true
+    "username": "user@example.com",
+    "password": "secret",
+    "ssl": true,
+    "starttls": false,
+    "insecure": false,
+    "folder": "INBOX",
+    "max": 50,
+    "mock": false
 }

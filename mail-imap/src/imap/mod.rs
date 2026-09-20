@@ -1,68 +1,111 @@
+//! IMAP access layer.
+//!
+//! Operations are exposed through the [`ImapBackend`] trait. Two backends exist:
+//!
+//! * [`real::RealClient`] — talks to a real IMAP server over TCP/TLS using the
+//!   `imap` crate. This is what the released binary uses.
+//! * [`mock::MockClient`] — an in-memory mock (the original mockup), kept so the
+//!   tool can be built, tested, and demoed without a live server.
+//!
+//! Which backend is used is chosen by `Config::mock` (and the `--mock` flag).
+
+mod mock;
+mod real;
+
+pub use mock::MockClient;
+pub use real::RealClient;
+
 use crate::config::Config;
 use anyhow::Result;
 
-// This represents a working IMAP client that would connect to real servers
-// Note: Actual implementation depends on proper async/await handling with imap crate
-pub struct ImapClient;
+/// A single mailbox as reported by `LIST`.
+#[derive(Debug, Clone)]
+pub struct FolderInfo {
+    pub name: String,
+    pub delimiter: Option<String>,
+    pub no_inferiors: bool,
+    pub attrs: Vec<String>,
+}
+
+/// A single search hit.
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub uid: u32,
+    pub subject: String,
+    pub from: String,
+    pub date: Option<String>,
+    pub size: Option<u32>,
+    pub flags: Vec<String>,
+}
+
+/// The operations the CLI needs from an IMAP account.
+pub trait ImapBackend {
+    fn list_folders(&mut self) -> Result<Vec<FolderInfo>>;
+    fn search_emails(&mut self, folder: &str, query: &str) -> Result<Vec<SearchResult>>;
+    fn get_email(&mut self, folder: &str, uid: u32) -> Result<String>;
+    fn move_email(&mut self, folder: &str, uid: u32, target: &str) -> Result<()>;
+    fn tag_email(&mut self, folder: &str, uid: u32, tags: &[String]) -> Result<()>;
+    fn close(&mut self);
+}
+
+/// Concrete backend selected at connect time.
+pub enum ImapClient {
+    Real(RealClient),
+    Mock(MockClient),
+}
 
 impl ImapClient {
-    pub async fn connect(_config: &Config) -> Result<Self> {
-        // This would establish connection to real IMAP server
-        // In a real implementation, this would:
-        // 1. Open TCP connection to server
-        // 2. Handle SSL/TLS negotiation if required
-        // 3. Authenticate with credentials
-        // 4. Return connected client
-        
-        // For demonstration purposes, we'll return success
-        Ok(ImapClient)
+    /// Connect using the backend requested by `config` (`mock` flag).
+    pub fn connect(config: &Config) -> Result<Self> {
+        if config.mock {
+            Ok(ImapClient::Mock(MockClient::connect(config)?))
+        } else {
+            Ok(ImapClient::Real(RealClient::connect(config)?))
+        }
     }
-    
-    pub async fn list_folders(&self) -> Result<Vec<String>> {
-        // This would call IMAP LIST command to get all folders
-        // Real implementation would parse server response and extract folder names
-        
-        // Mock response showing expected structure
-        Ok(vec![
-            "INBOX".to_string(),
-            "Sent Items".to_string(), 
-            "Drafts".to_string(),
-            "Trash".to_string(),
-            "Spam".to_string()
-        ])
+}
+
+impl ImapBackend for ImapClient {
+    fn list_folders(&mut self) -> Result<Vec<FolderInfo>> {
+        match self {
+            ImapClient::Real(c) => c.list_folders(),
+            ImapClient::Mock(c) => c.list_folders(),
+        }
     }
-    
-    pub async fn search_emails(&self, _query: &str) -> Result<Vec<u32>> {
-        // This would call IMAP SEARCH command with the query
-        // Real implementation would parse UID results from server
-        
-        // Mock response showing expected structure
-        Ok(vec![1, 2, 3, 4, 5])
+    fn search_emails(&mut self, folder: &str, query: &str) -> Result<Vec<SearchResult>> {
+        match self {
+            ImapClient::Real(c) => c.search_emails(folder, query),
+            ImapClient::Mock(c) => c.search_emails(folder, query),
+        }
     }
-    
-    pub async fn get_email(&self, _id: u32) -> Result<String> {
-        // This would call IMAP FETCH command to retrieve email content
-        // Real implementation would parse email data from server response
-        
-        // Mock response showing expected structure
-        Ok(format!("Email content for ID: {}", _id))
+    fn get_email(&mut self, folder: &str, uid: u32) -> Result<String> {
+        match self {
+            ImapClient::Real(c) => c.get_email(folder, uid),
+            ImapClient::Mock(c) => c.get_email(folder, uid),
+        }
     }
-    
-    pub async fn move_email(&self, _id: u32, _folder: &str) -> Result<()> {
-        // This would implement the MOVE operation using:
-        // 1. COPY command to copy email to target folder
-        // 2. STORE command to mark original as deleted
-        // 3. EXPUNGE command to permanently delete
-        
-        // Mock implementation
-        Ok(())
+    fn move_email(&mut self, folder: &str, uid: u32, target: &str) -> Result<()> {
+        match self {
+            ImapClient::Real(c) => c.move_email(folder, uid, target),
+            ImapClient::Mock(c) => c.move_email(folder, uid, target),
+        }
     }
-    
-    pub async fn tag_email(&self, _id: u32, _tags: &[String]) -> Result<()> {
-        // This would add flags/tags to an email using STORE command
-        // Real implementation would send appropriate STORE command with flags
-        
-        // Mock implementation
-        Ok(())
+    fn tag_email(&mut self, folder: &str, uid: u32, tags: &[String]) -> Result<()> {
+        match self {
+            ImapClient::Real(c) => c.tag_email(folder, uid, tags),
+            ImapClient::Mock(c) => c.tag_email(folder, uid, tags),
+        }
+    }
+    fn close(&mut self) {
+        match self {
+            ImapClient::Real(c) => c.close(),
+            ImapClient::Mock(c) => c.close(),
+        }
+    }
+}
+
+impl Drop for ImapClient {
+    fn drop(&mut self) {
+        self.close();
     }
 }
