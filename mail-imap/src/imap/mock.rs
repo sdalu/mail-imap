@@ -1,6 +1,7 @@
 use crate::config::Config;
-use crate::imap::{normalize_flags, FolderInfo, ImapBackend, SearchResult};
+use crate::imap::{PartInfo, FolderInfo, ImapBackend, Mailbox, SearchResult};
 use anyhow::{bail, Result};
+use std::path::Path;
 
 /// In-memory mock backend. This is the original mockup, kept for offline
 /// testing so the tool can be exercised without a reachable IMAP server.
@@ -30,6 +31,77 @@ impl MockClient {
             ],
         })
     }
+
+    /// Fixed part metadata: message 3 carries a spreadsheet,
+    /// message 5 a PDF. Every message also has its plain-text body as
+    /// part 1.
+    fn parts(&self, uid: u32) -> Vec<PartInfo> {
+        let mut out = Vec::new();
+        if let Some((_, _, _, body)) = self.messages.iter().find(|(u, _, _, _)| *u == uid) {
+            out.push(PartInfo {
+                part: 1,
+                content_type: "text/plain".to_string(),
+                filename: None,
+                size: body.len() as u64,
+            });
+        }
+        match uid {
+            3 => out.push(PartInfo {
+                part: 2,
+                content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    .to_string(),
+                filename: Some("q3-numbers.xlsx".to_string()),
+                size: 20480,
+            }),
+            5 => out.push(PartInfo {
+                part: 2,
+                content_type: "application/pdf".to_string(),
+                filename: Some("invoice-42.pdf".to_string()),
+                size: 51200,
+            }),
+            _ => {}
+        }
+        out
+    }
+
+    fn search_in_folder(
+        &mut self,
+        folder: &str,
+        query: &str,
+        cap: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let raw = query.trim().to_lowercase();
+        // The mock carries no flags and has no notion of mailbox content,
+        // so the standard "match everything" keys ALL and UNSEEN are
+        // treated as an empty (match-all) filter.
+        let q = if matches!(raw.as_str(), "all" | "unseen") {
+            String::new()
+        } else {
+            raw
+        };
+        let results: Vec<SearchResult> = self
+            .messages
+            .iter()
+            .filter(|(_, subject, from, _)| {
+                q.is_empty()
+                    || subject.to_lowercase().contains(&q)
+                    || from.to_lowercase().contains(&q)
+            })
+            .map(|(uid, subject, from, _)| SearchResult {
+                uid: *uid,
+                folder: folder.to_string(),
+                subject: subject.clone(),
+                from: from.clone(),
+                date: Some("2026-09-20 12:00:00 +0000".to_string()),
+                size: Some(120),
+                flags: Vec::new(),
+                // Matches `parts()`: uids 3 and 5 carry an extra part.
+                parts: self.parts(*uid).len() as u32,
+            })
+            .take(cap)
+            .collect();
+        Ok(results)
+    }
 }
 
 impl ImapBackend for MockClient {
@@ -46,26 +118,25 @@ impl ImapBackend for MockClient {
             .collect())
     }
 
-    fn search_emails(&mut self, _folder: &str, query: &str) -> Result<Vec<SearchResult>> {
-        let q = query.to_lowercase();
-        let results: Vec<SearchResult> = self
-            .messages
-            .iter()
-            .filter(|(_, subject, from, _)| {
-                q.is_empty()
-                    || subject.to_lowercase().contains(&q)
-                    || from.to_lowercase().contains(&q)
-            })
-            .map(|(uid, subject, from, _)| SearchResult {
-                uid: *uid,
-                subject: subject.clone(),
-                from: from.clone(),
-                date: Some("2026-09-20 12:00:00 +0000".to_string()),
-                size: Some(120),
-                flags: Vec::new(),
-            })
-            .collect();
-        Ok(results)
+    fn search_folders(
+        &mut self,
+        folders: &[String],
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let mut out: Vec<SearchResult> = Vec::new();
+        for folder in folders {
+            if max_results > 0 && out.len() >= max_results {
+                break;
+            }
+            let cap = if max_results > 0 {
+                max_results - out.len()
+            } else {
+                usize::MAX
+            };
+            out.extend(self.search_in_folder(folder, query, cap)?);
+        }
+        Ok(out)
     }
 
     fn get_email(&mut self, _folder: &str, uid: u32) -> Result<String> {
@@ -80,36 +151,82 @@ impl ImapBackend for MockClient {
         ))
     }
 
-    fn move_email(&mut self, _folder: &str, uid: u32, target: &str) -> Result<()> {
-        if !self.messages.iter().any(|(u, _, _, _)| *u == uid) {
-            anyhow::bail!("no email with UID {} (mock)", uid);
+    fn mailbox_counts(&mut self, folder: Option<&str>) -> Result<Vec<Mailbox>> {
+        let inbox_messages = self.messages.len() as u32;
+        let counts: Vec<Mailbox> = self
+            .folders
+            .iter()
+            .map(|name| {
+                let is_inbox = name == "INBOX";
+                Mailbox {
+                    name: name.clone(),
+                    messages: if is_inbox { inbox_messages } else { 0 },
+                    unseen: if is_inbox { inbox_messages } else { 0 },
+                    recent: 0,
+                    uid_next: if is_inbox { inbox_messages + 1 } else { 1 },
+                    uid_validity: 1,
+                }
+            })
+            .collect();
+        match folder {
+            Some(f) => counts
+                .into_iter()
+                .find(|m| m.name == f)
+                .ok_or_else(|| anyhow::anyhow!("no such folder '{}' (mock)", f))
+                .map(|m| vec![m]),
+            None => Ok(counts),
         }
-        if !self.folders.iter().any(|f| f == target) {
-            self.folders.push(target.to_string());
-        }
-        Ok(())
     }
 
-    fn set_tags(&mut self, _folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
-        if add.is_empty() && remove.is_empty() {
-            bail!("no tags given");
-        }
+    fn folder_uids(&mut self, _folder: &str) -> Result<Vec<u32>> {
+        Ok(self.messages.iter().map(|(u, _, _, _)| *u).collect())
+    }
+
+    fn list_parts(&mut self, _folder: &str, uid: u32) -> Result<Vec<PartInfo>> {
         if !self.messages.iter().any(|(u, _, _, _)| *u == uid) {
             bail!("no email with UID {} (mock)", uid);
         }
-        Ok(())
+        Ok(self.parts(uid))
     }
 
-    fn set_flags(&mut self, _folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
-        let add = normalize_flags(add)?;
-        let remove = normalize_flags(remove)?;
-        if add.is_empty() && remove.is_empty() {
-            bail!("no flags given");
+    fn save_part(
+        &mut self,
+        _folder: &str,
+        uid: u32,
+        part: u32,
+        dest: &Path,
+    ) -> Result<u64> {
+        let parts = self.list_parts(_folder, uid)?;
+        let max_part = parts.iter().map(|p| p.part).max().unwrap_or(0);
+        if part == 0 || part > max_part {
+            bail!(
+                "no part {} in message UID {} (mock has {} part(s))",
+                part,
+                uid,
+                parts.len()
+            );
         }
-        if !self.messages.iter().any(|(u, _, _, _)| *u == uid) {
-            bail!("no email with UID {} (mock)", uid);
-        }
-        Ok(())
+        // Produce bytes whose length matches the part size reported by
+        // `list_parts`.
+        let data: Vec<u8> = if part == 1 {
+            self.messages
+                .iter()
+                .find(|(u, _, _, _)| *u == uid)
+                .map(|(_, _, _, body)| body.as_bytes().to_vec())
+                .unwrap_or_default()
+        } else {
+            let declared = parts
+                .iter()
+                .find(|p| p.part == part)
+                .map(|p| p.size as usize)
+                .unwrap_or(0);
+            let mut data = format!("mock attachment data (uid {} part {})\n", uid, part)
+                .into_bytes();
+            data.resize(declared, 0);
+            data
+        };
+        std::fs::write(dest, &data)?;
+        Ok(data.len() as u64)
     }
 
     fn close(&mut self) {}

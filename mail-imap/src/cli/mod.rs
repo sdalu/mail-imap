@@ -1,7 +1,43 @@
 use crate::config::Config;
-use crate::imap::{FolderInfo, ImapBackend, ImapClient, SearchResult};
+use crate::imap::{FolderInfo, ImapBackend, ImapClient, Mailbox, PartInfo, SearchResult};
 use anyhow::{bail, Result};
 use serde::Serialize;
+use std::path::PathBuf;
+
+/// UID selection parser.
+///
+/// Supports a single UID (`5`) or a comma-separated list (`1,4,7`).
+/// Ranges (`4-7`) are **not** supported. Preserves input order and
+/// deduplicates.
+pub fn parse_uids(spec: &str) -> Result<Vec<u32>> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        bail!("empty UID spec");
+    }
+    let mut out: Vec<u32> = Vec::new();
+    for token in spec.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            bail!("empty element in UID spec '{}'", spec);
+        }
+        if token.contains('-') {
+            bail!(
+                "UID ranges are not supported in spec '{}' (use a comma-separated list, e.g. '1,2,3')",
+                spec
+            );
+        }
+        let uid: u32 = token
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid UID '{}' in spec '{}'", token, spec))?;
+        if !out.contains(&uid) {
+            out.push(uid);
+        }
+    }
+    if out.is_empty() {
+        bail!("no UIDs in spec '{}'", spec);
+    }
+    Ok(out)
+}
 
 /// Print `value` as compact single-line JSON to stdout.
 fn emit_json(value: &impl Serialize) -> Result<()> {
@@ -17,7 +53,12 @@ struct FoldersOutput<'a> {
 
 #[derive(Serialize)]
 struct SearchOutput<'a> {
-    folder: &'a str,
+    /// Present when a single folder was searched (as before); when several
+    /// folders were searched, `folders` is used instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folder: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    folders: Option<&'a [String]>,
     query: &'a str,
     count: usize,
     results: &'a [SearchResult],
@@ -31,18 +72,34 @@ struct ReadOutput<'a> {
 }
 
 #[derive(Serialize)]
-struct MoveOutput<'a> {
-    folder: &'a str,
-    uid: u32,
-    to: &'a str,
+struct CountOutput<'a> {
+    /// `true` when counts are shown for all selectable mailboxes.
+    all: bool,
+    counts: &'a [Mailbox],
 }
 
 #[derive(Serialize)]
-struct SetOutput<'a> {
+struct UidsOutput<'a> {
+    folder: &'a str,
+    count: usize,
+    uids: &'a [u32],
+}
+
+#[derive(Serialize)]
+struct PartsListOutput<'a> {
     folder: &'a str,
     uid: u32,
-    added: &'a [String],
-    removed: &'a [String],
+    count: usize,
+    parts: &'a [PartInfo],
+}
+
+#[derive(Serialize)]
+struct PartsSaveOutput<'a> {
+    folder: &'a str,
+    uid: u32,
+    part: u32,
+    file: &'a str,
+    size: u64,
 }
 
 pub fn list_folders(config: &Config, json: bool) -> Result<()> {
@@ -84,13 +141,14 @@ pub fn list_folders(config: &Config, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn search_emails(config: &Config, query: &str, json: bool) -> Result<()> {
+pub fn search_emails(config: &Config, query: &str, folders: Vec<String>, json: bool) -> Result<()> {
     let mut client = ImapClient::connect(config)?;
-    let results = client.search_emails(&config.folder, query)?;
+    let results = client.search_folders(&folders, query, config.max)?;
 
     if json {
         emit_json(&SearchOutput {
-            folder: &config.folder,
+            folder: folders.get(0).filter(|_| folders.len() == 1).map(|s| s.as_str()),
+            folders: if folders.len() == 1 { None } else { Some(&folders) },
             query,
             count: results.len(),
             results: &results,
@@ -103,112 +161,218 @@ pub fn search_emails(config: &Config, query: &str, json: bool) -> Result<()> {
         return Ok(());
     }
 
+    if folders.len() == 1 {
+        println!(
+            "Found {} email(s) in '{}' matching: {}",
+            results.len(),
+            folders[0],
+            query
+        );
+        for r in &results {
+            print_search_result("  ", r);
+        }
+    } else {
+        println!(
+            "Found {} email(s) in {} folder(s) matching: {}",
+            results.len(),
+            folders.len(),
+            query
+        );
+        for folder in &folders {
+            let hits: Vec<&SearchResult> = results
+                .iter()
+                .filter(|r| &r.folder == folder)
+                .collect();
+            if hits.is_empty() {
+                continue;
+            }
+            println!("  {} ({}):", folder, hits.len());
+            for r in hits {
+                print_search_result("    ", r);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_search_result(indent: &str, r: &SearchResult) {
+    let date = r.date.as_deref().unwrap_or("unknown date");
+    let size = r
+        .size
+        .map(|s| format!("  [{} bytes]", s))
+        .unwrap_or_default();
+    let parts = if r.parts > 0 {
+        format!("  [{} part(s)]", r.parts)
+    } else {
+        String::new()
+    };
+    let flags = if r.flags.is_empty() {
+        String::new()
+    } else {
+        format!("  [{}]", r.flags.join(" "))
+    };
     println!(
-        "Found {} email(s) in '{}' matching: {}",
-        results.len(),
-        config.folder,
-        query
+        "{}UID {} | {} | {} | {}{}{}{}",
+        indent, r.uid, date, r.subject, r.from, size, parts, flags
     );
-    for r in results {
-        let date = r.date.as_deref().unwrap_or("unknown date");
-        let size = r
-            .size
-            .map(|s| format!("  [{} bytes]", s))
-            .unwrap_or_default();
-        let flags = if r.flags.is_empty() {
-            String::new()
+}
+
+pub fn read_emails(config: &Config, spec: &str, json: bool) -> Result<()> {
+    let uids = parse_uids(spec)?;
+    let mut client = ImapClient::connect(config)?;
+
+    for (i, uid) in uids.iter().enumerate() {
+        let content = client.get_email(&config.folder, *uid)?;
+        if json {
+            emit_json(&ReadOutput {
+                folder: &config.folder,
+                uid: *uid,
+                content: &content,
+            })?;
         } else {
-            format!("  [{}]", r.flags.join(" "))
-        };
+            if uids.len() > 1 && i > 0 {
+                println!();
+            }
+            if uids.len() > 1 {
+                println!("--- UID {} ---", uid);
+            }
+            println!("{}", content);
+        }
+    }
+    Ok(())
+}
+
+pub fn mailbox_counts(config: &Config, folder: Option<&str>, json: bool) -> Result<()> {
+    let mut client = ImapClient::connect(config)?;
+    let counts = client.mailbox_counts(folder)?;
+
+    if json {
+        emit_json(&CountOutput {
+            all: folder.is_none(),
+            counts: &counts,
+        })?;
+        return Ok(());
+    }
+
+    match folder {
+        Some(f) => println!("Status for '{}':", f),
+        None => println!("Mailbox counts:"),
+    }
+    for m in &counts {
         println!(
-            "  UID {} | {} | {} | {}{}{}",
-            r.uid, date, r.subject, r.from, size, flags
+            "  {}: messages={} unseen={} recent={} uidnext={} uidvalidity={}",
+            m.name, m.messages, m.unseen, m.recent, m.uid_next, m.uid_validity
         );
     }
     Ok(())
 }
 
-pub fn read_email(config: &Config, id: u32, json: bool) -> Result<()> {
+pub fn folder_uids(config: &Config, json: bool) -> Result<()> {
     let mut client = ImapClient::connect(config)?;
-    let content = client.get_email(&config.folder, id)?;
+    let uids = client.folder_uids(&config.folder)?;
+
     if json {
-        emit_json(&ReadOutput {
+        emit_json(&UidsOutput {
             folder: &config.folder,
-            uid: id,
-            content: &content,
+            count: uids.len(),
+            uids: &uids,
         })?;
-    } else {
-        println!("{}", content);
+        return Ok(());
+    }
+
+    if uids.is_empty() {
+        println!("No messages in '{}'", config.folder);
+        return Ok(());
+    }
+    let list = uids
+        .iter()
+        .map(|u| u.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    println!("UIDs in '{}' ({}): {}", config.folder, uids.len(), list);
+    Ok(())
+}
+
+pub fn unread(config: &Config, folders: Vec<String>, json: bool) -> Result<()> {
+    search_emails(config, "UNSEEN", folders, json)
+}
+
+pub fn parts_list(config: &Config, spec: &str, json: bool) -> Result<()> {
+    let uids = parse_uids(spec)?;
+    let mut client = ImapClient::connect(config)?;
+
+    for uid in &uids {
+        let parts = client.list_parts(&config.folder, *uid)?;
+        if json {
+            emit_json(&PartsListOutput {
+                folder: &config.folder,
+                uid: *uid,
+                count: parts.len(),
+                parts: &parts,
+            })?;
+            continue;
+        }
+        if parts.is_empty() {
+            println!("UID {}: no parts", uid);
+            continue;
+        }
+        println!("UID {}: {} part(s):", uid, parts.len());
+        for a in &parts {
+            let name = match &a.filename {
+                Some(f) => format!(", filename={}", f),
+                None => String::new(),
+            };
+            println!("  [{}] {}{} ({} bytes)", a.part, a.content_type, name, a.size);
+        }
     }
     Ok(())
 }
 
-pub fn move_email(config: &Config, id: u32, folder: &str, json: bool) -> Result<()> {
+pub fn parts_save(
+    config: &Config,
+    uid: u32,
+    part: u32,
+    out: Option<PathBuf>,
+    json: bool,
+) -> Result<()> {
     let mut client = ImapClient::connect(config)?;
-    client.move_email(&config.folder, id, folder)?;
+    let parts = client.list_parts(&config.folder, uid)?;
+    let info = parts
+        .iter()
+        .find(|a| a.part == part)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no part {} in message UID {} (message has {} part(s))",
+                part,
+                uid,
+                parts.len()
+            )
+        })?;
+    let dest = out.unwrap_or_else(|| {
+        PathBuf::from(
+            info.filename
+                .as_deref()
+                .unwrap_or(&format!("uid{}_part{}", uid, part)),
+        )
+    });
+
+    let size = client.save_part(&config.folder, uid, part, &dest)?;
     if json {
-        emit_json(&MoveOutput {
+        emit_json(&PartsSaveOutput {
             folder: &config.folder,
-            uid: id,
-            to: folder,
+            uid,
+            part,
+            file: dest.to_str().unwrap_or_default(),
+            size,
         })?;
     } else {
         println!(
-            "Email (UID {}) moved from '{}' to '{}'",
-            id, config.folder, folder
+            "Saved part {} of UID {} to '{}' ({} bytes)",
+            part,
+            uid,
+            dest.display(),
+            size
         );
-    }
-    Ok(())
-}
-
-pub fn set_tags(config: &Config, id: u32, add: &[String], remove: &[String], json: bool) -> Result<()> {
-    if add.is_empty() && remove.is_empty() {
-        bail!("no tags given");
-    }
-    let mut client = ImapClient::connect(config)?;
-    client.set_tags(&config.folder, id, add, remove)?;
-    if json {
-        emit_json(&SetOutput {
-            folder: &config.folder,
-            uid: id,
-            added: add,
-            removed: remove,
-        })?;
-    } else {
-        let mut done = Vec::new();
-        if !add.is_empty() {
-            done.push(format!("added tags: {}", add.join(", ")));
-        }
-        if !remove.is_empty() {
-            done.push(format!("removed tags: {}", remove.join(", ")));
-        }
-        println!("Email (UID {}): {}", id, done.join("; "));
-    }
-    Ok(())
-}
-
-pub fn set_flags(config: &Config, id: u32, add: &[String], remove: &[String], json: bool) -> Result<()> {
-    if add.is_empty() && remove.is_empty() {
-        bail!("no flags given");
-    }
-    let mut client = ImapClient::connect(config)?;
-    client.set_flags(&config.folder, id, add, remove)?;
-    if json {
-        emit_json(&SetOutput {
-            folder: &config.folder,
-            uid: id,
-            added: add,
-            removed: remove,
-        })?;
-    } else {
-        let mut done = Vec::new();
-        if !add.is_empty() {
-            done.push(format!("added {}", add.join(", ")));
-        }
-        if !remove.is_empty() {
-            done.push(format!("removed {}", remove.join(", ")));
-        }
-        println!("Email (UID {}): {}", id, done.join("; "));
     }
     Ok(())
 }
@@ -218,17 +382,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_output_json_shape() {
+    fn parse_uids_single() {
+        assert_eq!(parse_uids("5").unwrap(), vec![5]);
+        assert_eq!(parse_uids(" 5 ").unwrap(), vec![5]);
+    }
+
+    #[test]
+    fn parse_uids_comma_list() {
+        assert_eq!(
+            parse_uids("1,4,7").unwrap(),
+            vec![1, 4, 7]
+        );
+        assert_eq!(
+            parse_uids("1, 4 ,7").unwrap(),
+            vec![1, 4, 7]
+        );
+    }
+
+    #[test]
+    fn parse_uids_deduplicates() {
+        assert_eq!(parse_uids("3,1,3,2").unwrap(), vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn parse_uids_rejects_ranges() {
+        assert!(parse_uids("4-7").is_err());
+        assert!(parse_uids("1,4-7,8").is_err());
+    }
+
+    #[test]
+    fn parse_uids_rejects_garbage() {
+        assert!(parse_uids("").is_err());
+        assert!(parse_uids(",").is_err());
+        assert!(parse_uids("1,,3").is_err());
+        assert!(parse_uids("abc").is_err());
+        assert!(parse_uids("-1").is_err());
+        assert!(parse_uids("1.5").is_err());
+    }
+
+    #[test]
+    fn search_output_json_shape_single_folder() {
         let results = vec![SearchResult {
             uid: 7,
+            folder: "INBOX".into(),
             subject: "Hi".into(),
             from: "a@example.com".into(),
             date: Some("2026-09-20 12:00:00 +0000".into()),
             size: Some(120),
             flags: vec!["\\Seen".into()],
+            parts: 2,
         }];
+        let folders = vec!["INBOX".to_string()];
         let out = SearchOutput {
-            folder: "INBOX",
+            folder: Some("INBOX"),
+            folders: None,
             query: "hi",
             count: 1,
             results: &results,
@@ -236,28 +443,95 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&serde_json::to_string(&out).unwrap())
             .expect("parse");
         assert_eq!(value["folder"], "INBOX");
+        assert!(value.get("folders").is_none());
         assert_eq!(value["query"], "hi");
         assert_eq!(value["count"], 1);
         assert_eq!(value["results"][0]["uid"], 7);
+        assert_eq!(value["results"][0]["folder"], "INBOX");
         assert_eq!(value["results"][0]["subject"], "Hi");
         assert_eq!(value["results"][0]["flags"][0], "\\Seen");
+        assert_eq!(value["results"][0]["parts"], 2);
     }
 
     #[test]
-    fn set_output_json_shape() {
-        let add = vec!["important".to_string()];
-        let remove: Vec<String> = Vec::new();
-        let out = SetOutput {
-            folder: "INBOX",
-            uid: 3,
-            added: &add,
-            removed: &remove,
+    fn search_output_json_shape_multi_folder() {
+        let results = vec![
+            SearchResult {
+                uid: 1,
+                folder: "INBOX".into(),
+                subject: "A".into(),
+                from: "a@example.com".into(),
+                date: None,
+                size: None,
+                flags: Vec::new(),
+                parts: 1,
+            },
+            SearchResult {
+                uid: 2,
+                folder: "Archive".into(),
+                subject: "B".into(),
+                from: "b@example.com".into(),
+                date: None,
+                size: None,
+                flags: Vec::new(),
+                parts: 1,
+            },
+        ];
+        let folders = vec!["INBOX".to_string(), "Archive".to_string()];
+        let out = SearchOutput {
+            folder: None,
+            folders: Some(&folders),
+            query: "ALL",
+            count: 2,
+            results: &results,
         };
         let value: serde_json::Value = serde_json::from_str(&serde_json::to_string(&out).unwrap())
             .expect("parse");
-        assert_eq!(value["uid"], 3);
-        assert_eq!(value["added"][0], "important");
-        assert!(value["removed"].is_array());
-        assert!(value["removed"].as_array().unwrap().is_empty());
+        assert!(value.get("folder").is_none());
+        assert_eq!(value["folders"][0], "INBOX");
+        assert_eq!(value["folders"][1], "Archive");
+        assert_eq!(value["results"][1]["folder"], "Archive");
+    }
+
+    #[test]
+    fn count_output_json_shape() {
+        let counts = vec![Mailbox {
+            name: "INBOX".into(),
+            messages: 5,
+            unseen: 2,
+            recent: 0,
+            uid_next: 6,
+            uid_validity: 1,
+        }];
+        let out = CountOutput {
+            all: true,
+            counts: &counts,
+        };
+        let value: serde_json::Value = serde_json::from_str(&serde_json::to_string(&out).unwrap())
+            .expect("parse");
+        assert_eq!(value["all"], true);
+        assert_eq!(value["counts"][0]["name"], "INBOX");
+        assert_eq!(value["counts"][0]["unseen"], 2);
+    }
+
+    #[test]
+    fn parts_output_json_shape() {
+        let parts = vec![PartInfo {
+            part: 2,
+            content_type: "application/pdf".into(),
+            filename: Some("invoice-42.pdf".into()),
+            size: 51200,
+        }];
+        let out = PartsListOutput {
+            folder: "INBOX",
+            uid: 5,
+            count: 1,
+            parts: &parts,
+        };
+        let value: serde_json::Value = serde_json::from_str(&serde_json::to_string(&out).unwrap())
+            .expect("parse");
+        assert_eq!(value["uid"], 5);
+        assert_eq!(value["parts"][0]["part"], 2);
+        assert_eq!(value["parts"][0]["filename"], "invoice-42.pdf");
     }
 }

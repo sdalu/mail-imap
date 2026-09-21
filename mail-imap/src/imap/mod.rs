@@ -1,5 +1,9 @@
 //! IMAP access layer.
 //!
+//! This is a **read-only** tool: it never moves, deletes, or modifies
+//! messages, tags, or flags on the server. Reads use `BODY.PEEK[]` so even
+//! fetching a message does not set `\Seen`.
+//!
 //! Operations are exposed through the [`ImapBackend`] trait. Two backends exist:
 //!
 //! * [`real::RealClient`] — talks to a real IMAP server over TCP/TLS using the
@@ -9,6 +13,7 @@
 //!
 //! Which backend is used is chosen by `Config::mock` (and the `--mock` flag).
 
+mod mime;
 mod mock;
 mod real;
 
@@ -16,38 +21,8 @@ pub use mock::MockClient;
 pub use real::RealClient;
 
 use crate::config::Config;
-use anyhow::{bail, Result};
-
-/// Standard flags the `flags` command may add or remove.
-pub const SUPPORTED_FLAGS: [&str; 3] = ["seen", "answered", "flagged"];
-
-/// Standard flags this tool explicitly refuses to change.
-pub const UNSUPPORTED_FLAGS: [&str; 3] = ["deleted", "draft", "recent"];
-
-/// Normalize user-supplied flag names (`seen`, `\Seen`, `SEEN`) to their
-/// canonical IMAP form (`\Seen`), rejecting anything the tool does not
-/// support.
-pub fn normalize_flags(names: &[String]) -> Result<Vec<String>> {
-    names.iter().map(|n| normalize_flag(n)).collect()
-}
-
-fn normalize_flag(name: &str) -> Result<String> {
-    let canon = name.trim().trim_start_matches('\\').to_ascii_lowercase();
-    if SUPPORTED_FLAGS.contains(&canon.as_str()) {
-        return Ok(format!("\\{}", canon));
-    }
-    if UNSUPPORTED_FLAGS.contains(&canon.as_str()) {
-        bail!(
-            "flag '{}' is explicitly not supported by this tool \
-             (supported: seen, answered, flagged)",
-            name
-        );
-    }
-    bail!(
-        "unknown flag '{}': supported flags are seen, answered, flagged",
-        name
-    )
-}
+use anyhow::Result;
+use std::path::Path;
 
 /// A single mailbox as reported by `LIST`.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -62,27 +37,71 @@ pub struct FolderInfo {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     pub uid: u32,
+    /// The mailbox the message was found in.
+    pub folder: String,
     pub subject: String,
     pub from: String,
     pub date: Option<String>,
     pub size: Option<u32>,
     pub flags: Vec<String>,
+    /// Number of MIME leaf parts of the message (0 when unknown).
+    pub parts: u32,
 }
 
-/// The operations the CLI needs from an IMAP account.
+/// Per-mailbox counters as reported by `STATUS`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Mailbox {
+    pub name: String,
+    pub messages: u32,
+    pub unseen: u32,
+    pub recent: u32,
+    pub uid_next: u32,
+    pub uid_validity: u32,
+}
+
+/// A single MIME part of a message, numbered in document order (1-based)
+/// across all leaf parts of the message.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PartInfo {
+    pub part: u32,
+    pub content_type: String,
+    pub filename: Option<String>,
+    /// Decoded size in bytes.
+    pub size: u64,
+}
+
+/// The operations the CLI needs from an IMAP account. All operations are
+/// read-only.
 pub trait ImapBackend {
     fn list_folders(&mut self) -> Result<Vec<FolderInfo>>;
-    fn search_emails(&mut self, folder: &str, query: &str) -> Result<Vec<SearchResult>>;
+    /// Run `query` against each of `folders` in order (IMAP can only search
+    /// one selected mailbox at a time, so this is iteration + aggregation).
+    /// Results are grouped per folder, most-recent first within each folder,
+    /// and the total result count is capped by `max_results` (0 = unlimited).
+    /// Each result's `folder` names the mailbox it came from.
+    fn search_folders(
+        &mut self,
+        folders: &[String],
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>>;
     fn get_email(&mut self, folder: &str, uid: u32) -> Result<String>;
-    fn move_email(&mut self, folder: &str, uid: u32, target: &str) -> Result<()>;
-    /// Add and/or remove keyword tags (user-defined flags) on a message.
-    /// Tags are arbitrary and are not validated.
-    fn set_tags(&mut self, folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()>;
-    /// Add and/or remove standard flags (`\Seen`, `\Answered`, `\Flagged`) on
-    /// a message. Names may carry a leading backslash and any case; flags
-    /// outside the supported set (notably `\Deleted`, `\Draft`, `\Recent`)
-    /// are rejected.
-    fn set_flags(&mut self, folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()>;
+    /// Per-mailbox counters via `STATUS`. `folder = None` means all
+    /// selectable mailboxes of the account.
+    fn mailbox_counts(&mut self, folder: Option<&str>) -> Result<Vec<Mailbox>>;
+    /// All message UIDs of a folder.
+    fn folder_uids(&mut self, folder: &str) -> Result<Vec<u32>>;
+    /// The MIME parts of one message (document order, 1-based part numbers).
+    fn list_parts(&mut self, folder: &str, uid: u32) -> Result<Vec<PartInfo>>;
+    /// Decode MIME part `part` of message `uid` and write it to `dest`.
+    /// Returns the number of bytes written.
+    fn save_part(
+        &mut self,
+        folder: &str,
+        uid: u32,
+        part: u32,
+        dest: &Path,
+    ) -> Result<u64>;
     fn close(&mut self);
 }
 
@@ -110,10 +129,15 @@ impl ImapBackend for ImapClient {
             ImapClient::Mock(c) => c.list_folders(),
         }
     }
-    fn search_emails(&mut self, folder: &str, query: &str) -> Result<Vec<SearchResult>> {
+    fn search_folders(
+        &mut self,
+        folders: &[String],
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>> {
         match self {
-            ImapClient::Real(c) => c.search_emails(folder, query),
-            ImapClient::Mock(c) => c.search_emails(folder, query),
+            ImapClient::Real(c) => c.search_folders(folders, query, max_results),
+            ImapClient::Mock(c) => c.search_folders(folders, query, max_results),
         }
     }
     fn get_email(&mut self, folder: &str, uid: u32) -> Result<String> {
@@ -122,22 +146,34 @@ impl ImapBackend for ImapClient {
             ImapClient::Mock(c) => c.get_email(folder, uid),
         }
     }
-    fn move_email(&mut self, folder: &str, uid: u32, target: &str) -> Result<()> {
+    fn mailbox_counts(&mut self, folder: Option<&str>) -> Result<Vec<Mailbox>> {
         match self {
-            ImapClient::Real(c) => c.move_email(folder, uid, target),
-            ImapClient::Mock(c) => c.move_email(folder, uid, target),
+            ImapClient::Real(c) => c.mailbox_counts(folder),
+            ImapClient::Mock(c) => c.mailbox_counts(folder),
         }
     }
-    fn set_tags(&mut self, folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
+    fn folder_uids(&mut self, folder: &str) -> Result<Vec<u32>> {
         match self {
-            ImapClient::Real(c) => c.set_tags(folder, uid, add, remove),
-            ImapClient::Mock(c) => c.set_tags(folder, uid, add, remove),
+            ImapClient::Real(c) => c.folder_uids(folder),
+            ImapClient::Mock(c) => c.folder_uids(folder),
         }
     }
-    fn set_flags(&mut self, folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
+    fn list_parts(&mut self, folder: &str, uid: u32) -> Result<Vec<PartInfo>> {
         match self {
-            ImapClient::Real(c) => c.set_flags(folder, uid, add, remove),
-            ImapClient::Mock(c) => c.set_flags(folder, uid, add, remove),
+            ImapClient::Real(c) => c.list_parts(folder, uid),
+            ImapClient::Mock(c) => c.list_parts(folder, uid),
+        }
+    }
+    fn save_part(
+        &mut self,
+        folder: &str,
+        uid: u32,
+        part: u32,
+        dest: &Path,
+    ) -> Result<u64> {
+        match self {
+            ImapClient::Real(c) => c.save_part(folder, uid, part, dest),
+            ImapClient::Mock(c) => c.save_part(folder, uid, part, dest),
         }
     }
     fn close(&mut self) {

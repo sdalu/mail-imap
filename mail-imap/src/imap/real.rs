@@ -1,11 +1,13 @@
 use crate::config::Config;
-use crate::imap::{normalize_flags, FolderInfo, ImapBackend, SearchResult};
+use crate::imap::mime;
+use crate::imap::{PartInfo, FolderInfo, ImapBackend, Mailbox, SearchResult};
 use anyhow::{bail, Context, Result};
-use imap::types::{NameAttribute, Uid};
+use imap::types::NameAttribute;
 use imap::Session;
 use native_tls::TlsConnector;
 use std::collections::BTreeSet;
 use std::net::{TcpStream, ToSocketAddrs};
+use std::path::Path;
 use std::time::Duration;
 
 type TlsSession = Session<native_tls::TlsStream<TcpStream>>;
@@ -31,7 +33,10 @@ macro_rules! with_backend {
 
 pub struct RealClient {
     backend: Backend,
-    max: usize,
+    /// Guards against double logout: `ImapClient`'s Drop and `RealClient`'s
+    /// own Drop both call `close()`, and a second `LOGOUT` on the
+    /// server-closed connection would fail with `ConnectionLost`.
+    closed: bool,
 }
 
 impl RealClient {
@@ -67,31 +72,113 @@ impl RealClient {
 
         Ok(RealClient {
             backend,
-            max: config.max,
+            closed: false,
         })
     }
 
-    /// `UID STORE` one or more `+FLAGS`/`-FLAGS` updates on a message.
-    fn store_flags(
-        &mut self,
-        folder: &str,
-        uid: u32,
-        add: &[String],
-        remove: &[String],
-    ) -> Result<()> {
+    /// Fetch the raw RFC822 bytes of a message without setting `\Seen`
+    /// (`BODY.PEEK[]`).
+    fn fetch_raw(&mut self, folder: &str, uid: u32) -> Result<Vec<u8>> {
         with_backend!(&mut self.backend, |s| {
             s.select(folder)?;
-            if !add.is_empty() {
-                let flags: Vec<String> = add.iter().map(|f| imap_quote(f)).collect();
-                let cmd = format!(r"+FLAGS ({})", flags.join(" "));
-                s.uid_store(uid.to_string(), &cmd)?;
+            let fetches = s
+                .uid_fetch(uid.to_string(), "(UID BODY.PEEK[RFC822])")
+                .with_context(|| format!("UID FETCH of UID {} in '{}'", uid, folder))?;
+            let data = fetches.iter().find_map(|f| f.body().map(|b| b.to_vec()));
+            match data {
+                Some(d) => Ok(d),
+                None => Err(anyhow::anyhow!(
+                    "no email with UID {} in folder '{}'",
+                    uid,
+                    folder
+                )),
             }
-            if !remove.is_empty() {
-                let flags: Vec<String> = remove.iter().map(|f| imap_quote(f)).collect();
-                let cmd = format!(r"-FLAGS ({})", flags.join(" "));
-                s.uid_store(uid.to_string(), &cmd)?;
+        })
+    }
+
+    /// Search one selected mailbox: `UID SEARCH`, then a batched fetch of
+    /// the metadata for the most-recent UIDs, capped at `cap`.
+    fn search_in_folder(
+        &mut self,
+        folder: &str,
+        query: &str,
+        cap: usize,
+    ) -> Result<Vec<SearchResult>> {
+        with_backend!(&mut self.backend, |s| {
+            s.select(folder)?;
+            let mut uids: Vec<u32> = s
+                .uid_search(query)?
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if uids.is_empty() {
+                return Ok(Vec::new());
             }
-            Ok(())
+
+            // Show most-recent first (UIDs increase over time) and cap the count.
+            uids.reverse();
+            if cap > 0 {
+                uids.truncate(cap);
+            }
+
+            let mut results: Vec<SearchResult> = Vec::new();
+            const BATCH: usize = 25;
+            for chunk in uids.chunks(BATCH) {
+                let set: Vec<String> = chunk.iter().map(|u| u.to_string()).collect();
+                let list = set.join(",");
+                // BODYSTRUCTURE gives the MIME tree without transferring any
+                // content, so the part count is cheap to fetch in a batch.
+                // Some servers emit body structures this crate cannot parse,
+                // which would abort the whole batch; in that case retry the
+                // batch without it so the search still works (the affected
+                // messages simply report 0 parts).
+                let fetches = match s
+                    .uid_fetch(
+                        &list,
+                        "(UID ENVELOPE FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE)",
+                    ) {
+                    Ok(f) => f,
+                    Err(imap::Error::Parse(_)) => s.uid_fetch(
+                        &list,
+                        "(UID ENVELOPE FLAGS INTERNALDATE RFC822.SIZE)",
+                    )?,
+                    Err(e) => return Err(e.into()),
+                };
+                for f in fetches.iter() {
+                    let env = f.envelope();
+                    let subject = env
+                        .and_then(|e| e.subject)
+                        .map(bytes_to_string)
+                        .map(decode_rfc2047)
+                        .unwrap_or_else(|| "(no subject)".to_string());
+                    let from = env
+                        .and_then(|e| e.from.as_ref())
+                        .and_then(|addrs| addrs.first())
+                        .map(format_address)
+                        .unwrap_or_else(|| "(unknown)".to_string());
+                    let date = f
+                        .internal_date()
+                        .map(|d| d.format("%Y-%m-%d %H:%M:%S %z").to_string());
+                    let flags: Vec<String> = f
+                        .flags()
+                        .iter()
+                        .filter(|fl| !matches!(fl, imap::types::Flag::Recent))
+                        .map(|fl| fl.to_string())
+                        .collect();
+                    results.push(SearchResult {
+                        uid: f.uid.unwrap_or(0),
+                        folder: folder.to_string(),
+                        subject,
+                        from,
+                        date,
+                        size: f.size,
+                        flags,
+                        parts: f.bodystructure().map(count_leaf_parts).unwrap_or(0),
+                    });
+                }
+            }
+            Ok(results)
         })
     }
 }
@@ -122,72 +209,35 @@ impl ImapBackend for RealClient {
         })
     }
 
-    fn search_emails(&mut self, folder: &str, query: &str) -> Result<Vec<SearchResult>> {
-        with_backend!(&mut self.backend, |s| {
-            s.select(folder)?;
-            let mut uids: Vec<Uid> = s
-                .uid_search(query)?
-                .into_iter()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            if uids.is_empty() {
-                return Ok(Vec::new());
+    fn search_folders(
+        &mut self,
+        folders: &[String],
+        query: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>> {
+        let mut out: Vec<SearchResult> = Vec::new();
+        for folder in folders {
+            if max_results > 0 && out.len() >= max_results {
+                break;
             }
-
-            // Show most-recent first (UIDs increase over time) and cap the count.
-            uids.reverse();
-            if self.max > 0 {
-                uids.truncate(self.max);
-            }
-
-            let mut results: Vec<SearchResult> = Vec::new();
-            const BATCH: usize = 25;
-            for chunk in uids.chunks(BATCH) {
-                let set: Vec<String> = chunk.iter().map(|u| u.to_string()).collect();
-                let list = set.join(",");
-                let fetches =
-                    s.uid_fetch(&list, "(UID ENVELOPE FLAGS INTERNALDATE RFC822.SIZE)")?;
-                for f in fetches.iter() {
-                    let env = f.envelope();
-                    let subject = env
-                        .and_then(|e| e.subject)
-                        .map(bytes_to_string)
-                        .map(decode_rfc2047)
-                        .unwrap_or_else(|| "(no subject)".to_string());
-                    let from = env
-                        .and_then(|e| e.from.as_ref())
-                        .and_then(|addrs| addrs.first())
-                        .map(format_address)
-                        .unwrap_or_else(|| "(unknown)".to_string());
-                    let date = f
-                        .internal_date()
-                        .map(|d| d.format("%Y-%m-%d %H:%M:%S %z").to_string());
-                    let flags: Vec<String> = f
-                        .flags()
-                        .iter()
-                        .filter(|fl| !matches!(fl, imap::types::Flag::Recent))
-                        .map(|fl| fl.to_string())
-                        .collect();
-                    results.push(SearchResult {
-                        uid: f.uid.unwrap_or(0),
-                        subject,
-                        from,
-                        date,
-                        size: f.size,
-                        flags,
-                    });
-                }
-            }
-            Ok(results)
-        })
+            let cap = if max_results > 0 {
+                max_results - out.len()
+            } else {
+                usize::MAX
+            };
+            out.extend(self.search_in_folder(folder, query, cap)?);
+        }
+        Ok(out)
     }
 
     fn get_email(&mut self, folder: &str, uid: u32) -> Result<String> {
         with_backend!(&mut self.backend, |s| {
             s.select(folder)?;
-            let fetches =
-                s.uid_fetch(uid.to_string(), "(UID ENVELOPE FLAGS INTERNALDATE RFC822)")?;
+            // BODY.PEEK[] keeps the server from setting \Seen on the message.
+            let fetches = s.uid_fetch(
+                uid.to_string(),
+                "(UID ENVELOPE FLAGS INTERNALDATE BODY.PEEK[RFC822])",
+            )?;
             let fetches: Vec<&imap::types::Fetch> = fetches.iter().collect();
             if fetches.is_empty() {
                 bail!("no email with UID {} in folder '{}'", uid, folder);
@@ -230,42 +280,108 @@ impl ImapBackend for RealClient {
         })
     }
 
-    fn move_email(&mut self, folder: &str, uid: u32, target: &str) -> Result<()> {
+    fn mailbox_counts(&mut self, folder: Option<&str>) -> Result<Vec<Mailbox>> {
         with_backend!(&mut self.backend, |s| {
-            s.select(folder)?;
-            if s.capabilities()?.has_str("MOVE") {
-                s.uid_mv(uid.to_string(), target)?;
-            } else {
-                s.uid_copy(uid.to_string(), target)?;
-                s.uid_store(uid.to_string(), r"+FLAGS (\Deleted)")?;
-                s.expunge()?;
+            let names: Vec<String> = match folder {
+                Some(f) => vec![f.to_string()],
+                None => s
+                    .list(None, Some("*"))?
+                    .into_iter()
+                    .filter(|n| !n.attributes().contains(&NameAttribute::NoSelect))
+                    .map(|n| n.name().to_string())
+                    .collect(),
+            };
+            let mut out = Vec::new();
+            for name in names {
+                let m = s
+                    .status(&name, "(MESSAGES UNSEEN RECENT UIDNEXT UIDVALIDITY)")
+                    .with_context(|| format!("STATUS for mailbox '{}'", name))?;
+                out.push(Mailbox {
+                    name,
+                    messages: m.exists,
+                    unseen: m.unseen.unwrap_or(0),
+                    recent: m.recent,
+                    uid_next: m.uid_next.unwrap_or(0),
+                    uid_validity: m.uid_validity.unwrap_or(0),
+                });
             }
-            Ok(())
+            Ok(out)
         })
     }
 
-    fn set_tags(&mut self, folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
-        if add.is_empty() && remove.is_empty() {
-            bail!("no tags given");
-        }
-        self.store_flags(folder, uid, add, remove)
+    fn folder_uids(&mut self, folder: &str) -> Result<Vec<u32>> {
+        with_backend!(&mut self.backend, |s| {
+            s.select(folder)?;
+            // `ALL` is the standard key for "every message in the mailbox".
+            let uids: Vec<u32> = s.uid_search("ALL")?.into_iter().collect();
+            Ok(uids)
+        })
     }
 
-    fn set_flags(&mut self, folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
-        let add = normalize_flags(add)?;
-        let remove = normalize_flags(remove)?;
-        if add.is_empty() && remove.is_empty() {
-            bail!("no flags given");
-        }
-        self.store_flags(folder, uid, &add, &remove)
+    fn list_parts(&mut self, folder: &str, uid: u32) -> Result<Vec<PartInfo>> {
+        let raw = self.fetch_raw(folder, uid)?;
+        let root = mime::parse_message(&raw)
+            .with_context(|| format!("parsing MIME structure of UID {}", uid))?;
+        root.leaves()
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                Ok(PartInfo {
+                    part: (i + 1) as u32,
+                    content_type: p.content_type.clone(),
+                    filename: p.filename.clone(),
+                    size: p.decoded()?.len() as u64,
+                })
+            })
+            .collect()
+    }
+
+    fn save_part(
+        &mut self,
+        folder: &str,
+        uid: u32,
+        part: u32,
+        dest: &Path,
+    ) -> Result<u64> {
+        let raw = self.fetch_raw(folder, uid)?;
+        let root = mime::parse_message(&raw)
+            .with_context(|| format!("parsing MIME structure of UID {}", uid))?;
+        let leaves = root.leaves();
+        let idx = match part.checked_sub(1) {
+            Some(i) => i as usize,
+            None => bail!("part number must be >= 1 (got {})", part),
+        };
+        let leaf = leaves.get(idx).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no part {} in message UID {} (message has {} part(s))",
+                part,
+                uid,
+                leaves.len()
+            )
+        })?;
+        let data = leaf.decoded()?;
+        std::fs::write(dest, &data)
+            .with_context(|| format!("writing part to {}", dest.display()))?;
+        Ok(data.len() as u64)
     }
 
     fn close(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.closed = true;
         let result = match &mut self.backend {
             Backend::Tls(s) => s.logout(),
             Backend::Plain(s) => s.logout(),
         };
         if let Err(e) = result {
+            // The connection was already gone (server closed it, network
+            // drop): there is nothing left to log out, and any real command
+            // failure has already been reported. Only server-side
+            // rejections (BAD/NO) are worth a warning.
+            if matches!(e, imap::Error::ConnectionLost) {
+                return;
+            }
             eprintln!("warning: IMAP logout failed: {}", e);
         }
     }
@@ -289,8 +405,16 @@ where
         .with_context(|| format!("login as '{}' failed (check credentials / server)", config.username))
 }
 
-fn imap_quote(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+/// Count the leaf MIME parts of a server-reported body structure.
+/// `message/rfc822` and all non-multipart parts count as a single part,
+/// consistent with the local MIME parser used by `parts list`.
+fn count_leaf_parts(bs: &imap_proto::types::BodyStructure) -> u32 {
+    match bs {
+        imap_proto::types::BodyStructure::Multipart { bodies, .. } => {
+            bodies.iter().map(count_leaf_parts).sum()
+        }
+        _ => 1,
+    }
 }
 
 fn bytes_to_string(b: &[u8]) -> String {

@@ -1,7 +1,11 @@
 # mail-imap - IMAP Email Client
 
-A command-line tool for querying, reading, moving and tagging emails via the
-IMAP protocol. Designed for programmatic / AI use.
+A command-line tool for querying and reading emails via the IMAP protocol.
+Designed for programmatic / AI use.
+
+It is **read-only**: it never moves, deletes, tags, or otherwise modifies
+mail on the server. Reads use `BODY.PEEK[]` even, so fetching a message does
+not mark it `\Seen`.
 
 It connects to a **real IMAP server** using the `imap` crate (over implicit TLS
 on port 993, STARTTLS, or plain TCP). An **in-memory mock backend** is kept so
@@ -10,11 +14,12 @@ the tool can be built, demoed and unit-tested without a reachable server.
 ## Features
 
 - List mailboxes/folders
-- Search emails (pass any IMAP `SEARCH` query)
-- Read a full email by UID
-- Move an email to another folder
-- Add or remove keyword tags on an email
-- Add or remove standard flags (`\Seen`, `\Answered`, `\Flagged`)
+- Search emails in one or more folders (pass any IMAP `SEARCH` query)
+- Read email(s) by UID selection (comma-separated list, no ranges)
+- Show message counts / status of mailboxes (IMAP `STATUS`)
+- List the message UIDs of a folder
+- List unread emails of a folder
+- List the MIME parts of an email, and save one part to a file
 - JSON output mode (`-j`) for programmatic use
 - Configuration via JSON file
 - RFC 2047 subject decoding (UTF-8, Latin-1, B & Q encodings)
@@ -29,20 +34,41 @@ mail-imap --config incal.conf folders
 # "SINCE 01-Jan-2026", or any combination of terms)
 mail-imap --config incal.conf search "SINCE 01-Jan-2026"
 
-# Read an email by UID (default folder from config, or -f)
+# Search across several folders (IMAP can only search the selected mailbox,
+# so the tool iterates over the folders and aggregates; the -M/--max cap
+# applies to the total):
+mail-imap --config incal.conf search UNSEEN INBOX "Sent Items" Archive
+mail-imap --config incal.conf search UNSEEN "INBOX,Sent Items"  # comma form
+
+# List every email in the folder: the query "ALL" matches all messages.
+# Results are capped by --max / "max" in the config (default 50; 0 =
+# unlimited). Just the UIDs of all messages: use `ids` instead.
+mail-imap --config incal.conf -f INBOX search ALL
+mail-imap --config incal.conf -f INBOX -M 200 search ALL   # raise the cap for this run
+
+# Read an email by UID (default folder from config, or -f).
+# UID selection is a comma-separated list; ranges like "1-5" are not supported.
 mail-imap --config incal.conf -f INBOX read 12345
+mail-imap --config incal.conf -f INBOX read 12345,67890
 
-# Move an email by UID to another folder
-mail-imap --config incal.conf -f INBOX move 12345 Archive
+# Message counts / status (all mailboxes, or one)
+mail-imap --config incal.conf count
+mail-imap --config incal.conf count INBOX
+mail-imap --config incal.conf status INBOX   # "status" is an alias of "count"
 
-# Add / remove keyword tags on an email by UID
-mail-imap --config incal.conf -f INBOX tag 12345 add important reviewed
-mail-imap --config incal.conf -f INBOX tag 12345 remove reviewed
+# List the message UIDs of the folder
+mail-imap --config incal.conf -f INBOX ids
 
-# Add / remove standard flags by UID (seen, answered, flagged)
-mail-imap --config incal.conf -f INBOX flags 12345 add seen answered
-mail-imap --config incal.conf -f INBOX flags 12345 remove flagged
-# \Deleted, \Draft and \Recent are explicitly not supported
+# List unread emails of the folder (or several: unread INBOX Archive)
+mail-imap --config incal.conf -f INBOX unread
+
+# List the MIME parts of one or more emails
+mail-imap --config incal.conf -f INBOX parts list 12345
+mail-imap --config incal.conf -f INBOX parts list 12345,67890
+
+# Save one part to a file (default: the part's filename, else
+# uid<N>_part<M>, in the current directory; -o to choose a path)
+mail-imap --config incal.conf -f INBOX parts save 12345 2 -o /tmp/invoice.pdf
 
 # JSON output (machine-readable: one compact JSON object on stdout)
 mail-imap --config incal.conf -j -f INBOX search "SINCE 01-Jan-2026"
@@ -59,10 +85,13 @@ Each command prints one compact JSON object to stdout:
 | Command | Shape |
 |---------|-------|
 | `folders` | `{"count", "folders": [...]}` |
-| `search` | `{"folder", "query", "count", "results": [...]}` |
-| `read` | `{"folder", "uid", "content"}` |
-| `move` | `{"folder", "uid", "to"}` |
-| `tag` / `flags` | `{"folder", "uid", "added", "removed"}` |
+| `search` | one folder: `{"folder", "query", "count", "results": [...]}`; several folders: `{"folders": [...], "query", "count", "results": [...]}`. Each result includes `"folder"` (its mailbox) and `"parts"` (number of MIME parts) |
+| `read` | one `{"folder", "uid", "content"}` object per selected UID |
+| `count` / `status` | `{"all", "counts": [{"name", "messages", "unseen", "recent", "uid_next", "uid_validity"}]}` |
+| `ids` | `{"folder", "count", "uids": [1, 2, ...]}` |
+| `unread` | same shape as `search` (query fixed to `UNSEEN`, folder(s) + part counts included) |
+| `parts list` | one `{"folder", "uid", "count", "parts": [{"part", "content_type", "filename", "size"}]}` per selected UID |
+| `parts save` | `{"folder", "uid", "part", "file", "size"}` |
 
 Errors are printed as `{"error": "..."}` on stderr with a non-zero exit code.
 
@@ -74,6 +103,7 @@ Errors are printed as `{"error": "..."}` on stderr with a non-zero exit code.
 | `-f, --folder <NAME>` | Folder for commands that need one (default: `folder` from config / `INBOX`) |
 | `--mock` | Use the in-memory mock backend instead of a real server |
 | `-j, --json` | Output results as compact single-line JSON (errors as `{"error": ...}` on stderr) |
+| `-M, --max <N>` | Cap search results for this run, overriding `max` from the config (`0` = unlimited) |
 
 ## Configuration
 
@@ -105,7 +135,7 @@ have defaults.
 | `starttls` | `false` | Upgrade a plain connection with STARTTLS (typical for port 143). Used when `ssl` is `false`. |
 | `insecure` | `false` | Accept invalid TLS certificates (self-signed local servers) |
 | `folder` | `INBOX` | Default folder for commands that need one |
-| `max` | `50` | Max search results to fetch (`0` = unlimited) |
+| `max` | `50` | Max search results to fetch (`0` = unlimited); overridden by `-M/--max` on the command line |
 | `mock` | `false` | Use the in-memory mock backend |
 
 ## Testing
@@ -115,8 +145,9 @@ have defaults.
 cargo test
 ```
 
-The tests cover the mock backend end-to-end (list / search / read / move / tag / flags),
-backend selection, the RFC 2047 decoder, and that the real backend fails cleanly
+The tests cover the mock backend end-to-end (list / search / read / count /
+ids / unread / parts), UID-selection parsing, the MIME parser, backend
+selection, the RFC 2047 decoder, and that the real backend fails cleanly
 rather than fabricating data when no server is reachable.
 
 ## Architecture
@@ -125,11 +156,12 @@ rather than fabricating data when no server is reachable.
 src/
   main.rs          CLI entry (clap)
   config/mod.rs    JSON config loading
-  cli/mod.rs       command handlers / output formatting
+  cli/mod.rs       command handlers / output formatting, UID selection parser
   imap/
     mod.rs         ImapBackend trait, shared types, backend selection
     real.rs        RealClient  — talks to a real IMAP server (imap crate)
     mock.rs        MockClient  — in-memory mock (original mockup), used by tests
+    mime.rs        minimal MIME parser (parts, boundary, CTE decoding)
 ```
 
 See `IMPLEMENTATION.md` for details.

@@ -39,25 +39,59 @@ operation body can be shared by a `with_backend!` macro.
 | CLI command | IMAP commands used |
 |-------------|--------------------|
 | `folders` | `LIST "" *` (non-`\Noselect` names) |
-| `search` | `SELECT` + `UID SEARCH <query>` + batched `UID FETCH` (envelope/flags/date/size) |
-| `read` | `SELECT` + `UID FETCH <uid> (UID ENVELOPE FLAGS INTERNALDATE RFC822)` |
-| `move` | `SELECT` + (`UID MOVE` if `MOVE` capability, else `UID COPY` + `UID STORE \Deleted` + `EXPUNGE`) |
-| `tag add` | `SELECT` + `UID STORE <uid> +FLAGS (tag1 tag2 ...)` |
-| `tag remove` | `SELECT` + `UID STORE <uid> -FLAGS (tag1 ...)` |
-| `flags add` | `SELECT` + `UID STORE <uid> +FLAGS (\Seen \Answered ...)` |
-| `flags remove` | `SELECT` + `UID STORE <uid> -FLAGS (\Flagged ...)` |
+| `search` / `unread` | per folder: `SELECT` + `UID SEARCH <query>` + batched `UID FETCH` (envelope/flags/date/size/`BODYSTRUCTURE`); folders are searched in order and the results aggregated |
+| `read` | `SELECT` + `UID FETCH <uid> (UID ENVELOPE FLAGS INTERNALDATE BODY.PEEK[RFC822])` |
+| `count` / `status` | `LIST "" *` + `STATUS <folder> (MESSAGES UNSEEN RECENT UIDNEXT UIDVALIDITY)` per mailbox (or one folder when given) |
+| `ids` | `SELECT` + `UID SEARCH *` |
+| `unread` | `SELECT` + `UID SEARCH UNSEEN` + batched `UID FETCH` (same path as `search`) |
+| `parts list` | `SELECT` + `UID FETCH <uid> (UID BODY.PEEK[RFC822])`, then MIME part enumeration locally |
+| `parts save` | same fetch, then the selected part is CTE-decoded and written to a file |
 
-Search results are shown most-recent-first and capped by `Config::max` (default
-50) to keep large mailboxes fast.
+IMAP can only search the selected mailbox, so `search`/`unread` iterate over
+the requested folders (positional args, comma-separated or repeated; default
+the `-f`/config folder) on one connection. Results are grouped per folder,
+most-recent first within each folder, and the total result count is capped
+by `Config::max` (default 50; overridable per run with `-M/--max`,
+`0` = unlimited). Each result carries the `folder` it came from; the JSON
+output uses `"folder"` for a single folder and `"folders"` for several.
 
-### Flag validation
+### Part counts in search results
 
-The `flags` command only accepts the standard flags `\Seen`, `\Answered` and
-`\Flagged` (given case-insensitively, with or without the leading backslash).
-`\Deleted`, `\Draft` and `\Recent` are explicitly not supported and rejected
-with a dedicated error, as are any other names. Normalization happens in
-`normalize_flags` (`src/imap/mod.rs`) and is applied by both backends, so the
-restriction holds regardless of which backend is active.
+Each search hit reports `parts`, the number of leaf MIME parts. It comes from
+the `BODYSTRUCTURE` fetch item added to the same batched fetch: the server
+returns the MIME tree without transferring any content, and
+`count_leaf_parts` (`src/imap/real.rs`) sums the leaf nodes (multipart
+containers recurse; `message/rfc822` and single parts count as one, matching
+the local parser used by `parts list`). `unread` reuses this path, so it
+includes part counts too.
+
+The part count is best-effort: if a batch's `BODYSTRUCTURE` response is not
+parseable by the `imap` crate (some servers emit structures the parser does
+not handle), that batch is refetched without `BODYSTRUCTURE` and the affected
+messages report `0` parts — the search itself is never broken by it.
+
+### Read-only behaviour
+
+No operation sends a command that mutates the mailbox: there is no `MOVE`,
+`COPY`, `STORE`, or `EXPUNGE` anywhere. Message bodies are fetched with
+`BODY.PEEK[RFC822]`, so even `read` and `parts` do not make the server set
+`\Seen`.
+
+### UID selection
+
+Commands that take messages (`read`, `parts list`) accept a UID selection:
+a single UID or a comma-separated list (`1,4,7`). Ranges (`1-7`) are rejected
+by `parse_uids` (`src/cli/mod.rs`) with a dedicated error. The list is
+deduplicated, input order is preserved, and each UID is fetched individually.
+
+### MIME parsing (`mime.rs`)
+
+`parts` works on the raw RFC822 bytes: headers are unfolded and parsed
+(`Content-Type`, `Content-Disposition`, `Content-Transfer-Encoding`),
+`multipart/*` bodies are split on their boundary lines (preamble and epilogue
+discarded), and leaf parts are numbered in document order (1-based). Part
+bytes are decoded per CTE: base64 (whitespace-tolerant, padding restored),
+quoted-printable (hex escapes + soft line breaks), or raw for 7bit/8bit/binary.
 
 ### RFC 2047 subject decoding
 ENVELOPE subjects may be encoded-words (e.g. `=?utf-8?Q?Votre=20facture?=`).
@@ -68,14 +102,19 @@ base64). Plain text is left untouched.
 ## Mock backend (`mock.rs`)
 
 The original mockup, preserved. Returns a fixed set of folders and five sample
-messages so every operation can be exercised offline. It is what the unit
-tests drive.
+messages so every operation can be exercised offline. Two messages carry
+extra part metadata (UID 3: spreadsheet, UID 5: PDF); `parts save` writes a
+deterministic placeholder file whose size matches the part reported by
+`parts list`. It is what the unit tests drive.
 
 ## Testing
 
 `cargo test` runs entirely against the mock backend (no network). Coverage:
 - backend selection (`mock` vs `real`)
-- list / search / read / move / tag / flags happy + error paths
+- list / search / read / count / ids / unread / parts happy + error paths
+- UID selection parsing (comma lists, dedup, range rejection, invalid input)
+- MIME parser (plain, multipart, nested multipart, base64 / quoted-printable /
+  binary decoding, missing boundary)
 - RFC 2047 decoder (plain, Q, Q-with-underscore, B, Latin-1, mixed text)
 - the real backend returns an error (no fabricated data) when unreachable
 
@@ -96,14 +135,24 @@ prints a single compact JSON object to stdout instead; errors become
 |---------|-------|
 | `folders` | `{"count", "folders": [FolderInfo]}` |
 | `search` | `{"folder", "query", "count", "results": [SearchResult]}` |
-| `read` | `{"folder", "uid", "content"}` |
-| `move` | `{"folder", "uid", "to"}` |
-| `tag` / `flags` | `{"folder", "uid", "added", "removed"}` |
+| `read` | one `{"folder", "uid", "content"}` per selected UID |
+| `count` / `status` | `{"all", "counts": [Mailbox]}` |
+| `ids` | `{"folder", "count", "uids": [u32]}` |
+| `unread` | same as `search` (query `UNSEEN`) |
+| `parts list` | one `{"folder", "uid", "count", "parts": [PartInfo]}` per selected UID |
+| `parts save` | `{"folder", "uid", "part", "file", "size"}` |
 
-`FolderInfo` and `SearchResult` derive `serde::Serialize`; the other shapes are
-small output structs in `src/cli/mod.rs`.
+`FolderInfo`, `SearchResult`, `Mailbox` and `PartInfo` derive
+`serde::Serialize`; the other shapes are small output structs in
+`src/cli/mod.rs`.
 
 ## Error handling
 
 Connection, TLS, authentication and server (BAD/NO) errors surface as
 `anyhow::Error` with context; the CLI prints them and exits non-zero.
+
+`LOGOUT` is sent exactly once when the client is dropped (`RealClient` tracks
+a `closed` flag so the outer and inner `Drop` impls cannot double-send it).
+A `ConnectionLost` at logout is suppressed — it only means the connection was
+already closed and there is nothing to log out. Other logout failures (server
+BAD/NO) still print a warning.

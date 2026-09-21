@@ -12,9 +12,7 @@ struct Args {
     #[clap(short = 'c', long = "config")]
     config_file: Option<String>,
 
-    /// Folder to operate on (default: from config or INBOX).
-    /// The field is not named `folder` because that collides with the
-    /// positional `folder` argument of the `move` subcommand in clap.
+    /// Folder to operate on (default: from config or INBOX)
     #[clap(short = 'f', long = "folder", global = true)]
     default_folder: Option<String>,
 
@@ -25,6 +23,11 @@ struct Args {
     /// Output results as compact single-line JSON (for programmatic use)
     #[clap(short = 'j', long = "json", global = true)]
     json: bool,
+
+    /// Maximum number of search results to fetch (overrides the config
+    /// "max"; 0 = unlimited)
+    #[clap(short = 'M', long = "max", global = true)]
+    max: Option<usize>,
 
     /// Subcommand to execute
     #[clap(subcommand)]
@@ -41,71 +44,83 @@ fn fail(json: bool, message: &str) -> ! {
     process::exit(1);
 }
 
+/// UID selection: a single UID or a comma-separated list (e.g. `1,4,7`).
+/// Ranges are not supported.
+type UidSpec = String;
+
+/// Use the explicitly requested folders (deduplicated, order preserved),
+/// falling back to the single configured folder.
+fn resolve_folders(explicit: &[String], config: &config::Config) -> Vec<String> {
+    if explicit.is_empty() {
+        return vec![config.folder.clone()];
+    }
+    let mut out = Vec::new();
+    for folder in explicit {
+        if !out.contains(folder) {
+            out.push(folder.clone());
+        }
+    }
+    out
+}
+
 #[derive(clap::Subcommand)]
 enum Command {
     /// List folders
     Folders,
-    /// Search emails (IMAP SEARCH query, e.g. "UNSEEN" or 'HEADER FROM "foo"')
+    /// Search emails in one or more folders (IMAP SEARCH query: "ALL" for
+    /// every message, "UNSEEN", 'HEADER FROM "foo"')
     Search {
         /// IMAP search query
         query: String,
+        /// Folder(s) to search, comma-separated or repeated
+        /// (default: the -f/config folder)
+        #[clap(value_name = "FOLDER", value_delimiter = ',')]
+        folders: Vec<String>,
     },
-    /// Read an email by UID
+    /// Read email(s) by UID
     Read {
-        /// Email UID
-        id: u32,
+        /// UID selection: `5` or `1,4,7` (no ranges)
+        uids: UidSpec,
     },
-    /// Move an email by UID to another folder
-    Move {
-        /// Email UID
-        id: u32,
-        /// Target folder
-        folder: String,
+    /// Show message counts / status of mailboxes (IMAP STATUS)
+    #[clap(alias = "status")]
+    Count {
+        /// Mailbox to show (default: all selectable mailboxes)
+        folder: Option<String>,
     },
-    /// Add or remove keyword tags on an email
-    Tag {
-        /// Email UID
-        id: u32,
-        /// What to do with the tags
+    /// List the message UIDs of the folder
+    Ids,
+    /// List unread emails of one or more folders
+    Unread {
+        /// Folder(s) to check, comma-separated or repeated
+        /// (default: the -f/config folder)
+        #[clap(value_name = "FOLDER", value_delimiter = ',')]
+        folders: Vec<String>,
+    },
+    /// List or save MIME parts of an email
+    Parts {
+        /// What to do with the parts
         #[clap(subcommand)]
-        action: TagAction,
-    },
-    /// Add or remove standard flags on an email (\Seen, \Answered, \Flagged).
-    /// \Deleted, \Draft and \Recent are explicitly not supported.
-    Flags {
-        /// Email UID
-        id: u32,
-        /// What to do with the flags
-        #[clap(subcommand)]
-        action: FlagsAction,
+        action: PartsAction,
     },
 }
 
 #[derive(clap::Subcommand)]
-enum TagAction {
-    /// Add tags (e.g. `tag 123 add important reviewed`)
-    Add {
-        /// Tags to add
-        tags: Vec<String>,
+enum PartsAction {
+    /// List the MIME parts of the given email(s)
+    List {
+        /// UID selection: `5` or `1,4,7` (no ranges)
+        uids: UidSpec,
     },
-    /// Remove tags (e.g. `tag 123 remove reviewed`)
-    Remove {
-        /// Tags to remove
-        tags: Vec<String>,
-    },
-}
-
-#[derive(clap::Subcommand)]
-enum FlagsAction {
-    /// Add flags (e.g. `flags 123 add seen answered`)
-    Add {
-        /// Flags to add (seen, answered, flagged)
-        flags: Vec<String>,
-    },
-    /// Remove flags (e.g. `flags 123 remove flagged`)
-    Remove {
-        /// Flags to remove (seen, answered, flagged)
-        flags: Vec<String>,
+    /// Save one part to a file
+    Save {
+        /// Email UID
+        uid: u32,
+        /// Part number (as listed by `parts list`)
+        part: u32,
+        /// Destination file (default: the part's filename in the current directory)
+        #[clap(short = 'o', long = "out")]
+        out: Option<std::path::PathBuf>,
     },
 }
 
@@ -130,20 +145,30 @@ fn main() {
     if let Some(folder) = &args.default_folder {
         config.folder = folder.clone();
     }
+    if let Some(max) = args.max {
+        config.max = max;
+    }
 
     let json = args.json;
     let result = match &args.command {
         Command::Folders => cli::list_folders(&config, json),
-        Command::Search { query } => cli::search_emails(&config, query, json),
-        Command::Read { id } => cli::read_email(&config, *id, json),
-        Command::Move { id, folder } => cli::move_email(&config, *id, folder, json),
-        Command::Tag { id, action } => match action {
-            TagAction::Add { tags } => cli::set_tags(&config, *id, &tags, &[], json),
-            TagAction::Remove { tags } => cli::set_tags(&config, *id, &[], &tags, json),
-        },
-        Command::Flags { id, action } => match action {
-            FlagsAction::Add { flags } => cli::set_flags(&config, *id, &flags, &[], json),
-            FlagsAction::Remove { flags } => cli::set_flags(&config, *id, &[], &flags, json),
+        Command::Search { query, folders } => cli::search_emails(
+            &config,
+            query,
+            resolve_folders(folders, &config),
+            json,
+        ),
+        Command::Read { uids } => cli::read_emails(&config, uids, json),
+        Command::Count { folder } => cli::mailbox_counts(&config, folder.as_deref(), json),
+        Command::Ids => cli::folder_uids(&config, json),
+        Command::Unread { folders } => {
+            cli::unread(&config, resolve_folders(folders, &config), json)
+        }
+        Command::Parts { action } => match action {
+            PartsAction::List { uids } => cli::parts_list(&config, uids, json),
+            PartsAction::Save { uid, part, out } => {
+                cli::parts_save(&config, *uid, *part, out.clone(), json)
+            }
         },
     };
 
