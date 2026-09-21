@@ -43,7 +43,7 @@ operation body can be shared by a `with_backend!` macro.
 | `read` | `SELECT` + `UID FETCH <uid> (UID ENVELOPE FLAGS INTERNALDATE BODY.PEEK[RFC822])` |
 | `count` / `status` | `LIST "" *` + `STATUS <folder> (MESSAGES UNSEEN RECENT UIDNEXT UIDVALIDITY)` per mailbox (or one folder when given) |
 | `ids` | `SELECT` + `UID SEARCH *` |
-| `thread` | `SELECT` + `UID SEARCH ALL` + batched `UID FETCH <uids> (UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])`, then client-side union-find over Message-IDs |
+| `thread` | `SELECT` + `CAPABILITY`; if `THREAD=REFERENCES` is advertised: one `UID THREAD REFERENCES UTF-8 ALL` (server-side tree, flattened). Otherwise: `UID SEARCH ALL` + batched `UID FETCH <uids> (UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])`, then client-side union-find over Message-IDs |
 | `unread` | `SELECT` + `UID SEARCH UNSEEN` + batched `UID FETCH` (same path as `search`) |
 | `parts list` | `SELECT` + `UID FETCH <uid> (UID BODY.PEEK[RFC822])`, then MIME part enumeration locally |
 | `parts save` | same fetch, then the selected part is CTE-decoded and written to a file |
@@ -73,8 +73,19 @@ never broken by it.
 
 ### Thread reconstruction (`thread <uid>`)
 
-No IMAP extension is required: the thread is rebuilt **client-side**. The
-tool fetches the `Message-ID`, `References` and `In-Reply-To` headers of
+Server-side threading is preferred when available: if `CAPABILITY`
+advertises `THREAD=REFERENCES` (RFC 5256), a single
+`UID THREAD REFERENCES UTF-8 ALL` returns the whole thread tree and the
+sub-tree containing the requested UID is flattened to its UIDs. This is one
+round trip instead of fetching every message's headers. The parser for the
+nested `* THREAD (…)` response is provided by the bundled `imap-proto` fork
+and the `Session::thread` / `Session::uid_thread` commands by the `imap`
+fork (see `../forks`, pending upstream releases).
+
+On servers that do not advertise THREAD — or if the THREAD command fails,
+returns no thread for the UID, or the connection is lost — the tool falls
+back to rebuilding the thread **client-side**, so no extension is required.
+The tool fetches the `Message-ID`, `References` and `In-Reply-To` headers of
 every message in the folder (batched `UID FETCH`, 100 UIDs at a time, using
 a literal `BODY.PEEK[HEADER.FIELDS ...]` item — raw bytes that never pass
 through the quoted-string parser, so unparseable server data cannot break

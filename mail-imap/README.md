@@ -19,7 +19,9 @@ the tool can be built, demoed and unit-tested without a reachable server.
 - Show message counts / status of mailboxes (IMAP `STATUS`)
 - List the message UIDs of a folder
 - List the message UIDs of the thread containing a given message
-  (client-side reconstruction from Message-ID / References headers)
+  (server-side RFC 5256 `THREAD` when the server advertises
+  `THREAD=REFERENCES`, otherwise client-side reconstruction from
+  Message-ID / References headers)
 - List unread emails of a folder
 - List the MIME parts of an email, and save one part to a file
 - JSON output mode (`-j`) for programmatic use

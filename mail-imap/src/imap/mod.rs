@@ -92,9 +92,11 @@ pub trait ImapBackend {
     /// All message UIDs of a folder.
     fn folder_uids(&mut self, folder: &str) -> Result<Vec<u32>>;
     /// All UIDs of the conversation thread containing message `uid` in
-    /// `folder`, reconstructed client-side from the Message-ID /
-    /// In-Reply-To / References headers (works on any IMAP server, no
-    /// THREAD extension needed).
+    /// `folder`. Uses the server-side THREAD extension (`UID THREAD
+    /// REFERENCES`, RFC 5256) when the server advertises
+    /// `THREAD=REFERENCES`; otherwise reconstructs the thread client-side
+    /// from the Message-ID / In-Reply-To / References headers (works on any
+    /// IMAP server, no THREAD extension needed).
     fn thread_uids(&mut self, folder: &str, uid: u32) -> Result<Vec<u32>>;
     /// The MIME parts of one message (document order, 1-based part numbers).
     fn list_parts(&mut self, folder: &str, uid: u32) -> Result<Vec<PartInfo>>;

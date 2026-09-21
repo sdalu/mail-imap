@@ -4,6 +4,7 @@ use crate::imap::{
     thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, SearchResult, ThreadRefs,
 };
 use anyhow::{bail, Context, Result};
+use imap::extensions::thread::{ThreadAlgorithm, ThreadCharset};
 use imap::{ClientBuilder, Connection, ConnectionMode, Session};
 use imap_proto::NameAttribute;
 use imap::types::Flag;
@@ -120,6 +121,56 @@ impl RealClient {
             .select(folder)
             .with_context(|| format!("re-selecting '{}' after reconnect", folder))?;
         Ok(())
+    }
+
+    /// Server-side threading via the RFC 5256 `UID THREAD REFERENCES`
+    /// extension, tried before the client-side reconstruction. Returns
+    /// `Ok(None)` (fall back to the client-side path) when the server does
+    /// not advertise `THREAD=REFERENCES`, the command fails, or the target
+    /// is not among the returned threads. `folder` must already be
+    /// selected.
+    fn native_thread_uids(&mut self, folder: &str, uid: u32) -> Result<Option<Vec<u32>>> {
+        let supported = self
+            .session
+            .capabilities()
+            .map(|caps| caps.has_str("THREAD=REFERENCES"))
+            .unwrap_or(false);
+        if !supported {
+            if self.debug {
+                eprintln!("server does not advertise THREAD=REFERENCES; using client-side threading");
+            }
+            return Ok(None);
+        }
+        let threads = match self.session.uid_thread(
+            ThreadAlgorithm::References,
+            ThreadCharset::Utf8,
+            "ALL",
+        ) {
+            Ok(threads) => threads,
+            Err(e) => {
+                if is_poisoned(&e) {
+                    self.reconnect(folder)?;
+                }
+                if self.debug {
+                    eprintln!("UID THREAD failed ({}); using client-side threading", e);
+                }
+                return Ok(None);
+            }
+        };
+        for top in &threads {
+            let mut uids = top.all_message_numbers();
+            if uids.contains(&uid) {
+                uids.sort_unstable();
+                if self.debug {
+                    eprintln!("UID THREAD: {} message(s) in thread of UID {}", uids.len(), uid);
+                }
+                return Ok(Some(uids));
+            }
+        }
+        if self.debug {
+            eprintln!("UID THREAD: UID {} not present in server thread data; using client-side threading", uid);
+        }
+        Ok(None)
     }
 
     /// Fetch the raw RFC822 bytes of a message without setting `\Seen`
@@ -501,17 +552,25 @@ impl ImapBackend for RealClient {
         Ok(uids)
     }
 
-    /// Thread reconstruction needs Message-ID / In-Reply-To / References of
-    /// every message in the folder. They are fetched as a literal
-    /// `BODY[HEADER.FIELDS ...]` block — raw bytes we parse ourselves —
-    /// so the response cannot break the `imap-proto` quoted-string parser
-    /// the way ENVELOPE can (see `ITEMS_HEADERS`).
+    /// Thread reconstruction, in order of preference:
+    ///
+    /// 1. server-side `UID THREAD REFERENCES` (RFC 5256) when the server
+    ///    advertises `THREAD=REFERENCES` — a single round trip;
+    /// 2. client-side reconstruction from Message-ID / In-Reply-To /
+    ///    References headers fetched as a literal
+    ///    `BODY[HEADER.FIELDS ...]` block — raw bytes we parse ourselves,
+    ///    so the response cannot break the `imap-proto` quoted-string parser
+    ///    the way ENVELOPE can (see `ITEMS_HEADERS`). Works on any IMAP
+    ///    server, no THREAD extension needed.
     fn thread_uids(&mut self, folder: &str, uid: u32) -> Result<Vec<u32>> {
         const THREAD_ITEMS: &str =
             "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])";
         self.session
             .select(folder)
             .with_context(|| format!("could not select '{}'", folder))?;
+        if let Some(uids) = self.native_thread_uids(folder, uid)? {
+            return Ok(uids);
+        }
         let all: Vec<u32> = self
             .session
             .uid_search("ALL")

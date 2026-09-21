@@ -95,7 +95,8 @@ enum Command {
     /// List the message UIDs of the folder
     Ids,
     /// List the UIDs of every message in the thread containing the given
-    /// message (client-side reconstruction from Message-ID / References)
+    /// message (server-side RFC 5256 THREAD when advertised, else
+    /// client-side reconstruction from Message-ID / References)
     Thread {
         /// Email UID (as shown by `search` / `unread`)
         uid: u32,

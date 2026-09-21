@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-imap = { version = "3.0.0-alpha.15", features = ["native-tls"] }
-imap-proto = "0.16"
+# LOCAL DEV: forks with RFC 5256 THREAD support (upstream imap-proto
+# release pending; see forks/ in the workspace root).
+imap = { path = "../forks/rust-imap", features = ["native-tls"] }
+imap-proto = { path = "../forks/tokio-imap/imap-proto" }
 base64 = "0.13"
 native-tls = "0.2"
 clap = { version = "4.0", features = ["derive"] }
