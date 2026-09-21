@@ -16,6 +16,9 @@ pub struct RealClient {
     session: Session<Connection>,
     config: Config,
     debug: bool,
+    /// Server capability atoms (uppercased), fetched lazily with a single
+    /// `CAPABILITY` command and cached; printed in debug mode.
+    capabilities: Option<BTreeSet<String>>,
     /// Guards against double logout: `ImapClient`'s Drop and `RealClient`'s
     /// own Drop both call `close()`, and a second `LOGOUT` on the
     /// server-closed connection would fail with `ConnectionLost`.
@@ -55,12 +58,17 @@ fn is_poisoned(e: &imap::Error) -> bool {
 impl RealClient {
     pub fn connect(config: &Config, debug: bool) -> Result<Self> {
         let session = Self::establish_session(config, debug)?;
-        Ok(RealClient {
+        let mut client = RealClient {
             session,
             config: config.clone(),
             debug,
+            capabilities: None,
             closed: false,
-        })
+        };
+        if debug {
+            client.ensure_capabilities();
+        }
+        Ok(client)
     }
 
     /// Log in and return a fresh session. Used for the initial connect and
@@ -117,10 +125,54 @@ impl RealClient {
     fn reconnect(&mut self, folder: &str) -> Result<()> {
         self.session = Self::establish_session(&self.config, self.debug)
             .with_context(|| format!("reconnecting to {}", self.config.server))?;
+        self.capabilities = None;
+        if self.debug {
+            self.ensure_capabilities();
+        }
         self.session
             .select(folder)
             .with_context(|| format!("re-selecting '{}' after reconnect", folder))?;
         Ok(())
+    }
+
+    /// Fetch (once) and cache the server capabilities; in debug mode print
+    /// them. A `CAPABILITY` failure is not fatal: the cached list stays
+    /// empty and no extension requiring it will be used.
+    fn ensure_capabilities(&mut self) {
+        if self.capabilities.is_some() {
+            return;
+        }
+        let caps = self
+            .session
+            .capabilities()
+            .map(|c| {
+                c.iter()
+                    .map(capability_to_string)
+                    .map(|s| s.to_uppercase())
+                    .collect::<BTreeSet<String>>()
+            })
+            .unwrap_or_default();
+        if self.debug {
+            if caps.is_empty() {
+                eprintln!("Could not fetch server capabilities");
+            } else {
+                eprintln!(
+                    "Server capabilities: {}",
+                    caps.iter().cloned().collect::<Vec<_>>().join(" ")
+                );
+            }
+        }
+        self.capabilities = Some(caps);
+    }
+
+    /// True when the server advertises the given capability atom
+    /// (case-insensitive).
+    fn has_capability(&mut self, cap: &str) -> bool {
+        self.ensure_capabilities();
+        self.capabilities
+            .as_ref()
+            .map(|caps| caps.contains(cap))
+            .unwrap_or(false)
     }
 
     /// Server-side threading via the RFC 5256 `UID THREAD REFERENCES`
@@ -130,14 +182,9 @@ impl RealClient {
     /// is not among the returned threads. `folder` must already be
     /// selected.
     fn native_thread_uids(&mut self, folder: &str, uid: u32) -> Result<Option<Vec<u32>>> {
-        let supported = self
-            .session
-            .capabilities()
-            .map(|caps| caps.has_str("THREAD=REFERENCES"))
-            .unwrap_or(false);
-        if !supported {
+        if !self.has_capability("THREAD=REFERENCES") {
             if self.debug {
-                eprintln!("server does not advertise THREAD=REFERENCES; using client-side threading");
+                eprintln!("server does not advertise THREAD=REFERENCES");
             }
             return Ok(None);
         }
@@ -152,7 +199,7 @@ impl RealClient {
                     self.reconnect(folder)?;
                 }
                 if self.debug {
-                    eprintln!("UID THREAD failed ({}); using client-side threading", e);
+                    eprintln!("UID THREAD failed: {}", e);
                 }
                 return Ok(None);
             }
@@ -162,13 +209,17 @@ impl RealClient {
             if uids.contains(&uid) {
                 uids.sort_unstable();
                 if self.debug {
-                    eprintln!("UID THREAD: {} message(s) in thread of UID {}", uids.len(), uid);
+                    eprintln!(
+                        "Threading method: server-side UID THREAD REFERENCES (RFC 5256), {} message(s) in thread of UID {}",
+                        uids.len(),
+                        uid
+                    );
                 }
                 return Ok(Some(uids));
             }
         }
         if self.debug {
-            eprintln!("UID THREAD: UID {} not present in server thread data; using client-side threading", uid);
+            eprintln!("UID THREAD: no thread returned for UID {}", uid);
         }
         Ok(None)
     }
@@ -571,6 +622,11 @@ impl ImapBackend for RealClient {
         if let Some(uids) = self.native_thread_uids(folder, uid)? {
             return Ok(uids);
         }
+        if self.debug {
+            eprintln!(
+                "Threading method: client-side reconstruction from Message-ID / In-Reply-To / References headers"
+            );
+        }
         let all: Vec<u32> = self
             .session
             .uid_search("ALL")
@@ -687,6 +743,15 @@ fn count_leaf_parts(bs: &imap_proto::types::BodyStructure) -> u32 {
             bodies.iter().map(count_leaf_parts).sum()
         }
         _ => 1,
+    }
+}
+
+/// Wire text of an `imap_proto` capability atom.
+fn capability_to_string(c: &imap_proto::Capability<'_>) -> String {
+    match c {
+        imap_proto::Capability::Imap4rev1 => "IMAP4rev1".to_string(),
+        imap_proto::Capability::Auth(mech) => format!("AUTH={}", mech),
+        imap_proto::Capability::Atom(a) => a.to_string(),
     }
 }
 
