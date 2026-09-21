@@ -86,6 +86,16 @@ struct UidsOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct ThreadOutput<'a> {
+    folder: &'a str,
+    /// The message the thread was requested for.
+    uid: u32,
+    count: usize,
+    /// All UIDs of the thread (including `uid`), ascending.
+    uids: &'a [u32],
+}
+
+#[derive(Serialize)]
 struct PartsListOutput<'a> {
     folder: &'a str,
     uid: u32,
@@ -317,6 +327,42 @@ pub fn folder_uids(config: &Config, json: bool, debug: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn thread_uids(config: &Config, uid: u32, json: bool, debug: bool) -> Result<()> {
+    let folder = config.folder.clone();
+    if debug {
+        eprintln!("Reconstructing thread of UID {} in '{}'", uid, folder);
+    }
+    let mut client = ImapClient::connect(config, debug)?;
+    let uids = client.thread_uids(&folder, uid)?;
+    if debug {
+        eprintln!("Thread has {} message(s)", uids.len());
+    }
+
+    if json {
+        emit_json(&ThreadOutput {
+            folder: &folder,
+            uid,
+            count: uids.len(),
+            uids: &uids,
+        })?;
+        return Ok(());
+    }
+    println!(
+        "Thread of UID {} in '{}' ({} message(s)):",
+        uid,
+        folder,
+        uids.len()
+    );
+    println!(
+        "  {}",
+        uids.iter()
+            .map(|u| u.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    Ok(())
+}
+
 pub fn unread(config: &Config, folders: Vec<String>, json: bool, debug: bool) -> Result<()> {
     search_emails(config, "UNSEEN", folders, json, debug)
 }
@@ -543,6 +589,24 @@ mod tests {
         assert_eq!(value["all"], true);
         assert_eq!(value["counts"][0]["name"], "INBOX");
         assert_eq!(value["counts"][0]["unseen"], 2);
+    }
+
+    #[test]
+    fn thread_output_json_shape() {
+        let uids = vec![3, 9, 14];
+        let out = ThreadOutput {
+            folder: "INBOX",
+            uid: 9,
+            count: uids.len(),
+            uids: &uids,
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&out).unwrap()).expect("parse");
+        assert_eq!(value["folder"], "INBOX");
+        assert_eq!(value["uid"], 9);
+        assert_eq!(value["count"], 3);
+        assert_eq!(value["uids"][0], 3);
+        assert_eq!(value["uids"][2], 14);
     }
 
     #[test]

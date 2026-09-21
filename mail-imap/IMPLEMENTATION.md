@@ -43,6 +43,7 @@ operation body can be shared by a `with_backend!` macro.
 | `read` | `SELECT` + `UID FETCH <uid> (UID ENVELOPE FLAGS INTERNALDATE BODY.PEEK[RFC822])` |
 | `count` / `status` | `LIST "" *` + `STATUS <folder> (MESSAGES UNSEEN RECENT UIDNEXT UIDVALIDITY)` per mailbox (or one folder when given) |
 | `ids` | `SELECT` + `UID SEARCH *` |
+| `thread` | `SELECT` + `UID SEARCH ALL` + batched `UID FETCH <uids> (UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])`, then client-side union-find over Message-IDs |
 | `unread` | `SELECT` + `UID SEARCH UNSEEN` + batched `UID FETCH` (same path as `search`) |
 | `parts list` | `SELECT` + `UID FETCH <uid> (UID BODY.PEEK[RFC822])`, then MIME part enumeration locally |
 | `parts save` | same fetch, then the selected part is CTE-decoded and written to a file |
@@ -65,10 +66,50 @@ containers recurse; `message/rfc822` and single parts count as one, matching
 the local parser used by `parts list`). `unread` reuses this path, so it
 includes part counts too.
 
-The part count is best-effort: if a batch's `BODYSTRUCTURE` response is not
-parseable by the `imap` crate (some servers emit structures the parser does
-not handle), that batch is refetched without `BODYSTRUCTURE` and the affected
-messages report `0` parts — the search itself is never broken by it.
+The part count is best-effort: batches are fetched through a degradation
+ladder (see "Resilient fetching" below), and a message whose MIME tree the
+`imap` crate cannot parse is reported with `0` parts — the search itself is
+never broken by it.
+
+### Thread reconstruction (`thread <uid>`)
+
+No IMAP extension is required: the thread is rebuilt **client-side**. The
+tool fetches the `Message-ID`, `References` and `In-Reply-To` headers of
+every message in the folder (batched `UID FETCH`, 100 UIDs at a time, using
+a literal `BODY.PEEK[HEADER.FIELDS ...]` item — raw bytes that never pass
+through the quoted-string parser, so unparseable server data cannot break
+it), then runs union-find (`thread_component` in `src/imap/mod.rs`):
+
+- messages are linked when one references the other's Message-ID;
+- duplicate Message-IDs (cross-posted copies) merge into one node;
+- the output is the connected component containing the requested UID,
+  ascending, always including the UID itself.
+
+A message without usable threading headers is its own thread. If a batch
+still cannot be fetched/parsed it is skipped with a warning on stderr, so
+the result may be incomplete but never fatal.
+
+### Resilient fetching
+
+Some servers emit `FETCH` responses with raw 8-bit bytes inside quoted
+strings (e.g. Latin-1 in `ENVELOPE`). `imap-proto` only accepts 7-bit
+characters there; the `imap` crate turns such a line into a fabricated
+`Error::Bye` *and* leaves the stream desynced — which previously aborted a
+whole search with "Bye Response: no explanation given". `RealClient`
+countermeasures (`src/imap/real.rs`):
+
+- `attempt_fetch` recognizes connection-poisoning errors (`Bye`,
+  `TagMismatch`, `ConnectionLost`, `Io`), re-establishes the session
+  (`reconnect`) and retries once;
+- `fetch_chunk` degrades per batch: full items → without `BODYSTRUCTURE` →
+  per-message → per-message via a literal `BODY.PEEK[HEADER.FIELDS
+  (SUBJECT FROM DATE)]` fetch with the metadata rebuilt from raw bytes
+  (`header_value` / `address_from_header`);
+- individual unparseable messages are skipped with a stderr warning, and
+  `read` falls back to an `ENVELOPE`-less fetch whose summary is built from
+  the raw RFC822 header block;
+- if a hard error still strikes mid-search, the results collected so far
+  are reported with a warning instead of being thrown away.
 
 ### Read-only behaviour
 

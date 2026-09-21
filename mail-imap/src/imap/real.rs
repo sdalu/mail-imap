@@ -1,46 +1,70 @@
 use crate::config::Config;
 use crate::imap::mime;
-use crate::imap::{PartInfo, FolderInfo, ImapBackend, Mailbox, SearchResult};
+use crate::imap::{
+    thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, SearchResult, ThreadRefs,
+};
 use anyhow::{bail, Context, Result};
-use imap::types::NameAttribute;
-use imap::Session;
-use native_tls::TlsConnector;
+use imap::{ClientBuilder, Connection, ConnectionMode, Session};
+use imap_proto::NameAttribute;
+use imap::types::Flag;
 use std::collections::BTreeSet;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::path::Path;
-use std::time::Duration;
-
-type TlsSession = Session<native_tls::TlsStream<TcpStream>>;
-type PlainSession = Session<TcpStream>;
-
-enum Backend {
-    Tls(TlsSession),
-    Plain(PlainSession),
-}
-
-// Runs a block of code against whichever IMAP session the client holds.
-// The body must only return owned data (the imap crate's zero-copy
-// results borrow from the session).
-macro_rules! with_backend {
-    ($backend:expr, |$sess:ident| $body:expr) => {{
-        let r: Result<_> = match $backend {
-            Backend::Tls($sess) => $body,
-            Backend::Plain($sess) => $body,
-        };
-        r
-    }};
-}
 
 pub struct RealClient {
-    backend: Backend,
+    session: Session<Connection>,
+    config: Config,
+    debug: bool,
     /// Guards against double logout: `ImapClient`'s Drop and `RealClient`'s
     /// own Drop both call `close()`, and a second `LOGOUT` on the
     /// server-closed connection would fail with `ConnectionLost`.
     closed: bool,
 }
 
+/// What fetch items `search` requests from the server, from richest to
+/// most robust. Some servers emit FETCH responses (raw 8-bit bytes inside
+/// quoted strings in ENVELOPE/BODYSTRUCTURE) that `imap-proto` cannot
+/// parse; the `imap` crate surfaces such a line as a fabricated
+/// `Error::Bye` and leaves the stream desynced. The ladder degrades the
+/// request until the response parses again.
+const ITEMS_FULL: &str = "(UID ENVELOPE FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE)";
+const ITEMS_ENVELOPE: &str = "(UID ENVELOPE FLAGS INTERNALDATE RFC822.SIZE)";
+const ITEMS_HEADERS: &str = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])";
+
+enum Attempt {
+    Success(imap::types::Fetches),
+    /// Response could not be parsed (or the connection was lost while
+    /// trying); a narrower fetch item set may still work.
+    Unparseable,
+    /// Hard failure (server NO/BAD, or reconnect failed).
+    Fatal(anyhow::Error),
+}
+
+/// Errors that leave the connection stream desynced or otherwise unusable.
+fn is_poisoned(e: &imap::Error) -> bool {
+    matches!(
+        e,
+        imap::Error::Bye(_)
+            | imap::Error::TagMismatch(_)
+            | imap::Error::ConnectionLost
+            | imap::Error::Io(_)
+    )
+}
+
 impl RealClient {
     pub fn connect(config: &Config, debug: bool) -> Result<Self> {
+        let session = Self::establish_session(config, debug)?;
+        Ok(RealClient {
+            session,
+            config: config.clone(),
+            debug,
+            closed: false,
+        })
+    }
+
+    /// Log in and return a fresh session. Used for the initial connect and
+    /// to recover after a poisoned response desyncs the stream.
+    fn establish_session(config: &Config, debug: bool) -> Result<Session<Connection>> {
         let addr = (config.server.as_str(), config.port);
         let socket_addr = addr
             .to_socket_addrs()
@@ -50,59 +74,70 @@ impl RealClient {
         if debug {
             eprintln!("Connecting to {}:{}...", config.server, config.port);
         }
-        let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
+        let tcp = std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(10))
             .with_context(|| format!("could not connect to {} at {}", config.server, socket_addr))?;
         tcp.set_nodelay(true)?;
 
-        let connector = TlsConnector::builder()
-            .danger_accept_invalid_certs(config.insecure)
-            .danger_accept_invalid_hostnames(config.insecure)
-            .build()?;
-
-        let backend = if config.ssl {
+        let mut builder = ClientBuilder::new(config.server.as_str(), config.port);
+        if config.ssl {
             if debug {
                 eprintln!("Starting TLS handshake with {}...", config.server);
             }
-            let tls_stream = TlsConnector::connect(&connector, &config.server, tcp)
-                .with_context(|| format!("TLS handshake with {} failed", config.server))?;
-            Backend::Tls(login(imap::Client::new(tls_stream), config, debug)?)
+            builder = builder.mode(ConnectionMode::Tls);
         } else if config.starttls {
             if debug {
                 eprintln!("Starting STARTTLS upgrade with {}...", config.server);
             }
-            let client = imap::Client::new(tcp);
-            let client = client
-                .secure(&config.server, &connector)
-                .with_context(|| format!("STARTTLS upgrade with {} failed", config.server))?;
-            Backend::Tls(login(client, config, debug)?)
+            builder = builder.mode(ConnectionMode::StartTls);
         } else {
-            Backend::Plain(login(imap::Client::new(tcp), config, debug)?)
-        };
+            builder = builder.mode(ConnectionMode::Plaintext);
+        }
 
-        Ok(RealClient {
-            backend,
-            closed: false,
-        })
+        if config.insecure {
+            builder = builder.danger_skip_tls_verify(true);
+        }
+
+        let client = builder.connect()
+            .with_context(|| format!("could not connect to {}:{}", config.server, config.port))?;
+
+        if debug {
+            eprintln!("Logging in as '{}'...", config.username);
+        }
+
+        let session = client
+            .login(config.username.as_str(), config.password.as_str())
+            .map_err(|(e, _)| e)
+            .with_context(|| format!("login as '{}' failed (check credentials / server)", config.username))?;
+
+        Ok(session)
+    }
+
+    /// Re-establish the session and re-select `folder`.
+    fn reconnect(&mut self, folder: &str) -> Result<()> {
+        self.session = Self::establish_session(&self.config, self.debug)
+            .with_context(|| format!("reconnecting to {}", self.config.server))?;
+        self.session
+            .select(folder)
+            .with_context(|| format!("re-selecting '{}' after reconnect", folder))?;
+        Ok(())
     }
 
     /// Fetch the raw RFC822 bytes of a message without setting `\Seen`
     /// (`BODY.PEEK[]`).
     fn fetch_raw(&mut self, folder: &str, uid: u32) -> Result<Vec<u8>> {
-        with_backend!(&mut self.backend, |s| {
-            s.select(folder)?;
-            let fetches = s
-                .uid_fetch(uid.to_string(), "(UID BODY.PEEK[RFC822])")
-                .with_context(|| format!("UID FETCH of UID {} in '{}'", uid, folder))?;
-            let data = fetches.iter().find_map(|f| f.body().map(|b| b.to_vec()));
-            match data {
-                Some(d) => Ok(d),
-                None => Err(anyhow::anyhow!(
-                    "no email with UID {} in folder '{}'",
-                    uid,
-                    folder
-                )),
-            }
-        })
+        self.session.select(folder)?;
+        let fetches = self.session
+            .uid_fetch(uid.to_string(), "(UID BODY.PEEK[RFC822])")
+            .with_context(|| format!("UID FETCH of UID {} in '{}'", uid, folder))?;
+        let data = fetches.iter().find_map(|f| f.body().map(|b| b.to_vec()));
+        match data {
+            Some(d) => Ok(d),
+            None => Err(anyhow::anyhow!(
+                "no email with UID {} in folder '{}'",
+                uid,
+                folder
+            )),
+        }
     }
 
     /// Search one selected mailbox: `UID SEARCH`, then a batched fetch of
@@ -113,109 +148,216 @@ impl RealClient {
         query: &str,
         cap: usize,
     ) -> Result<Vec<SearchResult>> {
-        with_backend!(&mut self.backend, |s| {
-            s.select(folder)?;
-            let mut uids: Vec<u32> = s
-                .uid_search(query)?
-                .into_iter()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            if uids.is_empty() {
-                return Ok(Vec::new());
-            }
+        self.session.select(folder)?;
+        let mut uids: Vec<u32> = self.session
+            .uid_search(query)?
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
 
-            // Show most-recent first (UIDs increase over time) and cap the count.
-            uids.reverse();
-            if cap > 0 {
-                uids.truncate(cap);
-            }
+        // Show most-recent first (UIDs increase over time) and cap the count.
+        uids.reverse();
+        if cap > 0 {
+            uids.truncate(cap);
+        }
 
-            let mut results: Vec<SearchResult> = Vec::new();
-            const BATCH: usize = 25;
-            for chunk in uids.chunks(BATCH) {
-                let set: Vec<String> = chunk.iter().map(|u| u.to_string()).collect();
-                let list = set.join(",");
-                // BODYSTRUCTURE gives the MIME tree without transferring any
-                // content, so the part count is cheap to fetch in a batch.
-                // Some servers emit body structures this crate cannot parse,
-                // which would abort the whole batch; in that case retry the
-                // batch without it so the search still works (the affected
-                // messages simply report 0 parts).
-                let fetches = match s
-                    .uid_fetch(
-                        &list,
-                        "(UID ENVELOPE FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE)",
-                    ) {
-                    Ok(f) => f,
-                    Err(imap::Error::Parse(_)) => s.uid_fetch(
-                        &list,
-                        "(UID ENVELOPE FLAGS INTERNALDATE RFC822.SIZE)",
-                    )?,
-                    Err(e) => return Err(e.into()),
-                };
-                for f in fetches.iter() {
-                    let env = f.envelope();
-                    let subject = env
-                        .and_then(|e| e.subject)
-                        .map(bytes_to_string)
-                        .map(decode_rfc2047)
-                        .unwrap_or_else(|| "(no subject)".to_string());
-                    let from = env
-                        .and_then(|e| e.from.as_ref())
-                        .and_then(|addrs| addrs.first())
-                        .map(format_address)
-                        .unwrap_or_else(|| "(unknown)".to_string());
-                    let date = f
-                        .internal_date()
-                        .map(|d| d.format("%Y-%m-%d %H:%M:%S %z").to_string());
-                    let flags: Vec<String> = f
-                        .flags()
-                        .iter()
-                        .filter(|fl| !matches!(fl, imap::types::Flag::Recent))
-                        .map(|fl| fl.to_string())
-                        .collect();
-                    results.push(SearchResult {
-                        uid: f.uid.unwrap_or(0),
-                        folder: folder.to_string(),
-                        subject,
-                        from,
-                        date,
-                        size: f.size,
-                        flags,
-                        parts: f.bodystructure().map(count_leaf_parts).unwrap_or(0),
-                    });
+        let mut out: Vec<SearchResult> = Vec::new();
+        const BATCH: usize = 25;
+        for chunk in uids.chunks(BATCH) {
+            let list = chunk
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<String>>()
+                .join(",");
+            match self.fetch_chunk(folder, &list) {
+                Ok(results) => out.extend(results),
+                Err(e) => {
+                    if out.is_empty() {
+                        return Err(e);
+                    }
+                    // Partial results beat none at all.
+                    eprintln!(
+                        "warning: search stopped early; reporting {} result(s) fetched so far: {:?}",
+                        out.len(),
+                        e
+                    );
+                    break;
                 }
             }
-            Ok(results)
-        })
+        }
+        Ok(out)
+    }
+
+    /// Fetch metadata for one comma-separated UID list, degrading the
+    /// request until it parses: batch with BODYSTRUCTURE, batch without
+    /// it, then per-message, finally per-message via a literal
+    /// HEADER.FIELDS fetch whose contents `imap-proto` never parses.
+    fn fetch_chunk(&mut self, folder: &str, list: &str) -> Result<Vec<SearchResult>> {
+        for items in [ITEMS_FULL, ITEMS_ENVELOPE] {
+            match self.attempt_fetch(folder, list, items) {
+                Attempt::Success(fs) => {
+                    return Ok(fs.iter().map(|f| self.fetch_to_result(f, folder)).collect())
+                }
+                Attempt::Unparseable => continue,
+                Attempt::Fatal(e) => return Err(e),
+            }
+        }
+        let mut out = Vec::new();
+        for uid in list.split(',') {
+            match self.attempt_fetch(folder, uid, ITEMS_ENVELOPE) {
+                Attempt::Success(fs) => {
+                    out.extend(fs.iter().map(|f| self.fetch_to_result(f, folder)));
+                    continue;
+                }
+                Attempt::Unparseable => {}
+                Attempt::Fatal(e) => return Err(e),
+            }
+            match self.attempt_fetch(folder, uid, ITEMS_HEADERS) {
+                Attempt::Success(fs) => out.extend(
+                    fs.iter()
+                        .map(|f| self.fetch_to_result_from_headers(f, folder)),
+                ),
+                Attempt::Unparseable => {
+                    eprintln!(
+                        "warning: skipping UID {} in '{}': server response could not be parsed",
+                        uid, folder
+                    );
+                }
+                Attempt::Fatal(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
+    /// One `UID FETCH` attempt with recovery: on a connection-poisoning
+    /// error, reconnect once and retry; anything the parser still rejects
+    /// comes back as `Attempt::Unparseable` so the caller can narrow the
+    /// requested items.
+    fn attempt_fetch(&mut self, folder: &str, list: &str, items: &str) -> Attempt {
+        let mut err = match self.session.uid_fetch(list, items) {
+            Ok(fs) => return Attempt::Success(fs),
+            Err(e) => e,
+        };
+        if is_poisoned(&err) {
+            if self.debug {
+                eprintln!("Connection desynced ({}); reconnecting...", err);
+            }
+            if let Err(e) = self.reconnect(folder) {
+                return Attempt::Fatal(e);
+            }
+            err = match self.session.uid_fetch(list, items) {
+                Ok(fs) => return Attempt::Success(fs),
+                Err(e) => e,
+            };
+            if is_poisoned(&err) {
+                // Even a fresh connection cannot carry this item set: the
+                // offending bytes are in the data itself.
+                return Attempt::Unparseable;
+            }
+        }
+        match err {
+            imap::Error::Parse(_) | imap::Error::Unexpected(_) => Attempt::Unparseable,
+            e => Attempt::Fatal(e.into()),
+        }
+    }
+
+    fn fetch_to_result(&self, f: &imap::types::Fetch<'_>, folder: &str) -> SearchResult {
+        let env = f.envelope();
+        let subject = env
+            .and_then(|e| e.subject.as_ref())
+            .map(|s| decode_rfc2047(bytes_to_string(s)))
+            .unwrap_or_else(|| "(no subject)".to_string());
+        let from = env
+            .and_then(|e| e.from.as_ref())
+            .and_then(|addrs| addrs.first())
+            .map(format_address)
+            .unwrap_or_else(|| "(unknown)".to_string());
+        let date = f
+            .internal_date()
+            .map(|d| d.format("%Y-%m-%d %H:%M:%S %z").to_string());
+        let flags: Vec<String> = f
+            .flags()
+            .iter()
+            .filter(|fl| !matches!(fl, Flag::Recent))
+            .map(|fl| fl.to_string())
+            .collect();
+        SearchResult {
+            uid: f.uid.unwrap_or(0),
+            folder: folder.to_string(),
+            subject,
+            from,
+            date,
+            size: f.size,
+            flags,
+            parts: f.bodystructure().map(count_leaf_parts).unwrap_or(0),
+        }
+    }
+
+    /// Same as `fetch_to_result`, for messages whose ENVELOPE the
+    /// `imap-proto` parser rejects: metadata is rebuilt from a literal
+    /// `BODY.PEEK[HEADER.FIELDS ...]` fetch, which carries raw bytes that
+    /// are never parsed as quoted strings.
+    fn fetch_to_result_from_headers(
+        &self,
+        f: &imap::types::Fetch<'_>,
+        folder: &str,
+    ) -> SearchResult {
+        let raw = f.header().unwrap_or(&[]);
+        let subject = header_value(raw, b"Subject")
+            .map(|v| decode_rfc2047(bytes_to_string(&v)))
+            .unwrap_or_else(|| "(no subject)".to_string());
+        let from = header_value(raw, b"From")
+            .map(|v| address_from_header(&v))
+            .unwrap_or_else(|| "(unknown)".to_string());
+        let date = f
+            .internal_date()
+            .map(|d| d.format("%Y-%m-%d %H:%M:%S %z").to_string())
+            .or_else(|| header_value(raw, b"Date").map(|v| bytes_to_string(&v)));
+        let flags: Vec<String> = f
+            .flags()
+            .iter()
+            .filter(|fl| !matches!(fl, Flag::Recent))
+            .map(|fl| fl.to_string())
+            .collect();
+        SearchResult {
+            uid: f.uid.unwrap_or(0),
+            folder: folder.to_string(),
+            subject,
+            from,
+            date,
+            size: f.size,
+            flags,
+            parts: 0,
+        }
     }
 }
 
 impl ImapBackend for RealClient {
     fn list_folders(&mut self) -> Result<Vec<FolderInfo>> {
-        with_backend!(&mut self.backend, |s| {
-            let names = s
-                .list(None, Some("*"))?
-                .into_iter()
-                .filter(|n| !n.attributes().contains(&NameAttribute::NoSelect))
-                .map(|n| {
-                    let mut attrs = Vec::new();
-                    if n.attributes().contains(&NameAttribute::Marked) {
-                        attrs.push("\\Marked".to_string());
-                    }
-                    FolderInfo {
-                        name: n.name().to_string(),
-                        delimiter: n.delimiter().map(str::to_string),
-                        no_inferiors: n
-                            .attributes()
-                            .contains(&NameAttribute::NoInferiors),
-                        attrs,
-                    }
-                })
-                .collect();
-            Ok(names)
-        })
+        let names = self.session
+            .list(None, Some("*"))?
+            .iter()
+            .filter(|n| !n.attributes().contains(&NameAttribute::NoSelect))
+            .map(|n| {
+                let mut attrs = Vec::new();
+                if n.attributes().contains(&NameAttribute::Marked) {
+                    attrs.push("\\Marked".to_string());
+                }
+                FolderInfo {
+                    name: n.name().to_string(),
+                    delimiter: n.delimiter().map(str::to_string),
+                    no_inferiors: n
+                        .attributes()
+                        .contains(&NameAttribute::NoInferiors),
+                    attrs,
+                }
+            })
+            .collect();
+        Ok(names)
     }
 
     fn search_folders(
@@ -240,91 +382,175 @@ impl ImapBackend for RealClient {
     }
 
     fn get_email(&mut self, folder: &str, uid: u32) -> Result<String> {
-        with_backend!(&mut self.backend, |s| {
-            s.select(folder)?;
-            // BODY.PEEK[] keeps the server from setting \Seen on the message.
-            let fetches = s.uid_fetch(
-                uid.to_string(),
-                "(UID ENVELOPE FLAGS INTERNALDATE BODY.PEEK[RFC822])",
-            )?;
-            let fetches: Vec<&imap::types::Fetch> = fetches.iter().collect();
-            if fetches.is_empty() {
-                bail!("no email with UID {} in folder '{}'", uid, folder);
+        self.session.select(folder)?;
+        // BODY.PEEK[] keeps the server from setting \Seen on the message.
+        let uid_s = uid.to_string();
+        const READ_ITEMS: &str = "(UID ENVELOPE FLAGS INTERNALDATE BODY.PEEK[RFC822])";
+        const READ_ITEMS_NOENV: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[RFC822])";
+        let fetches = match self.attempt_fetch(folder, &uid_s, READ_ITEMS) {
+            Attempt::Success(fs) => fs,
+            Attempt::Unparseable => {
+                // The server's ENVELOPE for this message carries bytes
+                // `imap-proto` cannot parse (e.g. raw 8-bit): fetch the
+                // raw message and build the summary from it instead.
+                match self.attempt_fetch(folder, &uid_s, READ_ITEMS_NOENV) {
+                    Attempt::Success(fs) => fs,
+                    Attempt::Unparseable => bail!(
+                        "could not fetch UID {} in '{}': server response was unparseable",
+                        uid,
+                        folder
+                    ),
+                    Attempt::Fatal(e) => return Err(e),
+                }
             }
-            let f = &fetches[0];
-            let mut out = String::new();
+            Attempt::Fatal(e) => {
+                return Err(e)
+                    .with_context(|| format!("UID FETCH of UID {} in '{}'", uid, folder));
+            }
+        };
+        let fetches: Vec<&imap::types::Fetch> = fetches.iter().collect();
+        if fetches.is_empty() {
+            bail!("no email with UID {} in folder '{}'", uid, folder);
+        }
+        let f = &fetches[0];
+        let mut out = String::new();
 
-            if let Some(env) = f.envelope() {
-                if let Some(subject) = env.subject {
-                    out.push_str(&format!(
-                        "Subject: {}\n",
-                        decode_rfc2047(bytes_to_string(subject))
-                    ));
-                }
-                if let Some(from) = env.from.as_ref().and_then(|a| a.first()) {
-                    out.push_str(&format!("From: {}\n", format_address(from)));
-                }
-                if let Some(to) = env.to.as_ref().and_then(|a| a.first()) {
-                    out.push_str(&format!("To: {}\n", format_address(to)));
-                }
-                if let Some(date) = env.date {
-                    out.push_str(&format!("Date: {}\n", bytes_to_string(date)));
-                }
+        if let Some(env) = f.envelope() {
+            if let Some(subject) = env.subject.as_ref() {
+                out.push_str(&format!(
+                    "Subject: {}\n",
+                    decode_rfc2047(bytes_to_string(subject))
+                ));
             }
-            if let Some(d) = f.internal_date() {
-                out.push_str(&format!("InternalDate: {}\n", d.format("%Y-%m-%d %H:%M:%S %z")));
+            if let Some(from) = env.from.as_ref().and_then(|a| a.first()) {
+                out.push_str(&format!("From: {}\n", format_address(from)));
             }
-            let flags: Vec<String> = f.flags().iter().map(|fl| fl.to_string()).collect();
-            if !flags.is_empty() {
-                out.push_str(&format!("Flags: {}\n", flags.join(", ")));
+            if let Some(to) = env.to.as_ref().and_then(|a| a.first()) {
+                out.push_str(&format!("To: {}\n", format_address(to)));
             }
-            out.push('\n');
+            if let Some(date) = env.date.as_ref() {
+                out.push_str(&format!("Date: {}\n", bytes_to_string(date)));
+            }
+        } else if let Some(raw) = f.body() {
+            // No ENVELOPE (parser rejected it): summarize the raw header
+            // block of the RFC822 literal ourselves.
+            if let Some(v) = header_value(raw, b"Subject") {
+                out.push_str(&format!(
+                    "Subject: {}\n",
+                    decode_rfc2047(bytes_to_string(&v))
+                ));
+            }
+            if let Some(v) = header_value(raw, b"From") {
+                out.push_str(&format!("From: {}\n", bytes_to_string(&v)));
+            }
+            if let Some(v) = header_value(raw, b"To") {
+                out.push_str(&format!("To: {}\n", bytes_to_string(&v)));
+            }
+            if let Some(v) = header_value(raw, b"Date") {
+                out.push_str(&format!("Date: {}\n", bytes_to_string(&v)));
+            }
+        }
+        if let Some(d) = f.internal_date() {
+            out.push_str(&format!("InternalDate: {}\n", d.format("%Y-%m-%d %H:%M:%S %z")));
+        }
+        let flags: Vec<String> = f.flags().iter().map(|fl| fl.to_string()).collect();
+        if !flags.is_empty() {
+            out.push_str(&format!("Flags: {}\n", flags.join(", ")));
+        }
+        out.push('\n');
 
-            if let Some(body) = f.body() {
-                out.push_str(&bytes_to_string(body));
-            } else {
-                out.push_str("(no message body)\n");
-            }
-            Ok(out)
-        })
+        if let Some(body) = f.body() {
+            out.push_str(&bytes_to_string(body));
+        } else {
+            out.push_str("(no message body)\n");
+        }
+        Ok(out)
     }
 
     fn mailbox_counts(&mut self, folder: Option<&str>) -> Result<Vec<Mailbox>> {
-        with_backend!(&mut self.backend, |s| {
-            let names: Vec<String> = match folder {
-                Some(f) => vec![f.to_string()],
-                None => s
-                    .list(None, Some("*"))?
-                    .into_iter()
-                    .filter(|n| !n.attributes().contains(&NameAttribute::NoSelect))
-                    .map(|n| n.name().to_string())
-                    .collect(),
-            };
-            let mut out = Vec::new();
-            for name in names {
-                let m = s
-                    .status(&name, "(MESSAGES UNSEEN RECENT UIDNEXT UIDVALIDITY)")
-                    .with_context(|| format!("STATUS for mailbox '{}'", name))?;
-                out.push(Mailbox {
-                    name,
-                    messages: m.exists,
-                    unseen: m.unseen.unwrap_or(0),
-                    recent: m.recent,
-                    uid_next: m.uid_next.unwrap_or(0),
-                    uid_validity: m.uid_validity.unwrap_or(0),
-                });
-            }
-            Ok(out)
-        })
+        let names: Vec<String> = match folder {
+            Some(f) => vec![f.to_string()],
+            None => self.session
+                .list(None, Some("*"))?
+                .iter()
+                .filter(|n| !n.attributes().contains(&NameAttribute::NoSelect))
+                .map(|n| n.name().to_string())
+                .collect(),
+        };
+        let mut out = Vec::new();
+        for name in names {
+            let m = self.session
+                .status(&name, "(MESSAGES UNSEEN RECENT UIDNEXT UIDVALIDITY)")
+                .with_context(|| format!("STATUS for mailbox '{}'", name))?;
+            out.push(Mailbox {
+                name,
+                messages: m.exists,
+                unseen: m.unseen.unwrap_or(0),
+                recent: m.recent,
+                uid_next: m.uid_next.unwrap_or(0),
+                uid_validity: m.uid_validity.unwrap_or(0),
+            });
+        }
+        Ok(out)
     }
 
     fn folder_uids(&mut self, folder: &str) -> Result<Vec<u32>> {
-        with_backend!(&mut self.backend, |s| {
-            s.select(folder)?;
-            // `ALL` is the standard key for "every message in the mailbox".
-            let uids: Vec<u32> = s.uid_search("ALL")?.into_iter().collect();
-            Ok(uids)
-        })
+        self.session.select(folder)?;
+        // `ALL` is the standard key for "every message in the mailbox".
+        let uids: Vec<u32> = self.session.uid_search("ALL")?.into_iter().collect();
+        Ok(uids)
+    }
+
+    /// Thread reconstruction needs Message-ID / In-Reply-To / References of
+    /// every message in the folder. They are fetched as a literal
+    /// `BODY[HEADER.FIELDS ...]` block — raw bytes we parse ourselves —
+    /// so the response cannot break the `imap-proto` quoted-string parser
+    /// the way ENVELOPE can (see `ITEMS_HEADERS`).
+    fn thread_uids(&mut self, folder: &str, uid: u32) -> Result<Vec<u32>> {
+        const THREAD_ITEMS: &str =
+            "(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])";
+        self.session
+            .select(folder)
+            .with_context(|| format!("could not select '{}'", folder))?;
+        let all: Vec<u32> = self
+            .session
+            .uid_search("ALL")
+            .with_context(|| format!("UID SEARCH ALL in '{}'", folder))?
+            .into_iter()
+            .collect();
+        if !all.contains(&uid) {
+            bail!("no email with UID {} in folder '{}'", uid, folder);
+        }
+        let mut all = all;
+        all.sort_unstable();
+        let mut msgs: Vec<ThreadRefs> = Vec::new();
+        const BATCH: usize = 100;
+        for chunk in all.chunks(BATCH) {
+            let list = chunk
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<String>>()
+                .join(",");
+            match self.attempt_fetch(folder, &list, THREAD_ITEMS) {
+                Attempt::Success(fs) => {
+                    for f in fs.iter() {
+                        if let Some(u) = f.uid {
+                            msgs.push(thread_refs_of_fetch(u, f.header().unwrap_or(&[])));
+                        }
+                    }
+                }
+                Attempt::Unparseable => {
+                    eprintln!(
+                        "warning: could not parse threading headers of {} message(s) in '{}'; thread may be incomplete",
+                        chunk.len(),
+                        folder
+                    );
+                }
+                Attempt::Fatal(e) => return Err(e),
+            }
+        }
+        thread_component(uid, &msgs)
+            .with_context(|| format!("threading UID {} in '{}'", uid, folder))
     }
 
     fn list_parts(&mut self, folder: &str, uid: u32) -> Result<Vec<PartInfo>> {
@@ -379,14 +605,11 @@ impl ImapBackend for RealClient {
             return;
         }
         self.closed = true;
-        // Do not send LOGOUT here. The `imap` crate v2.4 has a bug where
+        // Do not send LOGOUT here. The `imap` crate v3.0 has a bug where
         // `logout()` can panic with a tag mismatch assertion failure after many
         // commands (more mails / higher `-M`). Since this is a read-only tool
-        // and the connection is being closed anyway, just drop the backend and
+        // and the connection is being closed anyway, just drop the session and
         // let the server close the connection when the TCP stream is dropped.
-        match &mut self.backend {
-            Backend::Tls(_) | Backend::Plain(_) => {}
-        }
     }
 }
 
@@ -394,21 +617,6 @@ impl Drop for RealClient {
     fn drop(&mut self) {
         self.close();
     }
-}
-
-fn login<S>(client: imap::Client<S>, config: &Config, debug: bool) -> Result<Session<S>>
-where
-    S: std::io::Read + std::io::Write,
-{
-    let mut client = client;
-    client.read_greeting().context("could not read server greeting")?;
-    if debug {
-        eprintln!("Logging in as '{}'...", config.username);
-    }
-    client
-        .login(&config.username, &config.password)
-        .map_err(|(e, _)| e)
-        .with_context(|| format!("login as '{}' failed (check credentials / server)", config.username))
 }
 
 /// Count the leaf MIME parts of a server-reported body structure.
@@ -425,6 +633,110 @@ fn count_leaf_parts(bs: &imap_proto::types::BodyStructure) -> u32 {
 
 fn bytes_to_string(b: &[u8]) -> String {
     String::from_utf8_lossy(b).to_string()
+}
+
+/// First value of header `name` (case-insensitive) in a raw — possibly
+/// 8-bit — header block, with folded continuation lines unfolded.
+fn header_value(raw: &[u8], name: &[u8]) -> Option<Vec<u8>> {
+    let lname = name.to_ascii_lowercase();
+    let mut out: Option<Vec<u8>> = None;
+    for line in raw.split(|b| *b == b'\n') {
+        let line = if line.ends_with(b"\r") {
+            &line[..line.len() - 1]
+        } else {
+            line
+        };
+        if line.is_empty() {
+            break; // end of the header block
+        }
+        if line[0] == b' ' || line[0] == b'\t' {
+            if let Some(v) = out.as_mut() {
+                v.push(b' ');
+                v.extend(line.iter().copied().skip_while(|b| *b == b' ' || *b == b'\t'));
+            }
+            continue;
+        }
+        if out.is_some() {
+            break; // scanning past the header we were looking for
+        }
+        if let Some(pos) = line.iter().position(|b| *b == b':') {
+            if line[..pos].to_ascii_lowercase() == lname {
+                out = Some(
+                    line[pos + 1..]
+                        .iter()
+                        .copied()
+                        .skip_while(|b| *b == b' ' || *b == b'\t')
+                        .collect(),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Extract the first e-mail address from a raw From header value
+/// (`"Name" <a@b>`, `a@b`, or `a@b, c@d`).
+fn address_from_header(raw: &[u8]) -> String {
+    let s = bytes_to_string(raw);
+    if let Some(start) = s.find('<') {
+        let rest = &s[start + 1..];
+        if let Some(end) = rest.find('>') {
+            return rest[..end].trim().to_string();
+        }
+    }
+    s.split(|c| c == '(' || c == ',')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// Build a message's threading headers from a raw
+/// `BODY[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)]` block.
+fn thread_refs_of_fetch(uid: u32, raw: &[u8]) -> ThreadRefs {
+    let message_ids = header_value(raw, b"Message-ID")
+        .map(|v| extract_message_ids(&v))
+        .unwrap_or_default();
+    let mut references = Vec::new();
+    for name in [
+        b"References".as_slice(),
+        b"In-Reply-To".as_slice(),
+    ] {
+        if let Some(v) = header_value(raw, name) {
+            references.extend(extract_message_ids(&v));
+        }
+    }
+    ThreadRefs {
+        uid,
+        message_ids,
+        references,
+    }
+}
+
+/// Collect every `<...>` Message-ID token in a header value (References
+/// is a space-separated list of them). A value without angle brackets is
+/// kept as a single bare token when non-empty.
+fn extract_message_ids(v: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = v;
+    while let Some(start) = rest.iter().position(|b| *b == b'<') {
+        let after = &rest[start + 1..];
+        match after.iter().position(|b| *b == b'>') {
+            Some(end) => {
+                out.push(format!("<{}>", String::from_utf8_lossy(&after[..end]).trim()));
+                rest = &after[end + 1..];
+            }
+            None => break, // malformed tail; stop here
+        }
+    }
+    if out.is_empty() {
+        let t = bytes_to_string(v);
+        let t = t.trim();
+        if !t.is_empty() {
+            out.push(t.to_string());
+        }
+    }
+    out
 }
 
 /// Decode RFC 2047 encoded-words wherever they appear in a header value
@@ -529,12 +841,14 @@ fn decode_bytes(bytes: Vec<u8>, charset: &str) -> String {
 fn format_address(addr: &imap_proto::types::Address) -> String {
     let mailbox: String = addr
         .mailbox
-        .map(bytes_to_string)
+        .as_ref()
+        .map(|s| bytes_to_string(s))
         .filter(|m: &String| !m.is_empty())
         .unwrap_or_default();
     let host: String = addr
         .host
-        .map(bytes_to_string)
+        .as_ref()
+        .map(|s| bytes_to_string(s))
         .filter(|h: &String| !h.is_empty())
         .unwrap_or_default();
     if host.is_empty() {
@@ -546,7 +860,48 @@ fn format_address(addr: &imap_proto::types::Address) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_rfc2047;
+    use super::{address_from_header, decode_rfc2047, header_value};
+
+    #[test]
+    fn header_value_basic_case_insensitive() {
+        let raw = b"Subject: =?utf-8?Q?caf=E9?=\r\nFrom: A User <a@example.com>\r\n\r\nbody";
+        assert_eq!(
+            header_value(raw, b"subject").unwrap(),
+            b"=?utf-8?Q?caf=E9?="
+        );
+        assert!(header_value(raw, b"X-Missing").is_none());
+    }
+
+    #[test]
+    fn header_value_unfolds_continuations() {
+        let raw = b"Subject: first\r\n second\r\n\tthird\r\nTo: x@y.z\r\n";
+        assert_eq!(header_value(raw, b"Subject").unwrap(), b"first second third");
+    }
+
+    #[test]
+    fn header_value_keeps_raw_8bit_bytes() {
+        // Exactly the kind of bytes that break imap-proto's ENVELOPE
+        // parser and used to abort the whole search with a fake "Bye".
+        let raw = b"Subject: Votre facture \xe9!\r\nFrom: a@b.c\r\n";
+        assert_eq!(
+            header_value(raw, b"Subject").unwrap(),
+            b"Votre facture \xe9!"
+        );
+    }
+
+    #[test]
+    fn address_from_header_forms() {
+        assert_eq!(
+            address_from_header(b"A User <a@example.com>"),
+            "a@example.com"
+        );
+        assert_eq!(address_from_header(b"plain@example.com"), "plain@example.com");
+        assert_eq!(address_from_header(b"a@x.y, b@z.w"), "a@x.y");
+        assert_eq!(
+            address_from_header(b"Jean Dupont <jd@example.fr> (work)"),
+            "jd@example.fr"
+        );
+    }
 
     #[test]
     fn plain_string_unchanged() {

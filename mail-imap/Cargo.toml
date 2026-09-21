@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-imap = "2.4"
-imap-proto = "0.10"
+imap = { version = "3.0.0-alpha.15", features = ["native-tls"] }
+imap-proto = "0.16"
 base64 = "0.13"
 native-tls = "0.2"
 clap = { version = "4.0", features = ["derive"] }

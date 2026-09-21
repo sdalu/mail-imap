@@ -94,6 +94,12 @@ enum Command {
     },
     /// List the message UIDs of the folder
     Ids,
+    /// List the UIDs of every message in the thread containing the given
+    /// message (client-side reconstruction from Message-ID / References)
+    Thread {
+        /// Email UID (as shown by `search` / `unread`)
+        uid: u32,
+    },
     /// List unread emails of one or more folders
     Unread {
         /// Folder(s) to check, comma-separated or repeated
@@ -167,6 +173,7 @@ fn main() {
         Command::Read { uids } => cli::read_emails(&config, uids, json, debug),
         Command::Count { folder } => cli::mailbox_counts(&config, folder.as_deref(), json, debug),
         Command::Ids => cli::folder_uids(&config, json, debug),
+        Command::Thread { uid } => cli::thread_uids(&config, *uid, json, debug),
         Command::Unread { folders } => {
             cli::unread(&config, resolve_folders(folders, &config), json, debug)
         }

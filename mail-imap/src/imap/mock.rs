@@ -1,6 +1,8 @@
 use crate::config::Config;
-use crate::imap::{PartInfo, FolderInfo, ImapBackend, Mailbox, SearchResult};
-use anyhow::{bail, Result};
+use crate::imap::{
+    thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, SearchResult, ThreadRefs,
+};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 
 /// In-memory mock backend. This is the original mockup, kept for offline
@@ -10,6 +12,8 @@ pub struct MockClient {
     folders: Vec<String>,
     /// uid -> (subject, from, body)
     messages: Vec<(u32, String, String, String)>,
+    /// uid -> (Message-IDs, referenced Message-IDs) used by `thread`.
+    thread_ids: Vec<(u32, Vec<String>, Vec<String>)>,
 }
 
 impl MockClient {
@@ -28,6 +32,16 @@ impl MockClient {
                 (3, "Quarterly report".into(), "carol@example.com".into(), "Attached: Q3 numbers.".into()),
                 (4, "Lunch?".into(), "dave@example.com".into(), "Pizza at noon?".into()),
                 (5, "Your invoice".into(), "billing@example.com".into(), "Invoice #42 is due.".into()),
+            ],
+            // 4 replies to 2; 5 replies to 3, referencing 1 as well, so
+            // {1, 3, 5} form one thread and {2, 4} another; 1..3 stand
+            // alone apart from those links.
+            thread_ids: vec![
+                (1, vec!["<m1@mail>".into()], vec![]),
+                (2, vec!["<m2@mail>".into()], vec![]),
+                (3, vec!["<m3@mail>".into()], vec!["<m1@mail>".into()]),
+                (4, vec!["<m4@mail>".into()], vec!["<m2@mail>".into()]),
+                (5, vec!["<m5@mail>".into()], vec!["<m3@mail>".into()]),
             ],
         })
     }
@@ -180,6 +194,23 @@ impl ImapBackend for MockClient {
 
     fn folder_uids(&mut self, _folder: &str) -> Result<Vec<u32>> {
         Ok(self.messages.iter().map(|(u, _, _, _)| *u).collect())
+    }
+
+    fn thread_uids(&mut self, folder: &str, uid: u32) -> Result<Vec<u32>> {
+        if !self.messages.iter().any(|(u, _, _, _)| *u == uid) {
+            bail!("no email with UID {} (mock)", uid);
+        }
+        let msgs: Vec<ThreadRefs> = self
+            .thread_ids
+            .iter()
+            .map(|(u, ids, refs)| ThreadRefs {
+                uid: *u,
+                message_ids: ids.clone(),
+                references: refs.clone(),
+            })
+            .collect();
+        thread_component(uid, &msgs)
+            .with_context(|| format!("threading UID {} in '{}'", uid, folder))
     }
 
     fn list_parts(&mut self, _folder: &str, uid: u32) -> Result<Vec<PartInfo>> {

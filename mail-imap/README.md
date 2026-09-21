@@ -18,6 +18,8 @@ the tool can be built, demoed and unit-tested without a reachable server.
 - Read email(s) by UID selection (comma-separated list, no ranges)
 - Show message counts / status of mailboxes (IMAP `STATUS`)
 - List the message UIDs of a folder
+- List the message UIDs of the thread containing a given message
+  (client-side reconstruction from Message-ID / References headers)
 - List unread emails of a folder
 - List the MIME parts of an email, and save one part to a file
 - JSON output mode (`-j`) for programmatic use
@@ -59,6 +61,11 @@ mail-imap --config incal.conf status INBOX   # "status" is an alias of "count"
 # List the message UIDs of the folder
 mail-imap --config incal.conf -f INBOX ids
 
+# List the UIDs of every message in the thread containing UID 12345
+# (no server THREAD extension needed; reads Message-ID / References /
+# In-Reply-To of the folder's messages as raw header literals).
+mail-imap --config incal.conf -f INBOX thread 12345
+
 # List unread emails of the folder (or several: unread INBOX Archive)
 mail-imap --config incal.conf -f INBOX unread
 
@@ -89,6 +96,7 @@ Each command prints one compact JSON object to stdout:
 | `read` | one `{"folder", "uid", "content"}` object per selected UID |
 | `count` / `status` | `{"all", "counts": [{"name", "messages", "unseen", "recent", "uid_next", "uid_validity"}]}` |
 | `ids` | `{"folder", "count", "uids": [1, 2, ...]}` |
+| `thread` | `{"folder", "uid", "count", "uids": [1, 2, ...]}` (all UIDs of the thread containing `uid`, ascending, `uid` included) |
 | `unread` | same shape as `search` (query fixed to `UNSEEN`, folder(s) + part counts included) |
 | `parts list` | one `{"folder", "uid", "count", "parts": [{"part", "content_type", "filename", "size"}]}` per selected UID |
 | `parts save` | `{"folder", "uid", "part", "file", "size"}` |
