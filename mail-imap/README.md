@@ -30,9 +30,23 @@ the tool can be built, demoed and unit-tested without a reachable server.
 
 ## Usage
 
+### Commands
+
+| Command | Syntax | Description |
+|---------|--------|-------------|
+| `folder` | `folder` | List mailboxes/folders |
+| `search` | `search <QUERY> [FOLDER...]` | Search emails with any IMAP `SEARCH` query; one or more folders (comma-separated or repeated, default `-f`/config) |
+| `read` | `read <UID[,UID...]>` | Read email(s) by UID (comma-separated list, no ranges) |
+| `count` | `count [FOLDER]` | Message counts / status of all mailboxes or one (alias: `status`) |
+| `uid` | `uid` | List the message UIDs of the folder |
+| `thread` | `thread <UID>` | List the UIDs of every message in the thread containing the given message |
+| `unread` | `unread [FOLDER...]` | List unread emails of one or more folders (`search UNSEEN`) |
+| `part list` | `part list <UID[,UID...]>` | List the MIME parts of email(s) |
+| `part save` | `part save <UID> <PART> [-o <FILE>]` | Save one MIME part to a file (default: the part's filename in the current directory) |
+
 ```bash
 # List folders
-mail-imap --config incal.conf folders
+mail-imap --config incal.conf folder
 
 # Search emails (IMAP SEARCH query, e.g. "UNSEEN", "FROM bob", "SUBJECT invoice",
 # "SINCE 01-Jan-2026", or any combination of terms)
@@ -46,7 +60,7 @@ mail-imap --config incal.conf search UNSEEN "INBOX,Sent Items"  # comma form
 
 # List every email in the folder: the query "ALL" matches all messages.
 # Results are capped by --max / "max" in the config (default 50; 0 =
-# unlimited). Just the UIDs of all messages: use `ids` instead.
+# unlimited). Just the UIDs of all messages: use `uid` instead.
 mail-imap --config incal.conf -f INBOX search ALL
 mail-imap --config incal.conf -f INBOX -M 200 search ALL   # raise the cap for this run
 
@@ -61,7 +75,7 @@ mail-imap --config incal.conf count INBOX
 mail-imap --config incal.conf status INBOX   # "status" is an alias of "count"
 
 # List the message UIDs of the folder
-mail-imap --config incal.conf -f INBOX ids
+mail-imap --config incal.conf -f INBOX uid
 
 # List the UIDs of every message in the thread containing UID 12345
 # (no server THREAD extension needed; reads Message-ID / References /
@@ -72,18 +86,18 @@ mail-imap --config incal.conf -f INBOX thread 12345
 mail-imap --config incal.conf -f INBOX unread
 
 # List the MIME parts of one or more emails
-mail-imap --config incal.conf -f INBOX parts list 12345
-mail-imap --config incal.conf -f INBOX parts list 12345,67890
+mail-imap --config incal.conf -f INBOX part list 12345
+mail-imap --config incal.conf -f INBOX part list 12345,67890
 
 # Save one part to a file (default: the part's filename, else
 # uid<N>_part<M>, in the current directory; -o to choose a path)
-mail-imap --config incal.conf -f INBOX parts save 12345 2 -o /tmp/invoice.pdf
+mail-imap --config incal.conf -f INBOX part save 12345 2 -o /tmp/invoice.pdf
 
 # JSON output (machine-readable: one compact JSON object on stdout)
 mail-imap --config incal.conf -j -f INBOX search "SINCE 01-Jan-2026"
 
 # Run against the in-memory mock (no server needed) for testing/demos
-mail-imap --mock folders
+mail-imap --mock folder
 mail-imap --mock search invoice
 ```
 
@@ -93,15 +107,15 @@ Each command prints one compact JSON object to stdout:
 
 | Command | Shape |
 |---------|-------|
-| `folders` | `{"count", "folders": [...]}` |
+| `folder` | `{"count", "folders": [...]}` |
 | `search` | one folder: `{"folder", "query", "count", "results": [...]}`; several folders: `{"folders": [...], "query", "count", "results": [...]}`. Each result includes `"folder"` (its mailbox) and `"parts"` (number of MIME parts) |
 | `read` | one `{"folder", "uid", "content"}` object per selected UID |
 | `count` / `status` | `{"all", "counts": [{"name", "messages", "unseen", "recent", "uid_next", "uid_validity"}]}` |
-| `ids` | `{"folder", "count", "uids": [1, 2, ...]}` |
+| `uid` | `{"folder", "count", "uids": [1, 2, ...]}` |
 | `thread` | `{"folder", "uid", "count", "uids": [1, 2, ...]}` (all UIDs of the thread containing `uid`, ascending, `uid` included) |
 | `unread` | same shape as `search` (query fixed to `UNSEEN`, folder(s) + part counts included) |
-| `parts list` | one `{"folder", "uid", "count", "parts": [{"part", "content_type", "filename", "size"}]}` per selected UID |
-| `parts save` | `{"folder", "uid", "part", "file", "size"}` |
+| `part list` | one `{"folder", "uid", "count", "parts": [{"part", "content_type", "filename", "size"}]}` per selected UID |
+| `part save` | `{"folder", "uid", "part", "file", "size"}` |
 
 Errors are printed as `{"error": "..."}` on stderr with a non-zero exit code.
 
@@ -156,7 +170,7 @@ cargo test
 ```
 
 The tests cover the mock backend end-to-end (list / search / read / count /
-ids / unread / parts), UID-selection parsing, the MIME parser, backend
+uid / unread / part), UID-selection parsing, the MIME parser, backend
 selection, the RFC 2047 decoder, and that the real backend fails cleanly
 rather than fabricating data when no server is reachable.
 

@@ -70,7 +70,7 @@ fn resolve_folders(explicit: &[String], config: &config::Config) -> Vec<String> 
 #[derive(clap::Subcommand)]
 enum Command {
     /// List folders
-    Folders,
+    Folder,
     /// Search emails in one or more folders (IMAP SEARCH query: "ALL" for
     /// every message, "UNSEEN", 'HEADER FROM "foo"')
     Search {
@@ -93,7 +93,7 @@ enum Command {
         folder: Option<String>,
     },
     /// List the message UIDs of the folder
-    Ids,
+    Uid,
     /// List the UIDs of every message in the thread containing the given
     /// message (server-side RFC 5256 THREAD when advertised, else
     /// client-side reconstruction from Message-ID / References)
@@ -109,7 +109,7 @@ enum Command {
         folders: Vec<String>,
     },
     /// List or save MIME parts of an email
-    Parts {
+    Part {
         /// What to do with the parts
         #[clap(subcommand)]
         action: PartsAction,
@@ -127,7 +127,7 @@ enum PartsAction {
     Save {
         /// Email UID
         uid: u32,
-        /// Part number (as listed by `parts list`)
+        /// Part number (as listed by `part list`)
         part: u32,
         /// Destination file (default: the part's filename in the current directory)
         #[clap(short = 'o', long = "out")]
@@ -163,7 +163,7 @@ fn main() {
     let json = args.json;
     let debug = args.debug;
     let result = match &args.command {
-        Command::Folders => cli::list_folders(&config, json, debug),
+        Command::Folder => cli::list_folders(&config, json, debug),
         Command::Search { query, folders } => cli::search_emails(
             &config,
             query,
@@ -173,12 +173,12 @@ fn main() {
         ),
         Command::Read { uids } => cli::read_emails(&config, uids, json, debug),
         Command::Count { folder } => cli::mailbox_counts(&config, folder.as_deref(), json, debug),
-        Command::Ids => cli::folder_uids(&config, json, debug),
+        Command::Uid => cli::folder_uids(&config, json, debug),
         Command::Thread { uid } => cli::thread_uids(&config, *uid, json, debug),
         Command::Unread { folders } => {
             cli::unread(&config, resolve_folders(folders, &config), json, debug)
         }
-        Command::Parts { action } => match action {
+        Command::Part { action } => match action {
             PartsAction::List { uids } => cli::parts_list(&config, uids, json, debug),
             PartsAction::Save { uid, part, out } => {
                 cli::parts_save(&config, *uid, *part, out.clone(), json, debug)

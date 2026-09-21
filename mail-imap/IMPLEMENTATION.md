@@ -38,15 +38,15 @@ operation body can be shared by a `with_backend!` macro.
 
 | CLI command | IMAP commands used |
 |-------------|--------------------|
-| `folders` | `LIST "" *` (non-`\Noselect` names) |
+| `folder` | `LIST "" *` (non-`\Noselect` names) |
 | `search` / `unread` | per folder: `SELECT` + `UID SEARCH <query>` + batched `UID FETCH` (envelope/flags/date/size/`BODYSTRUCTURE`); folders are searched in order and the results aggregated |
 | `read` | `SELECT` + `UID FETCH <uid> (UID ENVELOPE FLAGS INTERNALDATE BODY.PEEK[RFC822])` |
 | `count` / `status` | `LIST "" *` + `STATUS <folder> (MESSAGES UNSEEN RECENT UIDNEXT UIDVALIDITY)` per mailbox (or one folder when given) |
-| `ids` | `SELECT` + `UID SEARCH *` |
+| `uid` | `SELECT` + `UID SEARCH *` |
 | `thread` | `SELECT` + `CAPABILITY`; if `THREAD=REFERENCES` is advertised: one `UID THREAD REFERENCES UTF-8 ALL` (server-side tree, flattened). Otherwise: `UID SEARCH ALL` + batched `UID FETCH <uids> (UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])`, then client-side union-find over Message-IDs |
 | `unread` | `SELECT` + `UID SEARCH UNSEEN` + batched `UID FETCH` (same path as `search`) |
-| `parts list` | `SELECT` + `UID FETCH <uid> (UID BODY.PEEK[RFC822])`, then MIME part enumeration locally |
-| `parts save` | same fetch, then the selected part is CTE-decoded and written to a file |
+| `part list` | `SELECT` + `UID FETCH <uid> (UID BODY.PEEK[RFC822])`, then MIME part enumeration locally |
+| `part save` | same fetch, then the selected part is CTE-decoded and written to a file |
 
 IMAP can only search the selected mailbox, so `search`/`unread` iterate over
 the requested folders (positional args, comma-separated or repeated; default
@@ -63,7 +63,7 @@ the `BODYSTRUCTURE` fetch item added to the same batched fetch: the server
 returns the MIME tree without transferring any content, and
 `count_leaf_parts` (`src/imap/real.rs`) sums the leaf nodes (multipart
 containers recurse; `message/rfc822` and single parts count as one, matching
-the local parser used by `parts list`). `unread` reuses this path, so it
+the local parser used by `part list`). `unread` reuses this path, so it
 includes part counts too.
 
 The part count is best-effort: batches are fetched through a degradation
@@ -126,19 +126,19 @@ countermeasures (`src/imap/real.rs`):
 
 No operation sends a command that mutates the mailbox: there is no `MOVE`,
 `COPY`, `STORE`, or `EXPUNGE` anywhere. Message bodies are fetched with
-`BODY.PEEK[RFC822]`, so even `read` and `parts` do not make the server set
+`BODY.PEEK[RFC822]`, so even `read` and `part` do not make the server set
 `\Seen`.
 
 ### UID selection
 
-Commands that take messages (`read`, `parts list`) accept a UID selection:
+Commands that take messages (`read`, `part list`) accept a UID selection:
 a single UID or a comma-separated list (`1,4,7`). Ranges (`1-7`) are rejected
 by `parse_uids` (`src/cli/mod.rs`) with a dedicated error. The list is
 deduplicated, input order is preserved, and each UID is fetched individually.
 
 ### MIME parsing (`mime.rs`)
 
-`parts` works on the raw RFC822 bytes: headers are unfolded and parsed
+`part` works on the raw RFC822 bytes: headers are unfolded and parsed
 (`Content-Type`, `Content-Disposition`, `Content-Transfer-Encoding`),
 `multipart/*` bodies are split on their boundary lines (preamble and epilogue
 discarded), and leaf parts are numbered in document order (1-based). Part
@@ -155,15 +155,15 @@ base64). Plain text is left untouched.
 
 The original mockup, preserved. Returns a fixed set of folders and five sample
 messages so every operation can be exercised offline. Two messages carry
-extra part metadata (UID 3: spreadsheet, UID 5: PDF); `parts save` writes a
+extra part metadata (UID 3: spreadsheet, UID 5: PDF); `part save` writes a
 deterministic placeholder file whose size matches the part reported by
-`parts list`. It is what the unit tests drive.
+`part list`. It is what the unit tests drive.
 
 ## Testing
 
 `cargo test` runs entirely against the mock backend (no network). Coverage:
 - backend selection (`mock` vs `real`)
-- list / search / read / count / ids / unread / parts happy + error paths
+- list / search / read / count / uid / unread / part happy + error paths
 - UID selection parsing (comma lists, dedup, range rejection, invalid input)
 - MIME parser (plain, multipart, nested multipart, base64 / quoted-printable /
   binary decoding, missing boundary)
@@ -173,7 +173,7 @@ deterministic placeholder file whose size matches the part reported by
 To exercise the real backend manually:
 
 ```bash
-cargo run --release -- -c incal.conf folders
+cargo run --release -- -c incal.conf folder
 cargo run --release -- -c incal.conf -f INBOX search "SINCE 01-Jan-2026"
 ```
 
@@ -185,14 +185,14 @@ prints a single compact JSON object to stdout instead; errors become
 
 | Command | Shape |
 |---------|-------|
-| `folders` | `{"count", "folders": [FolderInfo]}` |
+| `folder` | `{"count", "folders": [FolderInfo]}` |
 | `search` | `{"folder", "query", "count", "results": [SearchResult]}` |
 | `read` | one `{"folder", "uid", "content"}` per selected UID |
 | `count` / `status` | `{"all", "counts": [Mailbox]}` |
-| `ids` | `{"folder", "count", "uids": [u32]}` |
+| `uid` | `{"folder", "count", "uids": [u32]}` |
 | `unread` | same as `search` (query `UNSEEN`) |
-| `parts list` | one `{"folder", "uid", "count", "parts": [PartInfo]}` per selected UID |
-| `parts save` | `{"folder", "uid", "part", "file", "size"}` |
+| `part list` | one `{"folder", "uid", "count", "parts": [PartInfo]}` per selected UID |
+| `part save` | `{"folder", "uid", "part", "file", "size"}` |
 
 `FolderInfo`, `SearchResult`, `Mailbox` and `PartInfo` derive
 `serde::Serialize`; the other shapes are small output structs in

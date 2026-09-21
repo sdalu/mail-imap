@@ -509,7 +509,6 @@ mod tests {
             flags: vec!["\\Seen".into()],
             parts: 2,
         }];
-        let folders = vec!["INBOX".to_string()];
         let out = SearchOutput {
             folder: Some("INBOX"),
             folders: None,
