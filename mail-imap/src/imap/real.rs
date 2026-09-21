@@ -1,14 +1,16 @@
 use crate::config::Config;
 use crate::imap::mime;
 use crate::imap::{
-    thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, SearchResult, ThreadRefs,
+    sort_results, thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, SearchResult,
+    SortCriteria, SortKey, ThreadRefs,
 };
 use anyhow::{bail, Context, Result};
+use imap::extensions::sort::{SortCharset, SortCriterion};
 use imap::extensions::thread::{ThreadAlgorithm, ThreadCharset};
 use imap::{ClientBuilder, Connection, ConnectionMode, Session};
 use imap_proto::NameAttribute;
 use imap::types::Flag;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::ToSocketAddrs;
 use std::path::Path;
 
@@ -249,20 +251,96 @@ impl RealClient {
         folder: &str,
         query: &str,
         cap: usize,
+        sort: Option<&SortCriteria>,
     ) -> Result<Vec<SearchResult>> {
         self.session.select(folder)?;
-        let mut uids: Vec<u32> = self.session
-            .uid_search(query)?
-            .into_iter()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+
+        // Desired UID order: server-side `UID SORT` when a SORT-capable
+        // server can carry every criterion, otherwise most-recent first.
+        let mut server_sorted = false;
+        let mut uids: Vec<u32> = Vec::new();
+        if let Some(spec) = sort {
+            if spec.server_sortable() && self.has_capability("SORT") {
+                let bases: Vec<SortCriterion<'static>> = spec
+                    .keys
+                    .iter()
+                    .map(|(key, _)| match key {
+                        SortKey::Date => SortCriterion::Date,
+                        SortKey::Arrival => SortCriterion::Arrival,
+                        SortKey::Size => SortCriterion::Size,
+                        SortKey::Subject => SortCriterion::Subject,
+                        SortKey::From => SortCriterion::From,
+                        SortKey::To => SortCriterion::To,
+                        SortKey::Cc => SortCriterion::Cc,
+                        SortKey::Uid => unreachable!("guarded by server_sortable()"),
+                    })
+                    .collect();
+                let crits: Vec<SortCriterion> = spec
+                    .keys
+                    .iter()
+                    .zip(&bases)
+                    .map(|((_, reverse), base)| {
+                        if *reverse {
+                            SortCriterion::Reverse(base)
+                        } else {
+                            *base
+                        }
+                    })
+                    .collect();
+                match self.session.uid_sort(&crits, SortCharset::Utf8, query) {
+                    Ok(list) => {
+                        if self.debug {
+                            eprintln!(
+                                "search: server-side UID SORT ({})",
+                                crits
+                                    .iter()
+                                    .map(|c| c.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            );
+                        }
+                        uids = list;
+                        server_sorted = true;
+                    }
+                    Err(e) => {
+                        if self.debug {
+                            eprintln!(
+                                "UID SORT failed ({}); falling back to client-side sort",
+                                e
+                            );
+                        }
+                        if is_poisoned(&e) {
+                            self.reconnect(folder)?;
+                        }
+                    }
+                }
+            }
+            if !server_sorted
+                && spec
+                    .keys
+                    .iter()
+                    .any(|(k, _)| matches!(k, SortKey::To | SortKey::Cc))
+            {
+                bail!(
+                    "cannot sort by 'to'/'cc': the server does not advertise SORT (RFC 5256)"
+                );
+            }
+        }
+        if !server_sorted {
+            uids = self
+                .session
+                .uid_search(query)?
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            // Without a server sort, fetch the newest messages: UIDs
+            // increase over time, and any client-side sort wants recency.
+            uids.reverse();
+        }
         if uids.is_empty() {
             return Ok(Vec::new());
         }
-
-        // Show most-recent first (UIDs increase over time) and cap the count.
-        uids.reverse();
         if cap > 0 {
             uids.truncate(cap);
         }
@@ -289,6 +367,27 @@ impl RealClient {
                     );
                     break;
                 }
+            }
+        }
+
+        // FETCH responses come back in sequence-number order; restore the
+        // UID order computed above.
+        let mut by_uid: HashMap<u32, SearchResult> =
+            out.into_iter().map(|r| (r.uid, r)).collect();
+        let mut ordered: Vec<SearchResult> = Vec::with_capacity(by_uid.len());
+        for uid in &uids {
+            if let Some(r) = by_uid.remove(uid) {
+                ordered.push(r);
+            }
+        }
+        ordered.extend(by_uid.into_values());
+        out = ordered;
+        // Fallback path: sort the fetched (most-recent-capped) page
+        // client-side. Selection can therefore differ from a true
+        // sorted-and-capped result set for non-date criteria.
+        if !server_sorted {
+            if let Some(spec) = sort {
+                sort_results(&mut out, spec);
             }
         }
         Ok(out)
@@ -365,6 +464,30 @@ impl RealClient {
             imap::Error::Parse(_) | imap::Error::Unexpected(_) => Attempt::Unparseable,
             e => Attempt::Fatal(e.into()),
         }
+    }
+
+    /// One `UID STORE <list> <mode>FLAGS (...)` round trip with the same
+    /// reconnect-once recovery as fetches (`mode` is `'+'` or `'-'`).
+    fn store_one(&mut self, folder: &str, list: &str, mode: char, flags: &[String]) -> Result<()> {
+        let items = format!("{}FLAGS ({})", mode, flags.join(" "));
+        let mut err = match self.session.uid_store(list, &items) {
+            Ok(_) => return Ok(()),
+            Err(e) => e,
+        };
+        if is_poisoned(&err) {
+            if self.debug {
+                eprintln!("Connection desynced ({}); reconnecting...", err);
+            }
+            self.reconnect(folder)?;
+            match self.session.uid_store(list, &items) {
+                Ok(_) => return Ok(()),
+                Err(e2) => err = e2,
+            }
+        }
+        Err(anyhow::Error::from(err).context(format!(
+            "UID STORE {} {} in '{}' failed",
+            list, items, folder
+        )))
     }
 
     fn fetch_to_result(&self, f: &imap::types::Fetch<'_>, folder: &str) -> SearchResult {
@@ -467,6 +590,7 @@ impl ImapBackend for RealClient {
         folders: &[String],
         query: &str,
         max_results: usize,
+        sort: Option<&SortCriteria>,
     ) -> Result<Vec<SearchResult>> {
         let mut out: Vec<SearchResult> = Vec::new();
         for folder in folders {
@@ -478,7 +602,7 @@ impl ImapBackend for RealClient {
             } else {
                 usize::MAX
             };
-            out.extend(self.search_in_folder(folder, query, cap)?);
+            out.extend(self.search_in_folder(folder, query, cap, sort)?);
         }
         Ok(out)
     }
@@ -713,6 +837,58 @@ impl ImapBackend for RealClient {
         std::fs::write(dest, &data)
             .with_context(|| format!("writing part to {}", dest.display()))?;
         Ok(data.len() as u64)
+    }
+
+    fn store_flags(
+        &mut self,
+        folder: &str,
+        uids: &[u32],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        self.session
+            .select(folder)
+            .with_context(|| format!("could not select '{}'", folder))?;
+        const BATCH: usize = 50;
+        for chunk in uids.chunks(BATCH) {
+            let list = chunk
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            if !remove.is_empty() {
+                self.store_one(folder, &list, '-', remove)?;
+            }
+            if !add.is_empty() {
+                self.store_one(folder, &list, '+', add)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn message_flags(&mut self, folder: &str, uid: u32) -> Result<Vec<String>> {
+        self.session
+            .select(folder)
+            .with_context(|| format!("could not select '{}'", folder))?;
+        let uid_s = uid.to_string();
+        let fetches = match self.attempt_fetch(folder, &uid_s, "(UID FLAGS)") {
+            Attempt::Success(fs) => fs,
+            Attempt::Unparseable => bail!(
+                "could not fetch flags for UID {} in '{}': server response could not be parsed",
+                uid,
+                folder
+            ),
+            Attempt::Fatal(e) => return Err(e),
+        };
+        let f = fetches
+            .iter()
+            .find(|f| f.uid == Some(uid))
+            .ok_or_else(|| anyhow::anyhow!("no email with UID {} in '{}'", uid, folder))?;
+        Ok(f.flags()
+            .iter()
+            .filter(|fl| !matches!(fl, Flag::Recent))
+            .map(|fl| fl.to_string())
+            .collect())
     }
 
     fn close(&mut self) {

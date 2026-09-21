@@ -1,8 +1,9 @@
 //! IMAP access layer.
 //!
-//! This is a **read-only** tool: it never moves, deletes, or modifies
-//! messages, tags, or flags on the server. Reads use `BODY.PEEK[]` so even
-//! fetching a message does not set `\Seen`.
+//! This is a **passively read-only** tool: it never moves or deletes
+//! messages, and reads use `BODY.PEEK[]` so even fetching a message does
+//! not set `\Seen`. The only mutating operations are the explicit
+//! `flag` / `tag` commands ([`ImapBackend::store_flags`], `UID STORE`).
 //!
 //! Operations are exposed through the [`ImapBackend`] trait. Two backends exist:
 //!
@@ -16,9 +17,11 @@
 mod mime;
 mod mock;
 mod real;
+mod sort;
 
 pub use mock::MockClient;
 pub use real::RealClient;
+pub use sort::{parse_sort, sort_results, SortCriteria, SortKey};
 
 use crate::config::Config;
 use anyhow::Result;
@@ -71,19 +74,24 @@ pub struct PartInfo {
 }
 
 /// The operations the CLI needs from an IMAP account. All operations are
-/// read-only.
+/// read-only except [`ImapBackend::store_flags`], which the explicit
+/// `flag` / `tag` commands use (nothing ever moves or deletes mail).
 pub trait ImapBackend {
     fn list_folders(&mut self) -> Result<Vec<FolderInfo>>;
     /// Run `query` against each of `folders` in order (IMAP can only search
     /// one selected mailbox at a time, so this is iteration + aggregation).
-    /// Results are grouped per folder, most-recent first within each folder,
-    /// and the total result count is capped by `max_results` (0 = unlimited).
-    /// Each result's `folder` names the mailbox it came from.
+    /// Results are grouped per folder and the total result count is capped
+    /// by `max_results` (0 = unlimited). Each result's `folder` names the
+    /// mailbox it came from. Default order within a folder is most-recent
+    /// (UID) first; `sort` (see [`parse_sort`]) orders by the given
+    /// criteria instead — server-side `UID SORT` (RFC 5256) when the
+    /// server advertises `SORT`, else client-side over the fetched page.
     fn search_folders(
         &mut self,
         folders: &[String],
         query: &str,
         max_results: usize,
+        sort: Option<&SortCriteria>,
     ) -> Result<Vec<SearchResult>>;
     fn get_email(&mut self, folder: &str, uid: u32) -> Result<String>;
     /// Per-mailbox counters via `STATUS`. `folder = None` means all
@@ -100,6 +108,20 @@ pub trait ImapBackend {
     fn thread_uids(&mut self, folder: &str, uid: u32) -> Result<Vec<u32>>;
     /// The MIME parts of one message (document order, 1-based part numbers).
     fn list_parts(&mut self, folder: &str, uid: u32) -> Result<Vec<PartInfo>>;
+    /// Add (`add`) and/or remove (`remove`) flags — system flags like
+    /// `\Seen` or keywords like `invoice` — on the given messages via
+    /// `UID STORE ±FLAGS`. The tool's only mutating operation.
+    fn store_flags(
+        &mut self,
+        folder: &str,
+        uids: &[u32],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()>;
+    /// The flags (system flags + keywords) of one message, as strings.
+    /// `\Recent` is omitted (transient, server-managed), matching the
+    /// `flags` of search results.
+    fn message_flags(&mut self, folder: &str, uid: u32) -> Result<Vec<String>>;
     /// Decode MIME part `part` of message `uid` and write it to `dest`.
     /// Returns the number of bytes written.
     fn save_part(
@@ -141,10 +163,11 @@ impl ImapBackend for ImapClient {
         folders: &[String],
         query: &str,
         max_results: usize,
+        sort: Option<&SortCriteria>,
     ) -> Result<Vec<SearchResult>> {
         match self {
-            ImapClient::Real(c) => c.search_folders(folders, query, max_results),
-            ImapClient::Mock(c) => c.search_folders(folders, query, max_results),
+            ImapClient::Real(c) => c.search_folders(folders, query, max_results, sort),
+            ImapClient::Mock(c) => c.search_folders(folders, query, max_results, sort),
         }
     }
     fn get_email(&mut self, folder: &str, uid: u32) -> Result<String> {
@@ -175,6 +198,24 @@ impl ImapBackend for ImapClient {
         match self {
             ImapClient::Real(c) => c.list_parts(folder, uid),
             ImapClient::Mock(c) => c.list_parts(folder, uid),
+        }
+    }
+    fn store_flags(
+        &mut self,
+        folder: &str,
+        uids: &[u32],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        match self {
+            ImapClient::Real(c) => c.store_flags(folder, uids, add, remove),
+            ImapClient::Mock(c) => c.store_flags(folder, uids, add, remove),
+        }
+    }
+    fn message_flags(&mut self, folder: &str, uid: u32) -> Result<Vec<String>> {
+        match self {
+            ImapClient::Real(c) => c.message_flags(folder, uid),
+            ImapClient::Mock(c) => c.message_flags(folder, uid),
         }
     }
     fn save_part(

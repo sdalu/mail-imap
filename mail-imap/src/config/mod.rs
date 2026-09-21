@@ -25,6 +25,10 @@ pub struct Config {
     /// Maximum number of search results to fetch (0 = no limit).
     #[serde(default = "default_max")]
     pub max: usize,
+    /// Sort spec for search/unread (`-S`/`--sort` overrides), e.g.
+    /// "-date" or "subject,-size". None = default (most recent first).
+    #[serde(default)]
+    pub sort: Option<String>,
     /// Use the in-memory mock backend instead of a real IMAP server.
     /// Intended for testing/demos; the released binary talks to a real server.
     #[serde(default)]
@@ -59,6 +63,7 @@ impl Default for Config {
             insecure: false,
             folder: "INBOX".to_string(),
             max: default_max(),
+            sort: None,
             mock: false,
         }
     }

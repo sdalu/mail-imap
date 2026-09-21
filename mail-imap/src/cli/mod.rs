@@ -104,6 +104,23 @@ struct PartsListOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct FlagChangeOutput<'a> {
+    folder: &'a str,
+    count: usize,
+    uids: &'a [u32],
+    added: &'a [String],
+    removed: &'a [String],
+}
+
+#[derive(Serialize)]
+struct FlagListOutput<'a> {
+    folder: &'a str,
+    uid: u32,
+    count: usize,
+    flags: &'a [String],
+}
+
+#[derive(Serialize)]
 struct PartsSaveOutput<'a> {
     folder: &'a str,
     uid: u32,
@@ -164,8 +181,14 @@ pub fn search_emails(config: &Config, query: &str, folders: Vec<String>, json: b
     if debug {
         eprintln!("Searching folders {:?} with query '{}'", folders, query);
     }
+    let sort = config.sort.as_deref().map(crate::imap::parse_sort).transpose()?;
+    if debug {
+        if let Some(spec) = &config.sort {
+            eprintln!("Sorting results by '{}'", spec);
+        }
+    }
     let mut client = ImapClient::connect(config, debug)?;
-    let results = client.search_folders(&folders, query, config.max)?;
+    let results = client.search_folders(&folders, query, config.max, sort.as_ref())?;
     if debug {
         eprintln!("Found {} result(s)", results.len());
     }
@@ -365,6 +388,162 @@ pub fn thread_uids(config: &Config, uid: u32, json: bool, debug: bool) -> Result
 
 pub fn unread(config: &Config, folders: Vec<String>, json: bool, debug: bool) -> Result<()> {
     search_emails(config, "UNSEEN", folders, json, debug)
+}
+
+/// Validate flag/tag names. Each name is a system flag (`\Seen`,
+/// `\Answered`, `\Flagged`, `\Deleted`, `\Draft` — case-insensitive,
+/// normalized here; `\Recent` is server-managed and rejected) or a custom
+/// keyword (letters, digits and the atom punctuation `$ ! # & ' + - / = ?
+/// ^ _ \` { | } ~ .`). `allow_system` is false for `tag`, which only
+/// accepts keywords. Deduplicates, preserving order.
+pub fn parse_flag_names(names: &[String], allow_system: bool) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for name in names {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("empty flag name");
+        }
+        if let Some(rest) = name.strip_prefix('\\') {
+            if !allow_system {
+                bail!(
+                    "'{}' is a system flag; tags must be plain keywords (use the 'flag' command for system flags)",
+                    name
+                );
+            }
+            let normalized = match rest.to_ascii_lowercase().as_str() {
+                "seen" => Some("\\Seen"),
+                "answered" => Some("\\Answered"),
+                "flagged" => Some("\\Flagged"),
+                "deleted" => Some("\\Deleted"),
+                "draft" => Some("\\Draft"),
+                "recent" => bail!("\\Recent is managed by the server and cannot be set"),
+                _ => None,
+            };
+            let flag = match normalized {
+                Some(f) => f.to_string(),
+                None => bail!(
+                    "unknown system flag '{}' (valid: \\Seen, \\Answered, \\Flagged, \\Deleted, \\Draft; any other token is a custom keyword)",
+                    name
+                ),
+            };
+            if !out.contains(&flag) {
+                out.push(flag);
+            }
+            continue;
+        }
+        if name.contains(['\\', '*', '%', '(', ')', '{', '}', '"', ' ', ','])
+            || name.chars().any(|c| c.is_control())
+        {
+            bail!(
+                "invalid flag/keyword '{}': no \\ * % ( ) {{ }} \" , or spaces are allowed in keywords",
+                name
+            );
+        }
+        if !out.iter().any(|s| s == name) {
+            out.push(name.to_string());
+        }
+    }
+    if out.is_empty() {
+        bail!("no flag names given");
+    }
+    Ok(out)
+}
+
+/// Shared implementation of `flag add|remove` and `tag add|remove`.
+/// `allow_system` distinguishes flag (true) from tag (false);
+/// `add` enables the flags, `remove` disables them.
+pub fn change_flags(
+    config: &Config,
+    spec: &str,
+    names: &[String],
+    allow_system: bool,
+    add: bool,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    let uids = parse_uids(spec)?;
+    let flags = parse_flag_names(names, allow_system)?;
+    if debug {
+        eprintln!(
+            "{} {:?} on UIDs {:?} in '{}'",
+            if add { "adding" } else { "removing" },
+            flags,
+            uids,
+            config.folder
+        );
+    }
+    let mut client = ImapClient::connect(config, debug)?;
+    let (added, removed): (&[String], &[String]) =
+        if add { (&flags, &[]) } else { (&[], &flags) };
+    client.store_flags(&config.folder, &uids, added, removed)?;
+
+    if json {
+        emit_json(&FlagChangeOutput {
+            folder: &config.folder,
+            count: uids.len(),
+            uids: &uids,
+            added,
+            removed,
+        })?;
+        return Ok(());
+    }
+    let verb = if add { "Added" } else { "Removed" };
+    println!(
+        "{} {} on {} message(s) in '{}': UIDs {}",
+        verb,
+        flags.join(", "),
+        uids.len(),
+        config.folder,
+        uids.iter()
+            .map(|u| u.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(())
+}
+
+pub fn flag_list(config: &Config, spec: &str, tags_only: bool, json: bool, debug: bool) -> Result<()> {
+    if debug {
+        eprintln!(
+            "Listing {} for UID {}...",
+            if tags_only { "tags" } else { "flags" },
+            spec
+        );
+    }
+    let uids = parse_uids(spec)?;
+    let mut client = ImapClient::connect(config, debug)?;
+
+    for uid in &uids {
+        let mut flags = client.message_flags(&config.folder, *uid)?;
+        if tags_only {
+            flags.retain(|f| !f.starts_with('\\'));
+        }
+        if json {
+            emit_json(&FlagListOutput {
+                folder: &config.folder,
+                uid: *uid,
+                count: flags.len(),
+                flags: &flags,
+            })?;
+            continue;
+        }
+        if flags.is_empty() {
+            println!(
+                "UID {}: no {}",
+                uid,
+                if tags_only { "tags" } else { "flags" }
+            );
+            continue;
+        }
+        println!(
+            "UID {}: {} {}: {}",
+            uid,
+            flags.len(),
+            if tags_only { "tag(s)" } else { "flag(s)" },
+            flags.join(", ")
+        );
+    }
+    Ok(())
 }
 
 pub fn parts_list(config: &Config, spec: &str, json: bool, debug: bool) -> Result<()> {
@@ -627,5 +806,81 @@ mod tests {
         assert_eq!(value["uid"], 5);
         assert_eq!(value["parts"][0]["part"], 2);
         assert_eq!(value["parts"][0]["filename"], "invoice-42.pdf");
+    }
+
+    #[test]
+    fn parse_flag_names_normalizes_and_dedups() {
+        let v = parse_flag_names(
+            &["\\seen".into(), "\\FLAGGED".into(), "junk".into(), "\\seen".into()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(v, vec!["\\Seen", "\\Flagged", "junk"]);
+    }
+
+    #[test]
+    fn parse_flag_names_rejects_recent_and_unknown_system_flags() {
+        assert!(parse_flag_names(&["\\Recent".into()], true).is_err());
+        assert!(parse_flag_names(&["\\Bogus".into()], true).is_err());
+        assert!(parse_flag_names(&["\\".into()], true).is_err());
+    }
+
+    #[test]
+    fn parse_flag_names_tag_mode_rejects_system_flags() {
+        assert!(parse_flag_names(&["\\Seen".into()], false).is_err());
+        let v = parse_flag_names(&["$Important".into(), "my-tag".into()], false).unwrap();
+        assert_eq!(v, vec!["$Important", "my-tag"]);
+    }
+
+    #[test]
+    fn parse_flag_names_rejects_special_characters() {
+        for bad in ["a b", "a,b", "a*b", "a%b", "a(b", "a}b", "\"x\"", "a\nb"] {
+            assert!(
+                parse_flag_names(&[bad.to_string()], true).is_err(),
+                "should reject {:?}",
+                bad
+            );
+        }
+        assert!(parse_flag_names(&[], true).is_err());
+    }
+
+    #[test]
+    fn flag_change_output_json_shape() {
+        let uids = vec![2, 5];
+        let added = vec!["\\Flagged".to_string(), "invoice".to_string()];
+        let none: Vec<String> = Vec::new();
+        let out = FlagChangeOutput {
+            folder: "INBOX",
+            count: 2,
+            uids: &uids,
+            added: &added,
+            removed: &none,
+        };
+        let value: serde_json::Value = serde_json::from_str(&serde_json::to_string(&out).unwrap())
+            .expect("parse");
+        assert_eq!(value["folder"], "INBOX");
+        assert_eq!(value["count"], 2);
+        assert_eq!(value["uids"][1], 5);
+        assert_eq!(value["added"][0], "\\Flagged");
+        assert_eq!(value["added"][1], "invoice");
+        assert_eq!(value["removed"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn flag_list_output_json_shape() {
+        let flags = vec!["\\Seen".to_string(), "invoice".to_string()];
+        let out = FlagListOutput {
+            folder: "INBOX",
+            uid: 5,
+            count: 2,
+            flags: &flags,
+        };
+        let value: serde_json::Value = serde_json::from_str(&serde_json::to_string(&out).unwrap())
+            .expect("parse");
+        assert_eq!(value["folder"], "INBOX");
+        assert_eq!(value["uid"], 5);
+        assert_eq!(value["count"], 2);
+        assert_eq!(value["flags"][0], "\\Seen");
+        assert_eq!(value["flags"][1], "invoice");
     }
 }

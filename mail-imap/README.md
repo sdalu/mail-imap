@@ -3,9 +3,10 @@
 A command-line tool for querying and reading emails via the IMAP protocol.
 Designed for programmatic / AI use.
 
-It is **read-only**: it never moves, deletes, tags, or otherwise modifies
-mail on the server. Reads use `BODY.PEEK[]` even, so fetching a message does
-not mark it `\Seen`.
+It is **passively read-only**: nothing ever moves or deletes mail, and
+reads use `BODY.PEEK[]` so fetching a message does not even mark it
+`\Seen`. The only modifications are the explicit `flag` / `tag` commands
+(`UID STORE`), which you have to ask for.
 
 It connects to a **real IMAP server** using the `imap` crate (over implicit TLS
 on port 993, STARTTLS, or plain TCP). An **in-memory mock backend** is kept so
@@ -23,7 +24,14 @@ the tool can be built, demoed and unit-tested without a reachable server.
   `THREAD=REFERENCES`, otherwise client-side reconstruction from
   Message-ID / References headers)
 - List unread emails of a folder
+- Sort search/unread results by uid/date/arrival/size/subject/from/to/cc
+  (`-S`/`--sort`): server-side `UID SORT` (RFC 5256) when the server
+  advertises `SORT`, client-side sorting otherwise
 - List the MIME parts of an email, and save one part to a file
+- Enable/disable message flags (`\Seen`, `\Answered`, `\Flagged`,
+  `\Deleted`, `\Draft`, or keywords such as `junk`), add/remove custom
+  keyword tags, and inspect them: `flag` / `tag` commands (`UID STORE`;
+  `\Recent` is server-managed and cannot be set)
 - JSON output mode (`-j`) for programmatic use
 - Configuration via JSON file
 - RFC 2047 subject decoding (UTF-8, Latin-1, B & Q encodings)
@@ -35,7 +43,7 @@ the tool can be built, demoed and unit-tested without a reachable server.
 | Command | Syntax | Description |
 |---------|--------|-------------|
 | `folder` | `folder` | List mailboxes/folders |
-| `search` | `search <QUERY> [FOLDER...]` | Search emails with any IMAP `SEARCH` query; one or more folders (comma-separated or repeated, default `-f`/config) |
+| `search` | `search <QUERY> [FOLDER...]` | Search emails with any IMAP `SEARCH` query; one or more folders (comma-separated or repeated, default `-f`/config); most recent first unless `-S` |
 | `read` | `read <UID[,UID...]>` | Read email(s) by UID (comma-separated list, no ranges) |
 | `count` | `count [FOLDER]` | Message counts / status of all mailboxes or one (alias: `status`) |
 | `uid` | `uid` | List the message UIDs of the folder |
@@ -43,6 +51,12 @@ the tool can be built, demoed and unit-tested without a reachable server.
 | `unread` | `unread [FOLDER...]` | List unread emails of one or more folders (`search UNSEEN`) |
 | `part list` | `part list <UID[,UID...]>` | List the MIME parts of email(s) |
 | `part save` | `part save <UID> <PART> [-o <FILE>]` | Save one MIME part to a file (default: the part's filename in the current directory) |
+| `flag list` | `flag list <UID[,UID...]>` | List the flags (system flags + keyword tags) of email(s) |
+| `flag add` | `flag add <UID[,UID...]> <FLAG...>` | Enable flags on email(s): `\Seen`, `\Answered`, `\Flagged`, `\Deleted`, `\Draft` or keywords (e.g. `junk`) |
+| `flag remove` | `flag remove <UID[,UID...]> <FLAG...>` | Disable flags on email(s) |
+| `tag list` | `tag list <UID[,UID...]>` | List the custom keyword tags of email(s) (system flags omitted) |
+| `tag add` | `tag add <UID[,UID...]> <TAG...>` | Add custom keyword tags (plain keywords, no system flags) |
+| `tag remove` | `tag remove <UID[,UID...]> <TAG...>` | Remove custom keyword tags |
 
 ```bash
 # List folders
@@ -93,6 +107,22 @@ mail-imap --config incal.conf -f INBOX part list 12345,67890
 # uid<N>_part<M>, in the current directory; -o to choose a path)
 mail-imap --config incal.conf -f INBOX part save 12345 2 -o /tmp/invoice.pdf
 
+# Sort search/unread results (default: most recent first). Server-side
+# UID SORT (RFC 5256) when the server advertises SORT, else client-side.
+mail-imap --config incal.conf -S -date -f INBOX search ALL
+mail-imap --config incal.conf -S "subject,-size" -f INBOX search UNSEEN
+
+# Enable/disable message flags (\Seen, \Answered, \Flagged, \Deleted,
+# \Draft, or keywords; \Recent is server-managed and rejected)
+mail-imap --config incal.conf -f INBOX flag list 12345,67890
+mail-imap --config incal.conf -f INBOX flag add 12345,67890 '\Flagged'
+mail-imap --config incal.conf -f INBOX flag remove 12345 '\Seen' junk
+
+# Add/remove custom keyword tags (plain keywords only, no \system flags)
+mail-imap --config incal.conf -f INBOX tag list 12345
+mail-imap --config incal.conf -f INBOX tag add 12345 invoice $Important
+mail-imap --config incal.conf -f INBOX tag remove 12345 invoice
+
 # JSON output (machine-readable: one compact JSON object on stdout)
 mail-imap --config incal.conf -j -f INBOX search "SINCE 01-Jan-2026"
 
@@ -116,6 +146,8 @@ Each command prints one compact JSON object to stdout:
 | `unread` | same shape as `search` (query fixed to `UNSEEN`, folder(s) + part counts included) |
 | `part list` | one `{"folder", "uid", "count", "parts": [{"part", "content_type", "filename", "size"}]}` per selected UID |
 | `part save` | `{"folder", "uid", "part", "file", "size"}` |
+| `flag list` / `tag list` | one `{"folder", "uid", "count", "flags": [...]}` per selected UID (`\Recent` omitted; `tag list` keeps keywords only) |
+| `flag add` / `flag remove` / `tag add` / `tag remove` | `{"folder", "count", "uids": [...], "added": [...], "removed": [...]}` (`added` populated by add, `removed` by remove) |
 
 Errors are printed as `{"error": "..."}` on stderr with a non-zero exit code.
 
@@ -128,6 +160,7 @@ Errors are printed as `{"error": "..."}` on stderr with a non-zero exit code.
 | `--mock` | Use the in-memory mock backend instead of a real server |
 | `-j, --json` | Output results as compact single-line JSON (errors as `{"error": ...}` on stderr) |
 | `-M, --max <N>` | Cap search results for this run, overriding `max` from the config (`0` = unlimited) |
+| `-S, --sort <SPEC>` | Sort `search`/`unread` results: comma-separated criteria (`uid`, `date`, `arrival`, `size`, `subject`, `from`, `to`, `cc`), first = primary, `-` prefix = descending (e.g. `-date`, `subject,-size`); overrides `sort` from the config. Default: most recent first |
 
 ## Configuration
 
@@ -145,6 +178,7 @@ have defaults.
     "insecure": false,
     "folder": "INBOX",
     "max": 50,
+    "sort": null,
     "mock": false
 }
 ```
@@ -160,6 +194,7 @@ have defaults.
 | `insecure` | `false` | Accept invalid TLS certificates (self-signed local servers) |
 | `folder` | `INBOX` | Default folder for commands that need one |
 | `max` | `50` | Max search results to fetch (`0` = unlimited); overridden by `-M/--max` on the command line |
+| `sort` | `null` | Default sort spec for `search`/`unread` (same format as `-S/--sort`); overridden by `-S` on the command line |
 | `mock` | `false` | Use the in-memory mock backend |
 
 ## Testing
@@ -186,6 +221,7 @@ src/
     real.rs        RealClient  — talks to a real IMAP server (imap crate)
     mock.rs        MockClient  — in-memory mock (original mockup), used by tests
     mime.rs        minimal MIME parser (parts, boundary, CTE decoding)
+    sort.rs        --sort spec parsing + client-side result ordering
 ```
 
 See `IMPLEMENTATION.md` for details.

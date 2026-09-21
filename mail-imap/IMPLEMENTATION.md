@@ -39,7 +39,7 @@ operation body can be shared by a `with_backend!` macro.
 | CLI command | IMAP commands used |
 |-------------|--------------------|
 | `folder` | `LIST "" *` (non-`\Noselect` names) |
-| `search` / `unread` | per folder: `SELECT` + `UID SEARCH <query>` + batched `UID FETCH` (envelope/flags/date/size/`BODYSTRUCTURE`); folders are searched in order and the results aggregated |
+| `search` / `unread` | per folder: `SELECT` + (`UID SORT <crit> UTF-8 <query>` when `--sort` is given and `SORT` is advertised, else `UID SEARCH <query>`) + batched `UID FETCH` (envelope/flags/date/size/`BODYSTRUCTURE`); folders are searched in order and the results aggregated |
 | `read` | `SELECT` + `UID FETCH <uid> (UID ENVELOPE FLAGS INTERNALDATE BODY.PEEK[RFC822])` |
 | `count` / `status` | `LIST "" *` + `STATUS <folder> (MESSAGES UNSEEN RECENT UIDNEXT UIDVALIDITY)` per mailbox (or one folder when given) |
 | `uid` | `SELECT` + `UID SEARCH *` |
@@ -47,14 +47,42 @@ operation body can be shared by a `with_backend!` macro.
 | `unread` | `SELECT` + `UID SEARCH UNSEEN` + batched `UID FETCH` (same path as `search`) |
 | `part list` | `SELECT` + `UID FETCH <uid> (UID BODY.PEEK[RFC822])`, then MIME part enumeration locally |
 | `part save` | same fetch, then the selected part is CTE-decoded and written to a file |
+| `flag list` / `tag list` | `SELECT` + `UID FETCH <uid> (UID FLAGS)` |
+| `flag add` / `flag remove` / `tag add` / `tag remove` | `SELECT` + `UID STORE <uids> +FLAGS (...)` / `-FLAGS (...)` per batch of 50 |
 
 IMAP can only search the selected mailbox, so `search`/`unread` iterate over
 the requested folders (positional args, comma-separated or repeated; default
 the `-f`/config folder) on one connection. Results are grouped per folder,
-most-recent first within each folder, and the total result count is capped
+ordered by the `-S`/`--sort` criteria (default: most-recent first within
+each folder), and the total result count is capped
 by `Config::max` (default 50; overridable per run with `-M/--max`,
 `0` = unlimited). Each result carries the `folder` it came from; the JSON
 output uses `"folder"` for a single folder and `"folders"` for several.
+
+### Sorting (`--sort`/`-S`)
+
+The spec is a comma-separated list of criteria, first = primary, with a
+`-` prefix reversing that criterion (RFC 5256 `REVERSE`): `-date`,
+`subject,-size`, ... Valid keys: `uid`, `date`, `arrival`, `size`,
+`subject`, `from`, `to`, `cc` (`src/imap/sort.rs`). A `sort` config field
+provides a default; `-S` overrides it.
+
+Real backend: when a spec is given, the server advertises `SORT`
+(RFC 5256) and the spec is server-sortable (no `uid` key), the UID list
+comes from a single `UID SORT <criteria> UTF-8 <query>` — the cap is
+applied to the *sorted* list, so truncation is exact. On `UID SORT`
+failure (including a poisoned stream, with reconnect) or without the
+capability, it falls back to `UID SEARCH` + fetching the newest
+`max` messages and sorting that page client-side by the same criteria
+(possible caveat: for non-date criteria the capped selection is
+recency-based, so it can differ from a true sorted-and-capped result).
+`to`/`cc` need the server-side path and error out when `SORT` is not
+advertised. Fetched FETCH responses arrive in sequence order, so the
+final result order is restored from the computed UID order on every
+path.
+
+The `imap` fork (`forks/rust-imap`, `extensions/sort.rs`) provides
+`Session::uid_sort` and the `SortCriterion`/`SortCharset` types.
 
 ### Part counts in search results
 
@@ -122,16 +150,46 @@ countermeasures (`src/imap/real.rs`):
 - if a hard error still strikes mid-search, the results collected so far
   are reported with a warning instead of being thrown away.
 
-### Read-only behaviour
+### Passive read-only behaviour
 
-No operation sends a command that mutates the mailbox: there is no `MOVE`,
-`COPY`, `STORE`, or `EXPUNGE` anywhere. Message bodies are fetched with
+Nothing implicitly mutates the mailbox: there is no `MOVE`, `COPY` or
+`EXPUNGE` anywhere, and message bodies are fetched with
 `BODY.PEEK[RFC822]`, so even `read` and `part` do not make the server set
-`\Seen`.
+`\Seen`. The only write commands are `flag` and `tag`, which send
+`UID STORE ±FLAGS` exclusively (they cannot move, delete, or expunge) and
+must be invoked explicitly.
+
+### Flag and tag changes (`flag`, `tag`)
+
+Both share one backend operation (`store_flags`) and one handler
+(`change_flags` in `src/cli/mod.rs`); they differ only in validation:
+
+- `flag add|remove <UIDs> <FLAG...>` accepts the system flags `\Seen`,
+  `\Answered`, `\Flagged`, `\Deleted` and `\Draft` (matched
+  case-insensitively and normalized by `parse_flag_names`), plus bare
+  keywords such as `junk`. `\Recent` is rejected: it is maintained by the
+  server and cannot be set by clients.
+- `tag add|remove <UIDs> <TAG...>` accepts only plain keywords — any
+  `\`-prefixed name is refused with a hint to use `flag`.
+- Keywords must be IMAP atoms: no `\`, `*`, `%`, `(`, `)`, `{`, `}`, `"`,
+  `,`, spaces or control characters (Gmail labels like `$Important` are
+  fine). Names are deduplicated, order preserved.
+- The UID selection reuses `parse_uids`; unknown UIDs are rejected
+  server-side (or by the mock).
+- The real backend sends `UID STORE <uids> +FLAGS (…)` / `-FLAGS (…)`
+  once per batch of 50 UIDs (removals first), with the same
+  reconnect-once recovery used by fetches. Persistence of flag changes
+  follows the server (`CHANGES=/PERMANENTFLAGS` behaviour is not forced).
+- `flag list <UIDs>` reads them back with a light
+  `UID FETCH <uid> (UID FLAGS)` per message; `\Recent` is filtered out so
+  the output matches the `flags` field of search results.
+  `tag list <UIDs>` shares the same path with an extra filter that keeps
+  only the keywords (drops every `\`-prefixed system flag).
 
 ### UID selection
 
-Commands that take messages (`read`, `part list`) accept a UID selection:
+Commands that take messages (`read`, `part list`, `flag`, `tag`) accept a
+UID selection:
 a single UID or a comma-separated list (`1,4,7`). Ranges (`1-7`) are rejected
 by `parse_uids` (`src/cli/mod.rs`) with a dedicated error. The list is
 deduplicated, input order is preserved, and each UID is fetched individually.
@@ -157,13 +215,22 @@ The original mockup, preserved. Returns a fixed set of folders and five sample
 messages so every operation can be exercised offline. Two messages carry
 extra part metadata (UID 3: spreadsheet, UID 5: PDF); `part save` writes a
 deterministic placeholder file whose size matches the part reported by
-`part list`. It is what the unit tests drive.
+`part list`. It is what the unit tests drive. Sorting (`-S`) is applied
+to its fixed message set with the same client-side comparator the real
+backend uses as fallback. `flag`/`tag` mutate an in-memory per-UID
+keyword set (`message_flags`), which shows up in the `flags` of subsequent
+mock `search` results.
 
 ## Testing
 
 `cargo test` runs entirely against the mock backend (no network). Coverage:
 - backend selection (`mock` vs `real`)
 - list / search / read / count / uid / unread / part happy + error paths
+- sort spec parsing (keys, `-` reverse, invalid input) and client-side
+  result sorting (single/multi key, descending, capped selection)
+- flag/tag name validation (system flags normalized, `\Recent` rejected,
+  tag mode refuses `\` flags, keyword charset) and mock store/retrieve
+  (incl. `flag list` via `message_flags`)
 - UID selection parsing (comma lists, dedup, range rejection, invalid input)
 - MIME parser (plain, multipart, nested multipart, base64 / quoted-printable /
   binary decoding, missing boundary)
@@ -193,6 +260,8 @@ prints a single compact JSON object to stdout instead; errors become
 | `unread` | same as `search` (query `UNSEEN`) |
 | `part list` | one `{"folder", "uid", "count", "parts": [PartInfo]}` per selected UID |
 | `part save` | `{"folder", "uid", "part", "file", "size"}` |
+| `flag list` / `tag list` | one `{"folder", "uid", "count", "flags": [String]}` per selected UID |
+| `flag add` / `flag remove` / `tag add` / `tag remove` | `{"folder", "count", "uids": [u32], "added": [String], "removed": [String]}` |
 
 `FolderInfo`, `SearchResult`, `Mailbox` and `PartInfo` derive
 `serde::Serialize`; the other shapes are small output structs in

@@ -1,8 +1,10 @@
 use crate::config::Config;
 use crate::imap::{
-    thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, SearchResult, ThreadRefs,
+    sort_results, thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, SearchResult,
+    SortCriteria, ThreadRefs,
 };
 use anyhow::{bail, Context, Result};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// In-memory mock backend. This is the original mockup, kept for offline
@@ -14,6 +16,8 @@ pub struct MockClient {
     messages: Vec<(u32, String, String, String)>,
     /// uid -> (Message-IDs, referenced Message-IDs) used by `thread`.
     thread_ids: Vec<(u32, Vec<String>, Vec<String>)>,
+    /// uid -> flags/keywords, maintained by `store_flags` (flag/tag).
+    message_flags: BTreeMap<u32, BTreeSet<String>>,
 }
 
 impl MockClient {
@@ -43,6 +47,7 @@ impl MockClient {
                 (4, vec!["<m4@mail>".into()], vec!["<m2@mail>".into()]),
                 (5, vec!["<m5@mail>".into()], vec!["<m3@mail>".into()]),
             ],
+            message_flags: BTreeMap::new(),
         })
     }
 
@@ -83,6 +88,7 @@ impl MockClient {
         folder: &str,
         query: &str,
         cap: usize,
+        sort: Option<&SortCriteria>,
     ) -> Result<Vec<SearchResult>> {
         let raw = query.trim().to_lowercase();
         // The mock carries no flags and has no notion of mailbox content,
@@ -93,7 +99,7 @@ impl MockClient {
         } else {
             raw
         };
-        let results: Vec<SearchResult> = self
+        let mut results: Vec<SearchResult> = self
             .messages
             .iter()
             .filter(|(_, subject, from, _)| {
@@ -108,12 +114,19 @@ impl MockClient {
                 from: from.clone(),
                 date: Some("2026-09-20 12:00:00 +0000".to_string()),
                 size: Some(120),
-                flags: Vec::new(),
+                flags: self
+                    .message_flags
+                    .get(uid)
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default(),
                 // Matches `parts()`: uids 3 and 5 carry an extra part.
                 parts: self.parts(*uid).len() as u32,
             })
-            .take(cap)
             .collect();
+        if let Some(spec) = sort {
+            sort_results(&mut results, spec);
+        }
+        results.truncate(cap);
         Ok(results)
     }
 }
@@ -137,6 +150,7 @@ impl ImapBackend for MockClient {
         folders: &[String],
         query: &str,
         max_results: usize,
+        sort: Option<&SortCriteria>,
     ) -> Result<Vec<SearchResult>> {
         let mut out: Vec<SearchResult> = Vec::new();
         for folder in folders {
@@ -148,7 +162,7 @@ impl ImapBackend for MockClient {
             } else {
                 usize::MAX
             };
-            out.extend(self.search_in_folder(folder, query, cap)?);
+            out.extend(self.search_in_folder(folder, query, cap, sort)?);
         }
         Ok(out)
     }
@@ -258,6 +272,41 @@ impl ImapBackend for MockClient {
         };
         std::fs::write(dest, &data)?;
         Ok(data.len() as u64)
+    }
+
+    fn store_flags(
+        &mut self,
+        _folder: &str,
+        uids: &[u32],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        for uid in uids {
+            if !self.messages.iter().any(|(u, _, _, _)| u == uid) {
+                bail!("no email with UID {} (mock)", uid);
+            }
+        }
+        for uid in uids {
+            let set = self.message_flags.entry(*uid).or_default();
+            for r in remove {
+                set.remove(r);
+            }
+            for a in add {
+                set.insert(a.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn message_flags(&mut self, _folder: &str, uid: u32) -> Result<Vec<String>> {
+        if !self.messages.iter().any(|(u, _, _, _)| *u == uid) {
+            bail!("no email with UID {} (mock)", uid);
+        }
+        Ok(self
+            .message_flags
+            .get(&uid)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default())
     }
 
     fn close(&mut self) {}

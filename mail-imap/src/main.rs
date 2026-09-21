@@ -33,6 +33,21 @@ struct Args {
     #[clap(short = 'M', long = "max", global = true)]
     max: Option<usize>,
 
+    /// Sort search/unread results: comma-separated criteria
+    /// (uid, date, arrival, size, subject, from, to, cc), first = primary,
+    /// '-' prefix = descending; e.g. "-date" or "subject,-size".
+    /// Overrides the config "sort"; default is most recent first. Uses
+    /// server-side UID SORT (RFC 5256) when advertised, else sorts
+    /// client-side.
+    #[clap(
+        short = 'S',
+        long = "sort",
+        global = true,
+        allow_hyphen_values = true,
+        value_name = "SPEC"
+    )]
+    sort: Option<String>,
+
     /// Subcommand to execute
     #[clap(subcommand)]
     command: Command,
@@ -114,6 +129,72 @@ enum Command {
         #[clap(subcommand)]
         action: PartsAction,
     },
+    /// Enable/disable message flags (\Seen, \Answered, \Flagged,
+    /// \Deleted, \Draft, or keywords such as junk) via UID STORE
+    Flag {
+        /// What to do with the flags
+        #[clap(subcommand)]
+        action: FlagAction,
+    },
+    /// Add/remove custom keyword tags on emails (plain keywords, no
+    /// system flags) via UID STORE
+    Tag {
+        /// What to do with the tags
+        #[clap(subcommand)]
+        action: TagAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum FlagAction {
+    /// List the flags (system flags and keyword tags) of the given
+    /// email(s)
+    List {
+        /// UID selection: `5` or `1,4,7` (no ranges)
+        uids: UidSpec,
+    },
+    /// Enable the given flags on the given email(s)
+    Add {
+        /// UID selection: `5` or `1,4,7` (no ranges)
+        uids: UidSpec,
+        /// Flags: `\Seen`, `\Answered`, `\Flagged`, `\Deleted`,
+        /// `\Draft` or custom keywords (e.g. junk)
+        #[clap(value_name = "FLAG", required = true)]
+        flags: Vec<String>,
+    },
+    /// Disable the given flags on the given email(s)
+    Remove {
+        /// UID selection: `5` or `1,4,7` (no ranges)
+        uids: UidSpec,
+        /// Flags to remove (same forms as `flag add`)
+        #[clap(value_name = "FLAG", required = true)]
+        flags: Vec<String>,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum TagAction {
+    /// List the custom keyword tags of the given email(s)
+    List {
+        /// UID selection: `5` or `1,4,7` (no ranges)
+        uids: UidSpec,
+    },
+    /// Add the given tags to the given email(s)
+    Add {
+        /// UID selection: `5` or `1,4,7` (no ranges)
+        uids: UidSpec,
+        /// Tags (custom IMAP keywords, e.g. `invoice`, `$Important`)
+        #[clap(value_name = "TAG", required = true)]
+        tags: Vec<String>,
+    },
+    /// Remove the given tags from the given email(s)
+    Remove {
+        /// UID selection: `5` or `1,4,7` (no ranges)
+        uids: UidSpec,
+        /// Tags to remove (same forms as `tag add`)
+        #[clap(value_name = "TAG", required = true)]
+        tags: Vec<String>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -159,6 +240,12 @@ fn main() {
     if let Some(max) = args.max {
         config.max = max;
     }
+    if let Some(spec) = &args.sort {
+        if let Err(e) = imap::parse_sort(spec) {
+            fail(args.json, &format!("invalid --sort spec: {}", e));
+        }
+        config.sort = Some(spec.clone());
+    }
 
     let json = args.json;
     let debug = args.debug;
@@ -182,6 +269,24 @@ fn main() {
             PartsAction::List { uids } => cli::parts_list(&config, uids, json, debug),
             PartsAction::Save { uid, part, out } => {
                 cli::parts_save(&config, *uid, *part, out.clone(), json, debug)
+            }
+        },
+        Command::Flag { action } => match action {
+            FlagAction::List { uids } => cli::flag_list(&config, uids, false, json, debug),
+            FlagAction::Add { uids, flags } => {
+                cli::change_flags(&config, uids, flags, true, true, json, debug)
+            }
+            FlagAction::Remove { uids, flags } => {
+                cli::change_flags(&config, uids, flags, true, false, json, debug)
+            }
+        },
+        Command::Tag { action } => match action {
+            TagAction::List { uids } => cli::flag_list(&config, uids, true, json, debug),
+            TagAction::Add { uids, tags } => {
+                cli::change_flags(&config, uids, tags, false, true, json, debug)
+            }
+            TagAction::Remove { uids, tags } => {
+                cli::change_flags(&config, uids, tags, false, false, json, debug)
             }
         },
     };
