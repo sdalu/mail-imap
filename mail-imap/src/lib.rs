@@ -73,12 +73,83 @@ mod tests {
     }
 
     #[test]
-    fn tag_known_uid_succeeds() {
+    fn tag_add_and_remove_succeed() {
         let mut client = ImapClient::connect(&mock_config()).expect("connect");
         assert!(client
-            .tag_email("INBOX", 1, &["important".to_string()])
+            .set_tags("INBOX", 1, &["important".to_string()], &[])
             .is_ok());
-        assert!(client.tag_email("INBOX", 999, &["x".to_string()]).is_err());
+        assert!(client
+            .set_tags("INBOX", 1, &[], &["important".to_string()])
+            .is_ok());
+        assert!(client
+            .set_tags("INBOX", 999, &["x".to_string()], &[])
+            .is_err());
+    }
+
+    #[test]
+    fn tag_no_tags_fails() {
+        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        assert!(client.set_tags("INBOX", 1, &[], &[]).is_err());
+    }
+
+    #[test]
+    fn flags_add_supported_flags_succeeds() {
+        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        assert!(client
+            .set_flags("INBOX", 1, &["seen".into(), "answered".into()], &[])
+            .is_ok());
+    }
+
+    #[test]
+    fn flags_remove_supported_flags_succeeds() {
+        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        assert!(client
+            .set_flags("INBOX", 1, &[], &["flagged".into()])
+            .is_ok());
+    }
+
+    #[test]
+    fn flags_accept_case_and_backslash_variants() {
+        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        assert!(client
+            .set_flags("INBOX", 1, &["\\Seen".into(), "ANSWERED".into()], &[])
+            .is_ok());
+    }
+
+    #[test]
+    fn flags_reject_explicitly_unsupported_flags() {
+        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        for flag in ["deleted", "draft", "recent", "\\Deleted"] {
+            assert!(
+                client
+                    .set_flags("INBOX", 1, &[flag.to_string()], &[])
+                    .is_err(),
+                "expected '{}' to be rejected",
+                flag
+            );
+        }
+    }
+
+    #[test]
+    fn flags_reject_unknown_flags() {
+        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        assert!(client
+            .set_flags("INBOX", 1, &["urgent".into()], &[])
+            .is_err());
+    }
+
+    #[test]
+    fn flags_unknown_uid_fails() {
+        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        assert!(client
+            .set_flags("INBOX", 999, &["seen".into()], &[])
+            .is_err());
+    }
+
+    #[test]
+    fn flags_no_flags_fails() {
+        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        assert!(client.set_flags("INBOX", 1, &[], &[]).is_err());
     }
 
     #[test]

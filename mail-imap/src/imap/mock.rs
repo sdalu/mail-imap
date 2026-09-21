@@ -1,6 +1,6 @@
 use crate::config::Config;
-use crate::imap::{FolderInfo, ImapBackend, SearchResult};
-use anyhow::Result;
+use crate::imap::{normalize_flags, FolderInfo, ImapBackend, SearchResult};
+use anyhow::{bail, Result};
 
 /// In-memory mock backend. This is the original mockup, kept for offline
 /// testing so the tool can be exercised without a reachable IMAP server.
@@ -90,9 +90,24 @@ impl ImapBackend for MockClient {
         Ok(())
     }
 
-    fn tag_email(&mut self, _folder: &str, uid: u32, _tags: &[String]) -> Result<()> {
+    fn set_tags(&mut self, _folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
+        if add.is_empty() && remove.is_empty() {
+            bail!("no tags given");
+        }
         if !self.messages.iter().any(|(u, _, _, _)| *u == uid) {
-            anyhow::bail!("no email with UID {} (mock)", uid);
+            bail!("no email with UID {} (mock)", uid);
+        }
+        Ok(())
+    }
+
+    fn set_flags(&mut self, _folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
+        let add = normalize_flags(add)?;
+        let remove = normalize_flags(remove)?;
+        if add.is_empty() && remove.is_empty() {
+            bail!("no flags given");
+        }
+        if !self.messages.iter().any(|(u, _, _, _)| *u == uid) {
+            bail!("no email with UID {} (mock)", uid);
         }
         Ok(())
     }

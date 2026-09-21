@@ -13,7 +13,9 @@ the tool can be built, demoed and unit-tested without a reachable server.
 - Search emails (pass any IMAP `SEARCH` query)
 - Read a full email by UID
 - Move an email to another folder
-- Tag an email with keyword flags
+- Add or remove keyword tags on an email
+- Add or remove standard flags (`\Seen`, `\Answered`, `\Flagged`)
+- JSON output mode (`-j`) for programmatic use
 - Configuration via JSON file
 - RFC 2047 subject decoding (UTF-8, Latin-1, B & Q encodings)
 
@@ -33,13 +35,36 @@ mail-imap --config incal.conf -f INBOX read 12345
 # Move an email by UID to another folder
 mail-imap --config incal.conf -f INBOX move 12345 Archive
 
-# Tag an email by UID (adds keyword flags)
-mail-imap --config incal.conf -f INBOX tag 12345 important reviewed
+# Add / remove keyword tags on an email by UID
+mail-imap --config incal.conf -f INBOX tag 12345 add important reviewed
+mail-imap --config incal.conf -f INBOX tag 12345 remove reviewed
+
+# Add / remove standard flags by UID (seen, answered, flagged)
+mail-imap --config incal.conf -f INBOX flags 12345 add seen answered
+mail-imap --config incal.conf -f INBOX flags 12345 remove flagged
+# \Deleted, \Draft and \Recent are explicitly not supported
+
+# JSON output (machine-readable: one compact JSON object on stdout)
+mail-imap --config incal.conf -j -f INBOX search "SINCE 01-Jan-2026"
 
 # Run against the in-memory mock (no server needed) for testing/demos
 mail-imap --mock folders
 mail-imap --mock search invoice
 ```
+
+### JSON output (`-j`)
+
+Each command prints one compact JSON object to stdout:
+
+| Command | Shape |
+|---------|-------|
+| `folders` | `{"count", "folders": [...]}` |
+| `search` | `{"folder", "query", "count", "results": [...]}` |
+| `read` | `{"folder", "uid", "content"}` |
+| `move` | `{"folder", "uid", "to"}` |
+| `tag` / `flags` | `{"folder", "uid", "added", "removed"}` |
+
+Errors are printed as `{"error": "..."}` on stderr with a non-zero exit code.
 
 ### Global flags
 
@@ -48,6 +73,7 @@ mail-imap --mock search invoice
 | `-c, --config <PATH>` | Config file (also reads `$MAIL_IMAP_CONFIG`, else `/etc/mail-imap.conf`) |
 | `-f, --folder <NAME>` | Folder for commands that need one (default: `folder` from config / `INBOX`) |
 | `--mock` | Use the in-memory mock backend instead of a real server |
+| `-j, --json` | Output results as compact single-line JSON (errors as `{"error": ...}` on stderr) |
 
 ## Configuration
 
@@ -89,7 +115,7 @@ have defaults.
 cargo test
 ```
 
-The tests cover the mock backend end-to-end (list / search / read / move / tag),
+The tests cover the mock backend end-to-end (list / search / read / move / tag / flags),
 backend selection, the RFC 2047 decoder, and that the real backend fails cleanly
 rather than fabricating data when no server is reachable.
 

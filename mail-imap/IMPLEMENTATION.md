@@ -42,10 +42,22 @@ operation body can be shared by a `with_backend!` macro.
 | `search` | `SELECT` + `UID SEARCH <query>` + batched `UID FETCH` (envelope/flags/date/size) |
 | `read` | `SELECT` + `UID FETCH <uid> (UID ENVELOPE FLAGS INTERNALDATE RFC822)` |
 | `move` | `SELECT` + (`UID MOVE` if `MOVE` capability, else `UID COPY` + `UID STORE \Deleted` + `EXPUNGE`) |
-| `tag` | `SELECT` + `UID STORE <uid> +FLAGS (tag1 tag2 ...)` |
+| `tag add` | `SELECT` + `UID STORE <uid> +FLAGS (tag1 tag2 ...)` |
+| `tag remove` | `SELECT` + `UID STORE <uid> -FLAGS (tag1 ...)` |
+| `flags add` | `SELECT` + `UID STORE <uid> +FLAGS (\Seen \Answered ...)` |
+| `flags remove` | `SELECT` + `UID STORE <uid> -FLAGS (\Flagged ...)` |
 
 Search results are shown most-recent-first and capped by `Config::max` (default
 50) to keep large mailboxes fast.
+
+### Flag validation
+
+The `flags` command only accepts the standard flags `\Seen`, `\Answered` and
+`\Flagged` (given case-insensitively, with or without the leading backslash).
+`\Deleted`, `\Draft` and `\Recent` are explicitly not supported and rejected
+with a dedicated error, as are any other names. Normalization happens in
+`normalize_flags` (`src/imap/mod.rs`) and is applied by both backends, so the
+restriction holds regardless of which backend is active.
 
 ### RFC 2047 subject decoding
 ENVELOPE subjects may be encoded-words (e.g. `=?utf-8?Q?Votre=20facture?=`).
@@ -63,7 +75,7 @@ tests drive.
 
 `cargo test` runs entirely against the mock backend (no network). Coverage:
 - backend selection (`mock` vs `real`)
-- list / search / read / move / tag happy + error paths
+- list / search / read / move / tag / flags happy + error paths
 - RFC 2047 decoder (plain, Q, Q-with-underscore, B, Latin-1, mixed text)
 - the real backend returns an error (no fabricated data) when unreachable
 
@@ -73,6 +85,23 @@ To exercise the real backend manually:
 cargo run --release -- -c incal.conf folders
 cargo run --release -- -c incal.conf -f INBOX search "SINCE 01-Jan-2026"
 ```
+
+## Output
+
+Commands print human-readable text by default. With `-j`/`--json` each command
+prints a single compact JSON object to stdout instead; errors become
+`{"error": "..."}` on stderr (exit code unchanged). JSON shapes:
+
+| Command | Shape |
+|---------|-------|
+| `folders` | `{"count", "folders": [FolderInfo]}` |
+| `search` | `{"folder", "query", "count", "results": [SearchResult]}` |
+| `read` | `{"folder", "uid", "content"}` |
+| `move` | `{"folder", "uid", "to"}` |
+| `tag` / `flags` | `{"folder", "uid", "added", "removed"}` |
+
+`FolderInfo` and `SearchResult` derive `serde::Serialize`; the other shapes are
+small output structs in `src/cli/mod.rs`.
 
 ## Error handling
 

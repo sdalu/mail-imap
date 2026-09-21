@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::imap::{FolderInfo, ImapBackend, SearchResult};
+use crate::imap::{normalize_flags, FolderInfo, ImapBackend, SearchResult};
 use anyhow::{bail, Context, Result};
 use imap::types::{NameAttribute, Uid};
 use imap::Session;
@@ -68,6 +68,30 @@ impl RealClient {
         Ok(RealClient {
             backend,
             max: config.max,
+        })
+    }
+
+    /// `UID STORE` one or more `+FLAGS`/`-FLAGS` updates on a message.
+    fn store_flags(
+        &mut self,
+        folder: &str,
+        uid: u32,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        with_backend!(&mut self.backend, |s| {
+            s.select(folder)?;
+            if !add.is_empty() {
+                let flags: Vec<String> = add.iter().map(|f| imap_quote(f)).collect();
+                let cmd = format!(r"+FLAGS ({})", flags.join(" "));
+                s.uid_store(uid.to_string(), &cmd)?;
+            }
+            if !remove.is_empty() {
+                let flags: Vec<String> = remove.iter().map(|f| imap_quote(f)).collect();
+                let cmd = format!(r"-FLAGS ({})", flags.join(" "));
+                s.uid_store(uid.to_string(), &cmd)?;
+            }
+            Ok(())
         })
     }
 }
@@ -220,17 +244,20 @@ impl ImapBackend for RealClient {
         })
     }
 
-    fn tag_email(&mut self, folder: &str, uid: u32, tags: &[String]) -> Result<()> {
-        if tags.is_empty() {
+    fn set_tags(&mut self, folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
+        if add.is_empty() && remove.is_empty() {
             bail!("no tags given");
         }
-        with_backend!(&mut self.backend, |s| {
-            s.select(folder)?;
-            let flags: Vec<String> = tags.iter().map(|t| imap_quote(t)).collect();
-            let cmd = format!(r"+FLAGS ({})", flags.join(" "));
-            s.uid_store(uid.to_string(), &cmd)?;
-            Ok(())
-        })
+        self.store_flags(folder, uid, add, remove)
+    }
+
+    fn set_flags(&mut self, folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
+        let add = normalize_flags(add)?;
+        let remove = normalize_flags(remove)?;
+        if add.is_empty() && remove.is_empty() {
+            bail!("no flags given");
+        }
+        self.store_flags(folder, uid, &add, &remove)
     }
 
     fn close(&mut self) {

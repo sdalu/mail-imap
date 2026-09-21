@@ -16,10 +16,41 @@ pub use mock::MockClient;
 pub use real::RealClient;
 
 use crate::config::Config;
-use anyhow::Result;
+use anyhow::{bail, Result};
+
+/// Standard flags the `flags` command may add or remove.
+pub const SUPPORTED_FLAGS: [&str; 3] = ["seen", "answered", "flagged"];
+
+/// Standard flags this tool explicitly refuses to change.
+pub const UNSUPPORTED_FLAGS: [&str; 3] = ["deleted", "draft", "recent"];
+
+/// Normalize user-supplied flag names (`seen`, `\Seen`, `SEEN`) to their
+/// canonical IMAP form (`\Seen`), rejecting anything the tool does not
+/// support.
+pub fn normalize_flags(names: &[String]) -> Result<Vec<String>> {
+    names.iter().map(|n| normalize_flag(n)).collect()
+}
+
+fn normalize_flag(name: &str) -> Result<String> {
+    let canon = name.trim().trim_start_matches('\\').to_ascii_lowercase();
+    if SUPPORTED_FLAGS.contains(&canon.as_str()) {
+        return Ok(format!("\\{}", canon));
+    }
+    if UNSUPPORTED_FLAGS.contains(&canon.as_str()) {
+        bail!(
+            "flag '{}' is explicitly not supported by this tool \
+             (supported: seen, answered, flagged)",
+            name
+        );
+    }
+    bail!(
+        "unknown flag '{}': supported flags are seen, answered, flagged",
+        name
+    )
+}
 
 /// A single mailbox as reported by `LIST`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct FolderInfo {
     pub name: String,
     pub delimiter: Option<String>,
@@ -28,7 +59,7 @@ pub struct FolderInfo {
 }
 
 /// A single search hit.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     pub uid: u32,
     pub subject: String,
@@ -44,7 +75,14 @@ pub trait ImapBackend {
     fn search_emails(&mut self, folder: &str, query: &str) -> Result<Vec<SearchResult>>;
     fn get_email(&mut self, folder: &str, uid: u32) -> Result<String>;
     fn move_email(&mut self, folder: &str, uid: u32, target: &str) -> Result<()>;
-    fn tag_email(&mut self, folder: &str, uid: u32, tags: &[String]) -> Result<()>;
+    /// Add and/or remove keyword tags (user-defined flags) on a message.
+    /// Tags are arbitrary and are not validated.
+    fn set_tags(&mut self, folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()>;
+    /// Add and/or remove standard flags (`\Seen`, `\Answered`, `\Flagged`) on
+    /// a message. Names may carry a leading backslash and any case; flags
+    /// outside the supported set (notably `\Deleted`, `\Draft`, `\Recent`)
+    /// are rejected.
+    fn set_flags(&mut self, folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()>;
     fn close(&mut self);
 }
 
@@ -90,10 +128,16 @@ impl ImapBackend for ImapClient {
             ImapClient::Mock(c) => c.move_email(folder, uid, target),
         }
     }
-    fn tag_email(&mut self, folder: &str, uid: u32, tags: &[String]) -> Result<()> {
+    fn set_tags(&mut self, folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
         match self {
-            ImapClient::Real(c) => c.tag_email(folder, uid, tags),
-            ImapClient::Mock(c) => c.tag_email(folder, uid, tags),
+            ImapClient::Real(c) => c.set_tags(folder, uid, add, remove),
+            ImapClient::Mock(c) => c.set_tags(folder, uid, add, remove),
+        }
+    }
+    fn set_flags(&mut self, folder: &str, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
+        match self {
+            ImapClient::Real(c) => c.set_flags(folder, uid, add, remove),
+            ImapClient::Mock(c) => c.set_flags(folder, uid, add, remove),
         }
     }
     fn close(&mut self) {
