@@ -113,11 +113,11 @@ pub enum ImapClient {
 
 impl ImapClient {
     /// Connect using the backend requested by `config` (`mock` flag).
-    pub fn connect(config: &Config) -> Result<Self> {
+    pub fn connect(config: &Config, debug: bool) -> Result<Self> {
         if config.mock {
             Ok(ImapClient::Mock(MockClient::connect(config)?))
         } else {
-            Ok(ImapClient::Real(RealClient::connect(config)?))
+            Ok(ImapClient::Real(RealClient::connect(config, debug)?))
         }
     }
 }

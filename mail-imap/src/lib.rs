@@ -16,7 +16,7 @@ mod tests {
 
     #[test]
     fn connect_chooses_mock_backend() {
-        let client = ImapClient::connect(&mock_config()).expect("connect");
+        let client = ImapClient::connect(&mock_config(), false).expect("connect");
         match client {
             ImapClient::Mock(_) => {}
             ImapClient::Real(_) => panic!("expected mock backend, got real"),
@@ -25,7 +25,7 @@ mod tests {
 
     #[test]
     fn list_folders_returns_expected_set() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         let folders = client.list_folders().expect("list");
         let names: Vec<_> = folders.iter().map(|f| f.name.clone()).collect();
         assert!(names.contains(&"INBOX".to_string()));
@@ -36,7 +36,7 @@ mod tests {
 
     #[test]
     fn search_returns_all_when_blank() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         let folders = vec!["INBOX".to_string()];
         let results = client
             .search_folders(&folders, "", 50)
@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn search_filters_by_subject() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         let folders = vec!["INBOX".to_string()];
         let results = client
             .search_folders(&folders, "invoice", 50)
@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn search_multi_folder_aggregates_and_caps_total() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         let folders = vec!["INBOX".to_string(), "Trash".to_string()];
         // The mock reports its 5 messages for every folder; with a total
         // budget of 3 the first folder fills it and the second is skipped.
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn read_known_uid() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         let content = client.get_email("INBOX", 1).expect("read");
         assert!(content.contains("Welcome aboard"));
         assert!(content.contains("Hello, this is message 1."));
@@ -86,13 +86,13 @@ mod tests {
 
     #[test]
     fn read_unknown_uid_fails() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         assert!(client.get_email("INBOX", 999).is_err());
     }
 
     #[test]
     fn mailbox_counts_all_folders() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         let counts = client.mailbox_counts(None).expect("counts");
         assert!(counts.iter().any(|m| m.name == "INBOX" && m.messages == 5));
         assert!(counts.iter().any(|m| m.name == "Trash" && m.messages == 0));
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn mailbox_counts_single_folder() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         let counts = client.mailbox_counts(Some("INBOX")).expect("counts");
         assert_eq!(counts.len(), 1);
         assert_eq!(counts[0].name, "INBOX");
@@ -110,14 +110,14 @@ mod tests {
 
     #[test]
     fn folder_uids_returns_all_uids() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         let uids = client.folder_uids("INBOX").expect("uids");
         assert_eq!(uids, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn unread_search_returns_unseen_messages() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         let folders = vec!["INBOX".to_string()];
         let results = client
             .search_folders(&folders, "UNSEEN", 50)
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn list_parts_known_uid() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         let parts = client.list_parts("INBOX", 5).expect("parts");
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0].part, 1);
@@ -138,13 +138,13 @@ mod tests {
 
     #[test]
     fn list_parts_unknown_uid_fails() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         assert!(client.list_parts("INBOX", 999).is_err());
     }
 
     #[test]
     fn save_part_writes_file() {
-        let mut client = ImapClient::connect(&mock_config()).expect("connect");
+        let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         let dir = std::env::temp_dir();
         let path = dir.join(format!("mail-imap-test-part-{}.pdf", std::process::id()));
         let size = client
@@ -167,6 +167,6 @@ mod tests {
             mock: false,
             ..Config::default()
         };
-        assert!(ImapClient::connect(&cfg).is_err());
+        assert!(ImapClient::connect(&cfg, false).is_err());
     }
 }

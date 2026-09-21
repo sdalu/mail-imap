@@ -102,9 +102,18 @@ struct PartsSaveOutput<'a> {
     size: u64,
 }
 
-pub fn list_folders(config: &Config, json: bool) -> Result<()> {
-    let mut client = ImapClient::connect(config)?;
+pub fn list_folders(config: &Config, json: bool, debug: bool) -> Result<()> {
+    if debug {
+        eprintln!("Connecting to {}:{} as {}", config.server, config.port, config.username);
+    }
+    let mut client = ImapClient::connect(config, debug)?;
+    if debug {
+        eprintln!("Listing folders...");
+    }
     let folders = client.list_folders()?;
+    if debug {
+        eprintln!("Found {} folder(s)", folders.len());
+    }
 
     if json {
         emit_json(&FoldersOutput {
@@ -141,9 +150,15 @@ pub fn list_folders(config: &Config, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn search_emails(config: &Config, query: &str, folders: Vec<String>, json: bool) -> Result<()> {
-    let mut client = ImapClient::connect(config)?;
+pub fn search_emails(config: &Config, query: &str, folders: Vec<String>, json: bool, debug: bool) -> Result<()> {
+    if debug {
+        eprintln!("Searching folders {:?} with query '{}'", folders, query);
+    }
+    let mut client = ImapClient::connect(config, debug)?;
     let results = client.search_folders(&folders, query, config.max)?;
+    if debug {
+        eprintln!("Found {} result(s)", results.len());
+    }
 
     if json {
         emit_json(&SearchOutput {
@@ -217,9 +232,12 @@ fn print_search_result(indent: &str, r: &SearchResult) {
     );
 }
 
-pub fn read_emails(config: &Config, spec: &str, json: bool) -> Result<()> {
+pub fn read_emails(config: &Config, spec: &str, json: bool, debug: bool) -> Result<()> {
     let uids = parse_uids(spec)?;
-    let mut client = ImapClient::connect(config)?;
+    if debug {
+        eprintln!("Reading {} email(s) from '{}': {:?}", uids.len(), config.folder, uids);
+    }
+    let mut client = ImapClient::connect(config, debug)?;
 
     for (i, uid) in uids.iter().enumerate() {
         let content = client.get_email(&config.folder, *uid)?;
@@ -242,8 +260,11 @@ pub fn read_emails(config: &Config, spec: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn mailbox_counts(config: &Config, folder: Option<&str>, json: bool) -> Result<()> {
-    let mut client = ImapClient::connect(config)?;
+pub fn mailbox_counts(config: &Config, folder: Option<&str>, json: bool, debug: bool) -> Result<()> {
+    if debug {
+        eprintln!("Getting mailbox counts (folder: {:?})", folder);
+    }
+    let mut client = ImapClient::connect(config, debug)?;
     let counts = client.mailbox_counts(folder)?;
 
     if json {
@@ -267,8 +288,11 @@ pub fn mailbox_counts(config: &Config, folder: Option<&str>, json: bool) -> Resu
     Ok(())
 }
 
-pub fn folder_uids(config: &Config, json: bool) -> Result<()> {
-    let mut client = ImapClient::connect(config)?;
+pub fn folder_uids(config: &Config, json: bool, debug: bool) -> Result<()> {
+    if debug {
+        eprintln!("Listing UIDs for '{}'", config.folder);
+    }
+    let mut client = ImapClient::connect(config, debug)?;
     let uids = client.folder_uids(&config.folder)?;
 
     if json {
@@ -293,13 +317,16 @@ pub fn folder_uids(config: &Config, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn unread(config: &Config, folders: Vec<String>, json: bool) -> Result<()> {
-    search_emails(config, "UNSEEN", folders, json)
+pub fn unread(config: &Config, folders: Vec<String>, json: bool, debug: bool) -> Result<()> {
+    search_emails(config, "UNSEEN", folders, json, debug)
 }
 
-pub fn parts_list(config: &Config, spec: &str, json: bool) -> Result<()> {
+pub fn parts_list(config: &Config, spec: &str, json: bool, debug: bool) -> Result<()> {
+    if debug {
+        eprintln!("Listing MIME parts for UID {}...", spec);
+    }
     let uids = parse_uids(spec)?;
-    let mut client = ImapClient::connect(config)?;
+    let mut client = ImapClient::connect(config, debug)?;
 
     for uid in &uids {
         let parts = client.list_parts(&config.folder, *uid)?;
@@ -334,8 +361,12 @@ pub fn parts_save(
     part: u32,
     out: Option<PathBuf>,
     json: bool,
+    debug: bool,
 ) -> Result<()> {
-    let mut client = ImapClient::connect(config)?;
+    if debug {
+        eprintln!("Saving part {} of UID {} to '{}'", part, uid, out.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "default filename".to_string()));
+    }
+    let mut client = ImapClient::connect(config, debug)?;
     let parts = client.list_parts(&config.folder, uid)?;
     let info = parts
         .iter()

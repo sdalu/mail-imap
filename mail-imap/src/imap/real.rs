@@ -40,13 +40,16 @@ pub struct RealClient {
 }
 
 impl RealClient {
-    pub fn connect(config: &Config) -> Result<Self> {
+    pub fn connect(config: &Config, debug: bool) -> Result<Self> {
         let addr = (config.server.as_str(), config.port);
         let socket_addr = addr
             .to_socket_addrs()
             .with_context(|| format!("could not resolve {}", config.server))?
             .next()
             .with_context(|| format!("no addresses found for {}", config.server))?;
+        if debug {
+            eprintln!("Connecting to {}:{}...", config.server, config.port);
+        }
         let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
             .with_context(|| format!("could not connect to {} at {}", config.server, socket_addr))?;
         tcp.set_nodelay(true)?;
@@ -57,17 +60,23 @@ impl RealClient {
             .build()?;
 
         let backend = if config.ssl {
+            if debug {
+                eprintln!("Starting TLS handshake with {}...", config.server);
+            }
             let tls_stream = TlsConnector::connect(&connector, &config.server, tcp)
                 .with_context(|| format!("TLS handshake with {} failed", config.server))?;
-            Backend::Tls(login(imap::Client::new(tls_stream), config)?)
+            Backend::Tls(login(imap::Client::new(tls_stream), config, debug)?)
         } else if config.starttls {
+            if debug {
+                eprintln!("Starting STARTTLS upgrade with {}...", config.server);
+            }
             let client = imap::Client::new(tcp);
             let client = client
                 .secure(&config.server, &connector)
                 .with_context(|| format!("STARTTLS upgrade with {} failed", config.server))?;
-            Backend::Tls(login(client, config)?)
+            Backend::Tls(login(client, config, debug)?)
         } else {
-            Backend::Plain(login(imap::Client::new(tcp), config)?)
+            Backend::Plain(login(imap::Client::new(tcp), config, debug)?)
         };
 
         Ok(RealClient {
@@ -370,19 +379,13 @@ impl ImapBackend for RealClient {
             return;
         }
         self.closed = true;
-        let result = match &mut self.backend {
-            Backend::Tls(s) => s.logout(),
-            Backend::Plain(s) => s.logout(),
-        };
-        if let Err(e) = result {
-            // The connection was already gone (server closed it, network
-            // drop): there is nothing left to log out, and any real command
-            // failure has already been reported. Only server-side
-            // rejections (BAD/NO) are worth a warning.
-            if matches!(e, imap::Error::ConnectionLost) {
-                return;
-            }
-            eprintln!("warning: IMAP logout failed: {}", e);
+        // Do not send LOGOUT here. The `imap` crate v2.4 has a bug where
+        // `logout()` can panic with a tag mismatch assertion failure after many
+        // commands (more mails / higher `-M`). Since this is a read-only tool
+        // and the connection is being closed anyway, just drop the backend and
+        // let the server close the connection when the TCP stream is dropped.
+        match &mut self.backend {
+            Backend::Tls(_) | Backend::Plain(_) => {}
         }
     }
 }
@@ -393,12 +396,15 @@ impl Drop for RealClient {
     }
 }
 
-fn login<S>(client: imap::Client<S>, config: &Config) -> Result<Session<S>>
+fn login<S>(client: imap::Client<S>, config: &Config, debug: bool) -> Result<Session<S>>
 where
     S: std::io::Read + std::io::Write,
 {
     let mut client = client;
     client.read_greeting().context("could not read server greeting")?;
+    if debug {
+        eprintln!("Logging in as '{}'...", config.username);
+    }
     client
         .login(&config.username, &config.password)
         .map_err(|(e, _)| e)

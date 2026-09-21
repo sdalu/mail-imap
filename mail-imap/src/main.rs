@@ -20,6 +20,10 @@ struct Args {
     #[clap(long = "mock", global = true)]
     mock: bool,
 
+    /// Enable debug output (show connection attempts, login failures, etc.)
+    #[clap(short = 'd', long = "debug", global = true)]
+    debug: bool,
+
     /// Output results as compact single-line JSON (for programmatic use)
     #[clap(short = 'j', long = "json", global = true)]
     json: bool,
@@ -150,24 +154,26 @@ fn main() {
     }
 
     let json = args.json;
+    let debug = args.debug;
     let result = match &args.command {
-        Command::Folders => cli::list_folders(&config, json),
+        Command::Folders => cli::list_folders(&config, json, debug),
         Command::Search { query, folders } => cli::search_emails(
             &config,
             query,
             resolve_folders(folders, &config),
             json,
+            debug,
         ),
-        Command::Read { uids } => cli::read_emails(&config, uids, json),
-        Command::Count { folder } => cli::mailbox_counts(&config, folder.as_deref(), json),
-        Command::Ids => cli::folder_uids(&config, json),
+        Command::Read { uids } => cli::read_emails(&config, uids, json, debug),
+        Command::Count { folder } => cli::mailbox_counts(&config, folder.as_deref(), json, debug),
+        Command::Ids => cli::folder_uids(&config, json, debug),
         Command::Unread { folders } => {
-            cli::unread(&config, resolve_folders(folders, &config), json)
+            cli::unread(&config, resolve_folders(folders, &config), json, debug)
         }
         Command::Parts { action } => match action {
-            PartsAction::List { uids } => cli::parts_list(&config, uids, json),
+            PartsAction::List { uids } => cli::parts_list(&config, uids, json, debug),
             PartsAction::Save { uid, part, out } => {
-                cli::parts_save(&config, *uid, *part, out.clone(), json)
+                cli::parts_save(&config, *uid, *part, out.clone(), json, debug)
             }
         },
     };
