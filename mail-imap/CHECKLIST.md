@@ -48,6 +48,9 @@ this morning is a claim, not a fact.
       `make check` proves the page parses, not that it is true.
 - [ ] `QUICKSTART.md` — do its commands still run? Every one of them is
       meant to be runnable as written, most under `--mock`.
+- [ ] `example.conf` — does it still parse, and does it still show a
+      profile block? It is the only place the multi-account shape is
+      written out for someone to copy.
 - [ ] `example.conf` — a config field that changed is written in four
       places: the struct, the README table, the man page, and this
       template. `check-examples.sh` does not read configs, so nothing

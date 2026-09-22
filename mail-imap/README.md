@@ -766,6 +766,10 @@ Errors are printed as `{"error": "..."}` on stderr with a non-zero exit code.
 Every one of these is global: it may appear before or after the
 command.
 
+- **`-p, --profile <NAME>`** — which account to use, from a config
+  that names several. Without it the config's own `default = "..."`
+  decides; a config that names none needs neither. See
+  [Several accounts in one file](#several-accounts-in-one-file).
 - **`-c, --config <PATH>`** — the config file. Without it, the search
   order is `$MAIL_IMAP_CONFIG`, then `~/.config/mail-imap.conf`, then
   `/etc/mail-imap.conf`. A file named by `-c` or by the environment
@@ -868,6 +872,46 @@ password of `30s` stays the text `30s` rather than becoming a number.
 | `mock`         | `false`    | Use the in-memory mock backend                                                                                            |
 | `delimiter`    | `null`     | The hierarchy delimiter `info` reports, overriding the server's own answer. Advisory only: nothing rewrites a folder name |
 | `access-level` | `organize` | How much this tool may change: `readonly`, `organize`, `restructure` or `full` — see [Access level](#access-level)        |
+
+### Several accounts in one file
+
+A config can describe more than one account. A top-level block is a
+**profile**; settings written beside the blocks are shared, and a
+profile overrides what it names:
+
+```nginx
+max          = 25          # shared by every profile
+access-level = readonly
+default      = "work"      # used when -p names none
+
+work {
+    server   = "imap.work.example"
+    username = "me@work.example"
+    password = "..."
+    access-level = organize    # this one may file mail
+}
+
+personal {
+    server   = "imap.home.example"
+    username = "me"
+    password = "..."
+}
+```
+
+```bash
+mail-imap search UNSEEN                  # work, via default
+mail-imap -p personal search UNSEEN
+mail-imap --profile personal folder list
+```
+
+`info` names the profile in force. No block means no profiles, which
+is every config written before they existed and every config for a
+single account — `-p` is then neither needed nor accepted.
+
+A config with profiles and nothing selected is an **error**, not a
+guess: it lists the names it has. Picking one for you means picking
+which mailbox to connect to, and the wrong pick is the failure this
+tool works hardest to avoid.
 
 ### Access level
 

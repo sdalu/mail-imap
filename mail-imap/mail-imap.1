@@ -48,6 +48,14 @@ demonstration.
 takes global options anywhere on the command line, before or after
 the command.
 .Bl -tag -width Ds
+.It Fl p Ar name , Fl -profile Ar name
+Which account to use, from a config that names several.
+Without it the config\(aqs own
+.Ic default = Qq ...
+decides; a config that names none needs neither, and rejects this
+option rather than ignoring it.
+See
+.Sx CONFIGURATION .
 .It Fl c Ar path , Fl -config Ar path
 Config file path.
 The file must exist: a path given here is an answer, not a candidate,
@@ -511,6 +519,37 @@ The key is also read as
 Default
 .Ic organize .
 .El
+.Ss Several accounts in one file
+A top-level block is a
+.Em profile .
+Settings written beside the blocks are shared by every profile, and a
+profile overrides what it names.
+.Bd -literal -offset indent
+max          = 25
+access-level = readonly
+default      = "work"
+
+work {
+    server   = "imap.work.example"
+    username = "me@work.example"
+    password = "..."
+    access-level = organize
+}
+
+personal {
+    server   = "imap.home.example"
+    username = "me"
+    password = "..."
+}
+.Ed
+.Pp
+.Cm info
+names the profile in force.
+A config with no blocks has no profiles, which is every config for a
+single account.
+A config with profiles and none selected is an error listing the names
+it has, rather than a guess: choosing one means choosing which mailbox
+to connect to.
 .Sh ENVIRONMENT
 .Bl -tag -width Ds
 .It Ev MAIL_IMAP_CONFIG

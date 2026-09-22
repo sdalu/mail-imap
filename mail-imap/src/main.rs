@@ -24,6 +24,12 @@ Without a folder a selection means the -f folder (or \
 #[clap(name = "mail-imap", version = env!("CARGO_PKG_VERSION"), author = "AI Assistant")]
 struct Args {
     /// Configuration file path (or set MAIL_IMAP_CONFIG)
+    /// Profile to use from a config that names several accounts.
+    /// Without it the config's `default = "..."` decides; a config
+    /// with no profiles needs neither
+    #[clap(short = 'p', long = "profile", global = true, value_name = "NAME")]
+    profile: Option<String>,
+
     #[clap(short = 'c', long = "config")]
     config_file: Option<String>,
 
@@ -409,18 +415,24 @@ fn main() {
     // there may well be none, and saying so beats naming a path that
     // was never opened.
     let mut config_file: Option<String> = None;
+    let mut profile: Option<String> = None;
     let mut config = if args.mock {
         // Mock mode needs no server, so a missing config is fine.
-        match config::load_config(args.config_file.as_deref()) {
-            Ok(cfg) => {
-                config_file = config::config_path(args.config_file.as_deref());
-                cfg
+        match config::load_config(args.config_file.as_deref(), args.profile.as_deref()) {
+            Ok(loaded) => {
+                config_file = Some(loaded.path);
+                profile = loaded.profile;
+                loaded.config
             }
             Err(_) => config::Config::default(),
         }
     } else {
-        match config::load_config(args.config_file.as_deref()) {
-            Ok(cfg) => cfg,
+        match config::load_config(args.config_file.as_deref(), args.profile.as_deref()) {
+            Ok(loaded) => {
+                config_file = Some(loaded.path);
+                profile = loaded.profile;
+                loaded.config
+            }
             // {:#} so the cause travels with the context: the outer
             // frame names the file, the inner one says what is wrong
             // with it, and only the pair is actionable.
@@ -480,6 +492,7 @@ fn main() {
         Command::Info => cli::info(
             &config,
             config_file.as_deref(),
+            profile.as_deref(),
             configured_access,
             json,
             debug,

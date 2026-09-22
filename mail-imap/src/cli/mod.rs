@@ -457,6 +457,10 @@ struct ConfigInfo<'a> {
     /// The file the settings came from, or `null` when none was read
     /// (`--mock` without a config).
     path: Option<&'a str>,
+    /// The profile the settings came from, or `null` when the file
+    /// names none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<&'a str>,
     server: &'a str,
     port: u16,
     /// `implicit`, `starttls` or `none`.
@@ -529,12 +533,13 @@ struct ServerInfo {
 pub fn info(
     config: &Config,
     config_path: Option<&str>,
+    profile: Option<&str>,
     configured: crate::config::AccessLevel,
     json: bool,
     debug: bool,
 ) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
-    let out = build_info(&mut client, config, config_path, configured)?;
+    let out = build_info(&mut client, config, config_path, profile, configured)?;
     if json {
         return emit_json(&out);
     }
@@ -548,6 +553,7 @@ fn build_info<'a>(
     client: &mut ImapClient,
     config: &'a Config,
     config_path: Option<&'a str>,
+    profile: Option<&'a str>,
     configured: crate::config::AccessLevel,
 ) -> Result<InfoOutput<'a>> {
     let caps = client.capabilities()?;
@@ -596,6 +602,7 @@ fn build_info<'a>(
         },
         config: ConfigInfo {
             path: config_path,
+            profile,
             server: &config.server,
             port: config.port,
             tls: if config.ssl {
@@ -679,6 +686,11 @@ fn print_info(i: &InfoOutput) {
         "  config      {}",
         i.config.path.unwrap_or("(none read: built-in defaults)")
     );
+    // Only when there is one: a line saying "profile (none)" on every
+    // single-account config is noise on the common case.
+    if let Some(p) = i.config.profile {
+        println!("  profile     {}", p);
+    }
     println!(
         "  account     {}@{}:{} ({}{})",
         i.config.username,
@@ -2156,7 +2168,7 @@ mod tests {
     fn info_reports_the_account_as_the_caller_would_have_to_guess_it() {
         let mut client = mock_client();
         let config = mock_config();
-        let out = build_info(&mut client, &config, Some("/tmp/x.conf"), config.access)
+        let out = build_info(&mut client, &config, Some("/tmp/x.conf"), None, config.access)
             .expect("info");
         // The delimiter comes off the mailbox list, and the special
         // uses say which mailbox is the Trash on an account that does
@@ -2192,7 +2204,7 @@ mod tests {
             delimiter: Some(".".to_string()),
             ..mock_config()
         };
-        let out = build_info(&mut client, &config, None, config.access).expect("info");
+        let out = build_info(&mut client, &config, None, None, config.access).expect("info");
         assert_eq!(out.folders.delimiter.as_deref(), Some("."));
         assert_eq!(out.folders.delimiter_source, "config");
         // What the server said is kept: the two disagreeing is the
@@ -2207,7 +2219,7 @@ mod tests {
             access: crate::config::AccessLevel::ReadOnly,
             ..mock_config()
         };
-        let out = build_info(&mut client, &config, None, crate::config::AccessLevel::Full)
+        let out = build_info(&mut client, &config, None, None, crate::config::AccessLevel::Full)
             .expect("info");
         assert_eq!(out.access.effective, "readonly");
         assert_eq!(out.access.configured, "full");

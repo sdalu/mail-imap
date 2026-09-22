@@ -69,6 +69,10 @@ access-level = readonly
 UCL is a superset of JSON, so the same thing written as a JSON object
 works just as well -- a config you already have keeps working.
 
+More than one account goes in the same file, each in a named block,
+selected with `-p` — see [Several accounts in one
+file](README.md#several-accounts-in-one-file).
+
 `readonly` costs nothing while you get the shape right; `organize` is
 the config's own default if the field is left out. See [Access
 level](README.md#access-level) for what each of the four levels

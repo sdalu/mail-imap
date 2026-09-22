@@ -231,19 +231,26 @@ fn user_config_dir_from(xdg: Option<&str>, home: Option<&str>) -> Option<String>
         .map(|h| format!("{}/.config", h.trim_end_matches('/')))
 }
 
-/// The config file this run actually reads: the first candidate that is
-/// there, or `None` when none of them is. `info` reports it, so it is
-/// resolved in one place.
-pub fn config_path(path: Option<&str>) -> Option<String> {
-    config_candidates(path)
-        .into_iter()
-        .find(|p| Path::new(p).exists())
+/// A config as loaded: the settings, which named profile they came
+/// from, and the file they were read out of.
+///
+/// The three travel together because `info` reports all three and they
+/// have to agree: resolving the path a second time could name a
+/// different file, and the profile is not recoverable from `Config`.
+pub struct Loaded {
+    pub config: Config,
+    /// The profile in force, or `None` when the file has none.
+    pub profile: Option<String>,
+    pub path: String,
 }
 
-pub fn load_config(path: Option<&str>) -> Result<Config> {
+/// The key naming the profile to use when none is asked for.
+const DEFAULT_KEY: &str = "default";
+
+pub fn load_config(path: Option<&str>, profile: Option<&str>) -> Result<Loaded> {
     let candidates = config_candidates(path);
     let found = match candidates.iter().find(|p| Path::new(p).exists()) {
-        Some(p) => p,
+        Some(p) => p.clone(),
         // One candidate means it was named outright, so say which file
         // is missing rather than listing a search that never happened.
         None if candidates.len() == 1 => {
@@ -255,12 +262,23 @@ pub fn load_config(path: Option<&str>) -> Result<Config> {
         ),
     };
 
-    let content = fs::read_to_string(found)
+    let content = fs::read_to_string(&found)
         .with_context(|| format!("could not read config file: {}", found))?;
-    parse_config(&content).with_context(|| format!("in config file: {}", found))
+    let (config, name) =
+        parse_config(&content, profile).with_context(|| format!("in config file: {}", found))?;
+    Ok(Loaded { config, profile: name, path: found })
 }
 
-pub fn parse_config(content: &str) -> Result<Config> {
+/// Parse config text, which is UCL, and select a profile from it.
+///
+/// UCL is a superset of JSON, so a config written as a JSON object
+/// parses unchanged and every example that predates UCL still works.
+/// The parsed object is emitted back as JSON and handed to serde
+/// rather than being walked key by key: that keeps one definition of
+/// the field names, their aliases and their defaults -- the serde
+/// attributes on `Config` -- instead of a second one that would drift
+/// from it.
+pub fn parse_config(content: &str, profile: Option<&str>) -> Result<(Config, Option<String>)> {
     // `libucl::Parser::parse` builds a CString and unwraps, so a NUL
     // byte in the file would abort the process rather than fail.
     if content.as_bytes().contains(&0) {
@@ -277,12 +295,82 @@ pub fn parse_config(content: &str) -> Result<Config> {
     let json = Emitter::JSONCompact
         .emit(&parsed)
         .context("could not re-encode the parsed config")?;
+    let value: serde_json::Value =
+        serde_json::from_str(&json).context("could not re-read the parsed config")?;
 
-    serde_json::from_str::<Config>(&json).context(
+    let (selected, name) = select_profile(value, profile)?;
+
+    let config = serde_json::from_value::<Config>(selected).context(
         "config parsed as UCL but is not valid for this tool \
          (unknown access level, or a field of the wrong type)",
-    )
+    )?;
+    Ok((config, name))
 }
+
+/// Pick the profile out of a parsed config.
+///
+/// A profile is a top-level key whose value is an object; no setting is
+/// one, so the two cannot be confused. Scalars beside the profiles are
+/// shared defaults a profile may override, which is what lets `max` or
+/// `access-level` be written once for a whole file.
+///
+/// A file with no profiles is returned as it stands -- which is every
+/// config written before profiles existed.
+fn select_profile(
+    value: serde_json::Value,
+    wanted: Option<&str>,
+) -> Result<(serde_json::Value, Option<String>)> {
+    let serde_json::Value::Object(map) = value else {
+        bail!("config is not a set of settings");
+    };
+
+    let profiles: Vec<String> = map
+        .iter()
+        .filter(|(_, v)| v.is_object())
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    if profiles.is_empty() {
+        if let Some(name) = wanted {
+            bail!(
+                "no profile '{}': this config has no named profiles, so it \
+                 describes one account and there is nothing to select",
+                name
+            );
+        }
+        return Ok((serde_json::Value::Object(map), None));
+    }
+
+    let default = map.get(DEFAULT_KEY).and_then(|v| v.as_str()).map(String::from);
+    let name = match wanted.map(String::from).or(default) {
+        Some(n) => n,
+        // Choosing for the caller means guessing which account to reach,
+        // and the wrong guess connects to the wrong mailbox.
+        None => bail!(
+            "the config has named profiles but none was selected: {} \
+             (choose one with -p, or set {} = \"...\" in the config)",
+            profiles.join(", "),
+            DEFAULT_KEY
+        ),
+    };
+
+    let Some(serde_json::Value::Object(chosen)) = map.get(&name) else {
+        bail!("no profile '{}' in the config; it has {}", name, profiles.join(", "));
+    };
+
+    // Shared defaults first, the profile's own settings over them.
+    let mut merged = serde_json::Map::new();
+    for (k, v) in &map {
+        if !v.is_object() && k != DEFAULT_KEY {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    for (k, v) in chosen {
+        merged.insert(k.clone(), v.clone());
+    }
+    Ok((serde_json::Value::Object(merged), Some(name)))
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -373,13 +461,18 @@ mod tests {
         .is_err());
     }
 
+    /// The common case: no profile asked for, settings only.
+    fn parse_one(content: &str) -> Result<Config> {
+        parse_config(content, None).map(|(c, _)| c)
+    }
+
     // --------------------------------------------------- UCL parsing
 
     #[test]
     fn the_config_is_ucl_not_json() {
         // The shape the file actually takes: bare keys, no braces, no
         // commas, unquoted enum value.
-        let cfg = parse_config(
+        let cfg = parse_one(
             "server = \"imap.example.com\"\n\
              username = \"user@example.com\"\n\
              password = \"secret\"\n\
@@ -398,7 +491,7 @@ mod tests {
     fn json_is_still_a_valid_config_because_ucl_is_a_superset() {
         // Every config written before the switch, and every JSON
         // example in the documents, has to keep working.
-        let cfg = parse_config(
+        let cfg = parse_one(
             r#"{"server":"s","username":"u","password":"p","access-level":"readonly","max":7}"#,
         )
         .expect("JSON config should parse as UCL");
@@ -409,7 +502,7 @@ mod tests {
 
     #[test]
     fn ucl_underscore_alias_and_older_level_spellings_still_read() {
-        let cfg = parse_config(
+        let cfg = parse_one(
             "server = \"s\"\nusername = \"u\"\npassword = \"p\"\n\
              access_level = non-destructive\n",
         )
@@ -419,7 +512,7 @@ mod tests {
 
     #[test]
     fn a_config_that_is_not_ucl_is_refused() {
-        let err = parse_config("server = \"unterminated\nusername\n")
+        let err = parse_one("server = \"unterminated\nusername\n")
             .expect_err("broken UCL must not parse");
         let text = format!("{:#}", err);
         assert!(
@@ -434,7 +527,7 @@ mod tests {
         // Silently falling back to `organize` would widen what a
         // config meant to narrow: a typo in `readonly` must not become
         // permission to change mail.
-        let err = parse_config(
+        let err = parse_one(
             "server = \"s\"\nusername = \"u\"\npassword = \"p\"\naccess-level = readonlyy\n",
         )
         .expect_err("an unknown level must be refused");
@@ -443,7 +536,7 @@ mod tests {
 
     #[test]
     fn a_field_of_the_wrong_type_is_refused() {
-        assert!(parse_config(
+        assert!(parse_one(
             "server = \"s\"\nusername = \"u\"\npassword = \"p\"\nport = \"nope\"\n"
         )
         .is_err());
@@ -453,7 +546,7 @@ mod tests {
     fn a_config_with_a_nul_byte_is_refused_rather_than_aborting() {
         // libucl builds a CString and unwraps; without the guard this
         // is a panic, not an error.
-        let err = parse_config("server = \"s\"\0\n").expect_err("NUL must be refused");
+        let err = parse_one("server = \"s\"\0\n").expect_err("NUL must be refused");
         assert!(format!("{:#}", err).contains("NUL"));
     }
 
@@ -461,7 +554,7 @@ mod tests {
     fn a_value_that_looks_like_a_duration_stays_text() {
         // UCL reads a bare 30s as a duration; NO_TIME keeps it the
         // text it was written as, which is what a password needs.
-        let cfg = parse_config("server = \"s\"\nusername = \"u\"\npassword = 30s\n")
+        let cfg = parse_one("server = \"s\"\nusername = \"u\"\npassword = 30s\n")
             .expect("parse");
         assert_eq!(cfg.password, "30s");
     }
@@ -529,5 +622,99 @@ mod tests {
             user_config_dir_from(None, Some("/home/u/")),
             Some("/home/u/.config".to_string())
         );
+    }
+
+    // -------------------------------------------------- profiles
+
+    const TWO: &str = "max = 7\n\
+                       access-level = readonly\n\
+                       work {\n\
+                         server = \"work.example\"\n\
+                         username = \"me@work\"\n\
+                         password = \"w\"\n\
+                         access-level = organize\n\
+                       }\n\
+                       home {\n\
+                         server = \"home.example\"\n\
+                         username = \"me\"\n\
+                         password = \"h\"\n\
+                       }\n";
+
+    #[test]
+    fn a_profile_is_selected_by_name() {
+        let (cfg, name) = parse_config(TWO, Some("work")).expect("parse");
+        assert_eq!(name.as_deref(), Some("work"));
+        assert_eq!(cfg.server, "work.example");
+        assert_eq!(cfg.username, "me@work");
+    }
+
+    #[test]
+    fn settings_beside_the_profiles_are_shared_and_may_be_overridden() {
+        // max is written once for the file; access-level is written
+        // once and then overridden by the profile that needs more.
+        let (work, _) = parse_config(TWO, Some("work")).expect("parse");
+        assert_eq!(work.max, 7, "shared default reaches the profile");
+        assert_eq!(work.access, AccessLevel::Organize, "the profile wins");
+        let (home, _) = parse_config(TWO, Some("home")).expect("parse");
+        assert_eq!(home.max, 7);
+        assert_eq!(home.access, AccessLevel::ReadOnly, "shared default stands");
+    }
+
+    #[test]
+    fn the_default_key_chooses_when_nothing_is_asked_for() {
+        let with_default = format!("default = \"home\"\n{}", TWO);
+        let (cfg, name) = parse_config(&with_default, None).expect("parse");
+        assert_eq!(name.as_deref(), Some("home"));
+        assert_eq!(cfg.server, "home.example");
+        // and -p still overrides it
+        let (cfg, name) = parse_config(&with_default, Some("work")).expect("parse");
+        assert_eq!(name.as_deref(), Some("work"));
+        assert_eq!(cfg.server, "work.example");
+    }
+
+    #[test]
+    fn the_default_key_is_not_mistaken_for_a_setting() {
+        let with_default = format!("default = \"home\"\n{}", TWO);
+        let (cfg, _) = parse_config(&with_default, None).expect("parse");
+        assert_eq!(cfg.server, "home.example");
+        assert_eq!(cfg.max, 7);
+    }
+
+    #[test]
+    fn profiles_with_nothing_selected_is_refused_rather_than_guessed() {
+        // Guessing an account means possibly reaching the wrong
+        // mailbox, which is the failure worth refusing over.
+        let err = parse_config(TWO, None).expect_err("must not guess");
+        let text = format!("{:#}", err);
+        assert!(text.contains("work") && text.contains("home"), "{}", text);
+    }
+
+    #[test]
+    fn an_unknown_profile_is_refused_and_says_what_there_is() {
+        let err = parse_config(TWO, Some("nope")).expect_err("must refuse");
+        let text = format!("{:#}", err);
+        assert!(text.contains("nope") && text.contains("work"), "{}", text);
+    }
+
+    #[test]
+    fn a_config_without_profiles_is_unchanged_and_names_none() {
+        // Every config written before profiles existed.
+        let (cfg, name) =
+            parse_config("server = \"s\"\nusername = \"u\"\npassword = \"p\"\n", None)
+                .expect("parse");
+        assert_eq!(name, None);
+        assert_eq!(cfg.server, "s");
+    }
+
+    #[test]
+    fn asking_for_a_profile_of_a_config_that_has_none_is_refused() {
+        // Silently ignoring -p would let a typo run against whatever
+        // single account the file describes.
+        let err = parse_config(
+            "server = \"s\"\nusername = \"u\"\npassword = \"p\"\n",
+            Some("work"),
+        )
+        .expect_err("must refuse");
+        assert!(format!("{:#}", err).contains("work"));
     }
 }

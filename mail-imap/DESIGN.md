@@ -614,6 +614,25 @@ attributes and drifting from them. The round trip costs one
 serialisation of a file that is a few hundred bytes, and buys the
 guarantee that there is nothing to keep in step.
 
+**A profile is a top-level block; a setting never is.** No field of
+`Config` is an object, so "object at top level" identifies a profile
+with nothing to disambiguate — the file needs no `[profiles]` wrapper
+and no marker key. Scalars beside the blocks are shared defaults that
+a profile overrides, which is what lets `max` or `access-level` be
+written once for a whole file; `default` names the profile to use when
+`-p` does not, and is the one scalar excluded from the merge.
+
+Selection happens on the parsed JSON, before serde: merging two
+objects is something `serde_json::Value` already does, where doing it
+after deserialisation would mean a `Config` with every field optional
+and a second pass to fill the gaps.
+
+**Nothing is selected for the caller.** A config with profiles and no
+`-p` and no `default` is an error naming what it has. Guessing — the
+first block, or the only one that looks complete — means guessing
+which account to reach, and unlike a missing file, a connection to the
+wrong mailbox does not announce itself.
+
 **Where the file is looked for distinguishes an answer from a
 candidate.** `--config` and `$MAIL_IMAP_CONFIG` name the file
 outright, so a missing one is an error; only `~/.config/mail-imap.conf`
