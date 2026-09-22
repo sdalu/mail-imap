@@ -1,9 +1,10 @@
 //! IMAP access layer.
 //!
-//! This is a **passively read-only** tool: it never moves or deletes
-//! messages, and reads use `BODY.PEEK[]` so even fetching a message does
-//! not set `\Seen`. The only mutating operations are the explicit
-//! `flag` / `tag` commands ([`ImapBackend::store_flags`], `UID STORE`).
+//! Reads never change anything: they use `BODY.PEEK[]`, so even
+//! fetching a message does not set `\Seen`. The only mutating operation
+//! is [`ImapBackend::store_flags`] (`UID STORE`), which the explicit
+//! `flag` / `tag` commands use — and which [`ImapClient`] gates on the
+//! configured [`AccessLevel`].
 //!
 //! Operations are exposed through the [`ImapBackend`] trait. Two backends exist:
 //!
@@ -23,8 +24,8 @@ pub use mock::MockClient;
 pub use real::RealClient;
 pub use sort::{parse_sort, sort_results, SortCriteria, SortKey};
 
-use crate::config::Config;
-use anyhow::Result;
+use crate::config::{AccessLevel, Config};
+use anyhow::{bail, Result};
 use std::path::Path;
 
 /// A single mailbox as reported by `LIST`.
@@ -118,6 +119,15 @@ pub trait ImapBackend {
         add: &[String],
         remove: &[String],
     ) -> Result<()>;
+    /// Create a mailbox. `use_attr` is an RFC 6154 special-use
+    /// attribute (`\Archive`, `\Sent`, ...) to declare at creation —
+    /// the only moment IMAP lets a client set one — and needs the
+    /// server to advertise `CREATE-SPECIAL-USE`.
+    fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()>;
+    /// Rename a mailbox.
+    fn rename_folder(&mut self, from: &str, to: &str) -> Result<()>;
+    /// Subscribe to a mailbox, or unsubscribe from it.
+    fn set_subscribed(&mut self, name: &str, subscribed: bool) -> Result<()>;
     /// The flags (system flags + keywords) of one message, as strings.
     /// `\Recent` is omitted (transient, server-managed), matching the
     /// `flags` of search results.
@@ -139,27 +149,98 @@ pub trait ImapBackend {
 // vectors. Exactly one client exists per run, so the size difference
 // buys nothing worth boxing for.
 #[allow(clippy::large_enum_variant)]
-pub enum ImapClient {
+enum Backend {
     Real(RealClient),
     Mock(MockClient),
+}
+
+/// The backend, plus the access level it is held to.
+///
+/// Every operation the CLI performs goes through here, which is why the
+/// level is checked here and not in the handlers: a handler can forget,
+/// and the rule that lives in one place cannot be forgotten by nine.
+pub struct ImapClient {
+    backend: Backend,
+    access: AccessLevel,
 }
 
 impl ImapClient {
     /// Connect using the backend requested by `config` (`mock` flag).
     pub fn connect(config: &Config, debug: bool) -> Result<Self> {
-        if config.mock {
-            Ok(ImapClient::Mock(MockClient::connect(config)?))
-        } else {
-            Ok(ImapClient::Real(RealClient::connect(config, debug)?))
+        if debug {
+            eprintln!(
+                "Backend: {}, access level: {}",
+                if config.mock { "mock" } else { "real" },
+                config.access.as_str()
+            );
         }
+        let backend = if config.mock {
+            Backend::Mock(MockClient::connect(config)?)
+        } else {
+            Backend::Real(RealClient::connect(config, debug)?)
+        };
+        Ok(ImapClient {
+            backend,
+            access: config.access,
+        })
+    }
+
+    /// Whether this client is the in-memory mock rather than a server.
+    // Used by the backend-selection test in lib.rs; the binary never
+    // asks, because it is the config that decides.
+    #[allow(dead_code)]
+    pub fn is_mock(&self) -> bool {
+        matches!(self.backend, Backend::Mock(_))
+    }
+
+    /// Refuse a flag change the access level does not allow. Clearing a
+    /// flag is unrestricted above `ReadOnly`: taking `\Deleted` off a
+    /// message rescues it, and taking any other flag off loses an
+    /// annotation, not a message.
+    fn check_flag_change(&self, add: &[String], remove: &[String]) -> Result<()> {
+        if !self.access.may_store_flags() {
+            bail!(
+                "access level '{}' allows no changes, and {} is one: raise \
+                 \"access-level\" to 'organize' in the config",
+                self.access.as_str(),
+                if add.is_empty() { "clearing a flag" } else { "setting a flag" }
+            );
+        }
+        for flag in add {
+            if !self.access.may_set(flag) {
+                bail!(
+                    "access level '{}' will not set {}: it marks the message for \
+                     removal, which is what 'full' is for (clearing it is allowed here)",
+                    self.access.as_str(),
+                    flag
+                );
+            }
+        }
+        let _ = remove;
+        Ok(())
+    }
+
+    /// Refuse a change to the folder tree the access level does not
+    /// allow. `organize` stops here on purpose: it files mail into
+    /// folders that exist and leaves the tree as it found it.
+    fn check_folder_change(&self, what: &str) -> Result<()> {
+        if !self.access.may_change_folders() {
+            bail!(
+                "access level '{}' leaves the folder tree alone, so it will not {}: \
+                 raise \"access-level\" to 'restructure' in the config",
+                self.access.as_str(),
+                what
+            );
+        }
+        Ok(())
     }
 }
 
 impl ImapBackend for ImapClient {
     fn list_folders(&mut self) -> Result<Vec<FolderInfo>> {
-        match self {
-            ImapClient::Real(c) => c.list_folders(),
-            ImapClient::Mock(c) => c.list_folders(),
+        match &mut self.backend {
+            Backend::Real(c) => c.list_folders(),
+            Backend::Mock(c) => c.list_folders(),
         }
     }
     fn search_folders(
@@ -169,39 +250,39 @@ impl ImapBackend for ImapClient {
         max_results: usize,
         sort: Option<&SortCriteria>,
     ) -> Result<Vec<SearchResult>> {
-        match self {
-            ImapClient::Real(c) => c.search_folders(folders, query, max_results, sort),
-            ImapClient::Mock(c) => c.search_folders(folders, query, max_results, sort),
+        match &mut self.backend {
+            Backend::Real(c) => c.search_folders(folders, query, max_results, sort),
+            Backend::Mock(c) => c.search_folders(folders, query, max_results, sort),
         }
     }
     fn get_email(&mut self, folder: &str, uid: u32) -> Result<String> {
-        match self {
-            ImapClient::Real(c) => c.get_email(folder, uid),
-            ImapClient::Mock(c) => c.get_email(folder, uid),
+        match &mut self.backend {
+            Backend::Real(c) => c.get_email(folder, uid),
+            Backend::Mock(c) => c.get_email(folder, uid),
         }
     }
     fn mailbox_counts(&mut self, folder: Option<&str>) -> Result<Vec<Mailbox>> {
-        match self {
-            ImapClient::Real(c) => c.mailbox_counts(folder),
-            ImapClient::Mock(c) => c.mailbox_counts(folder),
+        match &mut self.backend {
+            Backend::Real(c) => c.mailbox_counts(folder),
+            Backend::Mock(c) => c.mailbox_counts(folder),
         }
     }
     fn folder_uids(&mut self, folder: &str) -> Result<Vec<u32>> {
-        match self {
-            ImapClient::Real(c) => c.folder_uids(folder),
-            ImapClient::Mock(c) => c.folder_uids(folder),
+        match &mut self.backend {
+            Backend::Real(c) => c.folder_uids(folder),
+            Backend::Mock(c) => c.folder_uids(folder),
         }
     }
     fn thread_uids(&mut self, folder: &str, uid: u32) -> Result<Vec<u32>> {
-        match self {
-            ImapClient::Real(c) => c.thread_uids(folder, uid),
-            ImapClient::Mock(c) => c.thread_uids(folder, uid),
+        match &mut self.backend {
+            Backend::Real(c) => c.thread_uids(folder, uid),
+            Backend::Mock(c) => c.thread_uids(folder, uid),
         }
     }
     fn list_parts(&mut self, folder: &str, uid: u32) -> Result<Vec<PartInfo>> {
-        match self {
-            ImapClient::Real(c) => c.list_parts(folder, uid),
-            ImapClient::Mock(c) => c.list_parts(folder, uid),
+        match &mut self.backend {
+            Backend::Real(c) => c.list_parts(folder, uid),
+            Backend::Mock(c) => c.list_parts(folder, uid),
         }
     }
     fn store_flags(
@@ -211,15 +292,54 @@ impl ImapBackend for ImapClient {
         add: &[String],
         remove: &[String],
     ) -> Result<()> {
-        match self {
-            ImapClient::Real(c) => c.store_flags(folder, uids, add, remove),
-            ImapClient::Mock(c) => c.store_flags(folder, uids, add, remove),
+        self.check_flag_change(add, remove)?;
+        match &mut self.backend {
+            Backend::Real(c) => c.store_flags(folder, uids, add, remove),
+            Backend::Mock(c) => c.store_flags(folder, uids, add, remove),
+        }
+    }
+    fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {
+        self.check_folder_change("create a mailbox")?;
+        match &mut self.backend {
+            Backend::Real(c) => c.create_folder(name, use_attr),
+            Backend::Mock(c) => c.create_folder(name, use_attr),
+        }
+    }
+    fn rename_folder(&mut self, from: &str, to: &str) -> Result<()> {
+        self.check_folder_change("rename a mailbox")?;
+        // RFC 3501 §6.3.5 gives RENAME INBOX a special meaning: it moves
+        // every message out into the new mailbox and leaves INBOX empty.
+        // Nothing is destroyed, but nobody means it, so it is refused
+        // outright rather than gated by a level.
+        if from.eq_ignore_ascii_case("INBOX") {
+            bail!(
+                "renaming INBOX does not rename it: RFC 3501 has the server move every \
+                 message into '{}' and leave INBOX empty. Create '{}' and move the mail \
+                 explicitly if that is what you want",
+                to,
+                to
+            );
+        }
+        match &mut self.backend {
+            Backend::Real(c) => c.rename_folder(from, to),
+            Backend::Mock(c) => c.rename_folder(from, to),
+        }
+    }
+    fn set_subscribed(&mut self, name: &str, subscribed: bool) -> Result<()> {
+        self.check_folder_change(if subscribed {
+            "subscribe to a mailbox"
+        } else {
+            "unsubscribe from a mailbox"
+        })?;
+        match &mut self.backend {
+            Backend::Real(c) => c.set_subscribed(name, subscribed),
+            Backend::Mock(c) => c.set_subscribed(name, subscribed),
         }
     }
     fn message_flags(&mut self, folder: &str, uid: u32) -> Result<Vec<String>> {
-        match self {
-            ImapClient::Real(c) => c.message_flags(folder, uid),
-            ImapClient::Mock(c) => c.message_flags(folder, uid),
+        match &mut self.backend {
+            Backend::Real(c) => c.message_flags(folder, uid),
+            Backend::Mock(c) => c.message_flags(folder, uid),
         }
     }
     fn save_part(
@@ -229,15 +349,15 @@ impl ImapBackend for ImapClient {
         part: u32,
         dest: &Path,
     ) -> Result<u64> {
-        match self {
-            ImapClient::Real(c) => c.save_part(folder, uid, part, dest),
-            ImapClient::Mock(c) => c.save_part(folder, uid, part, dest),
+        match &mut self.backend {
+            Backend::Real(c) => c.save_part(folder, uid, part, dest),
+            Backend::Mock(c) => c.save_part(folder, uid, part, dest),
         }
     }
     fn close(&mut self) {
-        match self {
-            ImapClient::Real(c) => c.close(),
-            ImapClient::Mock(c) => c.close(),
+        match &mut self.backend {
+            Backend::Real(c) => c.close(),
+            Backend::Mock(c) => c.close(),
         }
     }
 }

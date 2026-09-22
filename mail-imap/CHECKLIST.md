@@ -24,6 +24,9 @@ or anything it sends has not been tested by anything above.
       in the commit which commands were run.
 - [ ] Did it change a mutating path (`flag`, `tag` — the only two)? Then
       it was run against a real account on a message that can be spared.
+- [ ] Did it add an operation that changes the server? Then its gate is
+      in `ImapClient`, beside the flag gate, and `access-level` says
+      which level permits it — a handler is not where that rule lives.
 
 ## Documents
 

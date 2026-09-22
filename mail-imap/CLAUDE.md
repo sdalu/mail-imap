@@ -1,7 +1,9 @@
 # mail-imap
 
-A command-line IMAP client for programmatic / AI use. Passively
-read-only: only `flag` and `tag` write anything (`UID STORE`).
+A command-line IMAP client for programmatic / AI use. What it may
+change on the server is capped by `access-level` in the config
+(`readonly` / `organize` / `full`, default `organize`), enforced in
+`ImapClient` rather than in the handlers.
 
 ## Where things are
 

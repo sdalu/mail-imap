@@ -4,7 +4,7 @@ pub mod imap;
 
 #[cfg(test)]
 mod tests {
-    use crate::config::Config;
+    use crate::config::{AccessLevel, Config};
     use crate::imap::{ImapBackend, ImapClient};
 
     fn mock_config() -> Config {
@@ -17,10 +17,122 @@ mod tests {
     #[test]
     fn connect_chooses_mock_backend() {
         let client = ImapClient::connect(&mock_config(), false).expect("connect");
-        match client {
-            ImapClient::Mock(_) => {}
-            ImapClient::Real(_) => panic!("expected mock backend, got real"),
+        assert!(client.is_mock(), "expected the mock backend");
+    }
+
+    fn client_at(level: AccessLevel) -> ImapClient {
+        let config = Config {
+            access: level,
+            ..mock_config()
+        };
+        ImapClient::connect(&config, false).expect("connect")
+    }
+
+    #[test]
+    fn readonly_refuses_every_flag_change() {
+        let mut client = client_at(AccessLevel::ReadOnly);
+        let seen = vec!["\\Seen".to_string()];
+        let err = client
+            .store_flags("INBOX", &[1], &seen, &[])
+            .expect_err("readonly must change nothing");
+        assert!(err.to_string().contains("readonly"), "{}", err);
+        // Clearing is a change too.
+        assert!(client.store_flags("INBOX", &[1], &[], &seen).is_err());
+        // ... but reading is not.
+        assert!(client.get_email("INBOX", 1).is_ok());
+        assert!(client.message_flags("INBOX", 1).is_ok());
+    }
+
+    #[test]
+    fn organize_sets_anything_but_deleted_and_clears_everything() {
+        let mut client = client_at(AccessLevel::Organize);
+        let deleted = vec!["\\Deleted".to_string()];
+        let seen = vec!["\\Seen".to_string()];
+        let junk = vec!["junk".to_string()];
+        assert!(client.store_flags("INBOX", &[1], &seen, &[]).is_ok());
+        assert!(client.store_flags("INBOX", &[1], &junk, &[]).is_ok());
+        let err = client
+            .store_flags("INBOX", &[1], &deleted, &[])
+            .expect_err("\\Deleted marks a message for removal");
+        assert!(err.to_string().contains("Deleted"), "{}", err);
+        // Clearing \\Deleted rescues a message, so it is allowed here.
+        assert!(client.store_flags("INBOX", &[1], &[], &deleted).is_ok());
+    }
+
+    #[test]
+    fn organize_leaves_the_folder_tree_alone() {
+        let mut client = client_at(AccessLevel::Organize);
+        for err in [
+            client.create_folder("Archive", None).err(),
+            client.rename_folder("Spam", "Junk").err(),
+            client.set_subscribed("Drafts", true).err(),
+            client.set_subscribed("Drafts", false).err(),
+        ] {
+            let err = err.expect("organize must not touch the tree");
+            assert!(err.to_string().contains("folder tree"), "{}", err);
         }
+        // ... while the message-level changes it is for still work.
+        assert!(client
+            .store_flags("INBOX", &[1], &["\\Seen".to_string()], &[])
+            .is_ok());
+    }
+
+    #[test]
+    fn restructure_changes_the_tree_and_keeps_every_message() {
+        let mut client = client_at(AccessLevel::Restructure);
+        assert!(client.create_folder("Archive", None).is_ok());
+        assert!(
+            client.create_folder("Archive", None).is_err(),
+            "a mailbox is not created twice"
+        );
+        assert!(client.rename_folder("Spam", "Junk").is_ok());
+        assert!(client.rename_folder("Nowhere", "Somewhere").is_err());
+        assert!(client.set_subscribed("Drafts", true).is_ok());
+        // The rung is about the tree, not about losing mail.
+        assert!(client
+            .store_flags("INBOX", &[1], &["\\Deleted".to_string()], &[])
+            .is_err());
+    }
+
+    #[test]
+    fn renaming_inbox_is_refused_at_every_level() {
+        // RFC 3501 §6.3.5 makes it move every message out and leave
+        // INBOX empty, which nobody means by "rename".
+        for level in [AccessLevel::Restructure, AccessLevel::Full] {
+            let mut client = client_at(level);
+            let err = client
+                .rename_folder("INBOX", "Old")
+                .expect_err("INBOX is refused outright");
+            assert!(err.to_string().contains("empty"), "{}", err);
+            assert!(
+                client.rename_folder("inbox", "Old").is_err(),
+                "case-insensitively, as IMAP defines INBOX"
+            );
+        }
+    }
+
+    #[test]
+    fn a_special_use_attribute_needs_the_server_to_take_one() {
+        let mut client = client_at(AccessLevel::Restructure);
+        let err = client
+            .create_folder("Archive", Some("\\Archive"))
+            .expect_err("the mock advertises no capabilities");
+        assert!(err.to_string().contains("CREATE-SPECIAL-USE"), "{}", err);
+    }
+
+    #[test]
+    fn readonly_refuses_the_tree_too() {
+        let mut client = client_at(AccessLevel::ReadOnly);
+        assert!(client.create_folder("Archive", None).is_err());
+        assert!(client.rename_folder("Spam", "Junk").is_err());
+        assert!(client.set_subscribed("Drafts", true).is_err());
+    }
+
+    #[test]
+    fn full_permits_what_organize_refuses() {
+        let mut client = client_at(AccessLevel::Full);
+        let deleted = vec!["\\Deleted".to_string()];
+        assert!(client.store_flags("INBOX", &[1], &deleted, &[]).is_ok());
     }
 
     #[test]

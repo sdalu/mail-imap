@@ -238,6 +238,18 @@ struct KnownOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct FolderChangeOutput<'a> {
+    action: &'a str,
+    folder: &'a str,
+    /// The new name, for `rename`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    to: Option<&'a str>,
+    /// The RFC 6154 attribute declared at creation, for `create`.
+    #[serde(rename = "use", skip_serializing_if = "Option::is_none")]
+    use_attr: Option<&'a str>,
+}
+
+#[derive(Serialize)]
 struct PartsSaveOutput<'a> {
     folder: &'a str,
     uid: u32,
@@ -354,6 +366,73 @@ pub fn list_folders(config: &Config, json: bool, debug: bool) -> Result<()> {
             println!("  - {} ({})", f.name, extra);
         }
     }
+    Ok(())
+}
+
+/// `folder create|rename|subscribe|unsubscribe`. Every one of these is
+/// gated in `ImapClient` on the `restructure` access level; the handler
+/// only reports what happened.
+pub fn folder_create(
+    config: &Config,
+    name: &str,
+    use_attr: Option<&str>,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    let mut client = ImapClient::connect(config, debug)?;
+    client.create_folder(name, use_attr)?;
+    if json {
+        return emit_json(&FolderChangeOutput {
+            action: "create",
+            folder: name,
+            to: None,
+            use_attr,
+        });
+    }
+    match use_attr {
+        Some(attr) => println!("Created '{}' with special use {}", name, attr),
+        None => println!("Created '{}'", name),
+    }
+    Ok(())
+}
+
+pub fn folder_rename(config: &Config, from: &str, to: &str, json: bool, debug: bool) -> Result<()> {
+    let mut client = ImapClient::connect(config, debug)?;
+    client.rename_folder(from, to)?;
+    if json {
+        return emit_json(&FolderChangeOutput {
+            action: "rename",
+            folder: from,
+            to: Some(to),
+            use_attr: None,
+        });
+    }
+    println!("Renamed '{}' to '{}'", from, to);
+    Ok(())
+}
+
+pub fn folder_subscribe(
+    config: &Config,
+    name: &str,
+    subscribed: bool,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    let mut client = ImapClient::connect(config, debug)?;
+    client.set_subscribed(name, subscribed)?;
+    if json {
+        return emit_json(&FolderChangeOutput {
+            action: if subscribed { "subscribe" } else { "unsubscribe" },
+            folder: name,
+            to: None,
+            use_attr: None,
+        });
+    }
+    println!(
+        "{} '{}'",
+        if subscribed { "Subscribed to" } else { "Unsubscribed from" },
+        name
+    );
     Ok(())
 }
 

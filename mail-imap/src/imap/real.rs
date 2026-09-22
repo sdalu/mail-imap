@@ -866,6 +866,53 @@ impl ImapBackend for RealClient {
         Ok(())
     }
 
+    fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {
+        match use_attr {
+            None => self
+                .session
+                .create(name)
+                .with_context(|| format!("CREATE '{}'", name)),
+            Some(attr) => {
+                // RFC 6154: the USE parameter is the only moment a client
+                // may set a special-use attribute, and only when the
+                // server says it takes one.
+                if !self.has_capability("CREATE-SPECIAL-USE") {
+                    bail!(
+                        "the server does not advertise CREATE-SPECIAL-USE, so it will \
+                         not take a special-use attribute at creation; create '{}' \
+                         without --use",
+                        name
+                    );
+                }
+                self.session
+                    .run_command_and_check_ok(format!(
+                        "CREATE \"{}\" (USE ({}))",
+                        name.replace('\\', "\\\\").replace('"', "\\\""),
+                        attr
+                    ))
+                    .with_context(|| format!("CREATE '{}' (USE ({}))", name, attr))
+            }
+        }
+    }
+
+    fn rename_folder(&mut self, from: &str, to: &str) -> Result<()> {
+        self.session
+            .rename(from, to)
+            .with_context(|| format!("RENAME '{}' to '{}'", from, to))
+    }
+
+    fn set_subscribed(&mut self, name: &str, subscribed: bool) -> Result<()> {
+        if subscribed {
+            self.session
+                .subscribe(name)
+                .with_context(|| format!("SUBSCRIBE '{}'", name))
+        } else {
+            self.session
+                .unsubscribe(name)
+                .with_context(|| format!("UNSUBSCRIBE '{}'", name))
+        }
+    }
+
     fn message_flags(&mut self, folder: &str, uid: u32) -> Result<Vec<String>> {
         self.session
             .select(folder)

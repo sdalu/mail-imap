@@ -75,6 +75,12 @@ struct Args {
     )]
     sort: Option<String>,
 
+    /// Narrow what this run may change: readonly, organize or full.
+    /// The config's "access-level" sets the ceiling; this can only lower
+    /// it, never raise it
+    #[clap(long = "access-level", global = true, value_name = "LEVEL")]
+    access_level: Option<String>,
+
     /// Subcommand to execute
     #[clap(subcommand)]
     command: Command,
@@ -163,8 +169,12 @@ impl Sel {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// List folders
-    Folder,
+    /// List folders, or change the folder tree (create / rename /
+    /// subscribe — each needs access-level 'restructure')
+    Folder {
+        #[clap(subcommand)]
+        action: Option<FolderAction>,
+    },
     /// Search emails in the selected folders (IMAP SEARCH query: "ALL"
     /// for every message, "UNSEEN", 'HEADER FROM "foo"')
     Search {
@@ -212,6 +222,38 @@ enum Command {
         /// What to do with the tags
         #[clap(subcommand)]
         action: TagAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum FolderAction {
+    /// Create a mailbox
+    Create {
+        /// Mailbox name, with the server's hierarchy delimiter
+        /// (Archive/2026)
+        name: String,
+        /// Declare an RFC 6154 special use at creation — the only
+        /// moment IMAP allows it: \Archive, \Drafts, \Junk, \Sent,
+        /// \Trash, \All, \Flagged. Needs CREATE-SPECIAL-USE
+        #[clap(long = "use", value_name = "ATTR")]
+        use_attr: Option<String>,
+    },
+    /// Rename a mailbox (INBOX is refused: renaming it empties it)
+    Rename {
+        /// The mailbox to rename
+        from: String,
+        /// Its new name
+        to: String,
+    },
+    /// Subscribe to a mailbox
+    Subscribe {
+        /// The mailbox to subscribe to
+        name: String,
+    },
+    /// Unsubscribe from a mailbox
+    Unsubscribe {
+        /// The mailbox to unsubscribe from
+        name: String,
     },
 }
 
@@ -333,10 +375,39 @@ fn main() {
     }
 
     let json = args.json;
+    if let Some(name) = &args.access_level {
+        match config::AccessLevel::parse(name) {
+            Ok(level) if level <= config.access => config.access = level,
+            Ok(level) => fail(
+                json,
+                &format!(
+                    "--access-level {} is wider than the config's '{}': the command \
+                     line can only narrow what this tool may change",
+                    level.as_str(),
+                    config.access.as_str()
+                ),
+            ),
+            Err(e) => fail(json, &format!("{}", e)),
+        }
+    }
     let debug = args.debug;
 
     let result = match &args.command {
-        Command::Folder => cli::list_folders(&config, json, debug),
+        Command::Folder { action } => match action {
+            None => cli::list_folders(&config, json, debug),
+            Some(FolderAction::Create { name, use_attr }) => {
+                cli::folder_create(&config, name, use_attr.as_deref(), json, debug)
+            }
+            Some(FolderAction::Rename { from, to }) => {
+                cli::folder_rename(&config, from, to, json, debug)
+            }
+            Some(FolderAction::Subscribe { name }) => {
+                cli::folder_subscribe(&config, name, true, json, debug)
+            }
+            Some(FolderAction::Unsubscribe { name }) => {
+                cli::folder_subscribe(&config, name, false, json, debug)
+            }
+        },
         Command::Search { query } => {
             cli::search_emails(&config, query, &folder_spec(&args), json, debug)
         }

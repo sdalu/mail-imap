@@ -191,6 +191,12 @@ a bare UID is ambiguous and is refused with an error naming the folders
 # List folders
 mail-imap --config incal.conf folder
 
+# Change the folder tree (needs "access-level": "restructure")
+mail-imap --config incal.conf folder create Archive/2026
+mail-imap --config incal.conf folder create Archive --use '\Archive'
+mail-imap --config incal.conf folder rename Spam Junk
+mail-imap --config incal.conf folder subscribe Archive/2026
+
 # Search emails (IMAP SEARCH query, e.g. "UNSEEN", "FROM bob", "SUBJECT invoice",
 # "SINCE 01-Jan-2026", or any combination of terms)
 mail-imap --config incal.conf search "SINCE 01-Jan-2026"
@@ -332,23 +338,55 @@ have defaults.
     "folder": "INBOX",
     "max": 50,
     "sort": null,
-    "mock": false
+    "mock": false,
+    "access-level": "organize"
 }
 ```
 
-| Field      | Default | Description                                                                                                  |
-| ---------- | ------- | ------------------------------------------------------------------------------------------------------------ |
-| `server`   | —       | IMAP host                                                                                                    |
-| `port`     | `993`   | IMAP port                                                                                                    |
-| `username` | —       | Login user                                                                                                   |
-| `password` | —       | Login password (use an app password for e.g. Gmail)                                                          |
-| `ssl`      | `true`  | Implicit TLS (typical for port 993)                                                                          |
-| `starttls` | `false` | Upgrade a plain connection with STARTTLS (typical for port 143). Used when `ssl` is `false`.                 |
-| `insecure` | `false` | Accept invalid TLS certificates (self-signed local servers)                                                  |
-| `folder`   | `INBOX` | Default folder for commands that need one                                                                    |
-| `max`      | `50`    | Max search results to fetch (`0` = unlimited); overridden by `-M/--max` on the command line                  |
-| `sort`     | `null`  | Default sort spec for `search`/`unread` (same format as `-S/--sort`); overridden by `-S` on the command line |
-| `mock`     | `false` | Use the in-memory mock backend                                                                               |
+| Field          | Default    | Description                                                                                                  |
+| -------------- | ---------- | ------------------------------------------------------------------------------------------------------------ |
+| `server`       | —          | IMAP host                                                                                                    |
+| `port`         | `993`      | IMAP port                                                                                                    |
+| `username`     | —          | Login user                                                                                                   |
+| `password`     | —          | Login password (use an app password for e.g. Gmail)                                                          |
+| `ssl`          | `true`     | Implicit TLS (typical for port 993)                                                                          |
+| `starttls`     | `false`    | Upgrade a plain connection with STARTTLS (typical for port 143). Used when `ssl` is `false`.                 |
+| `insecure`     | `false`    | Accept invalid TLS certificates (self-signed local servers)                                                  |
+| `folder`       | `INBOX`    | Default folder for commands that need one                                                                    |
+| `max`          | `50`       | Max search results to fetch (`0` = unlimited); overridden by `-M/--max` on the command line                  |
+| `sort`         | `null`     | Default sort spec for `search`/`unread` (same format as `-S/--sort`); overridden by `-S` on the command line |
+| `mock`         | `false`    | Use the in-memory mock backend                                                                               |
+| `access-level` | `organize` | How much this tool may change: `readonly`, `organize` or `full` — see [Access level](#access-level)          |
+
+### Access level
+
+`access-level` in the config says how much of the account this tool may
+change. The levels are a ladder, each permitting everything below it:
+
+| Level      | Permits                                                                                    |
+| ---------- | ------------------------------------------------------------------------------------------ |
+| `readonly` | Nothing changes. Reads use `BODY.PEEK[]`, so even `\Seen` stays as it was                  |
+| `organize` | *(default)* Read, plus set and clear flags and keywords, and file mail into another folder |
+| `full`     | Everything the tool can do, including setting `\Deleted`                                   |
+
+The line `organize` draws is **no message is lost**: flags and keywords
+can be set and cleared and mail can be filed elsewhere, but `\Deleted`
+— the one flag whose purpose is removal — cannot be *set*. It can be
+cleared, which rescues a message rather than losing one.
+
+`--access-level LEVEL` narrows a single run. It can only lower what the
+config allows, never raise it, so a config saying `readonly` cannot be
+talked out of it on the command line.
+
+This is not a security boundary: the same account can be reached by any
+other client with the same password. It is a guard against *this* tool
+doing more than you meant it to — which matters most when an agent is
+driving it.
+
+> [!NOTE]
+> `organize` is *defined* to allow filing mail into another folder, but
+> there is no `move` command yet, so today it differs from `readonly`
+> only over flags and keywords.
 
 ## Testing
 

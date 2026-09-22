@@ -158,6 +158,53 @@ countermeasures (`src/imap/real.rs`):
 - if a hard error still strikes mid-search, the results collected so far
   are reported with a warning instead of being thrown away.
 
+### Access level
+
+`Config::access` (`access-level` in the config file) is an ordered
+ladder — `readonly` < `organize` < `restructure` < `full` — and the
+command line may
+only narrow it, never widen it, so a config that says `readonly` cannot
+be argued out of it by an argument list.
+
+It is checked in `ImapClient`, the wrapper both backends go through,
+and not in the CLI handlers. A handler can forget; a rule that lives in
+one place cannot be forgotten by nine. `ImapClient::check_flag_change`
+runs before `store_flags` reaches either backend, so the mock is held
+to the same rule as the server and the refusals are testable offline.
+
+Two asymmetries are deliberate:
+
+- **Clearing is freer than setting.** Above `readonly` any flag may be
+  cleared, including `\Deleted`: taking a flag off a message loses an
+  annotation, never a message, and un-deleting is a rescue.
+- **`\Deleted` is the only flag `organize` refuses to set.** `\Draft`
+  is permitted — it marks a composition, it cannot cost anything.
+
+The two rungs above `readonly` draw different lines. `organize` is
+about messages: nothing is lost, and the folder tree is left exactly as
+it was found — it files mail into folders that exist, it does not make
+them. `restructure` is about the tree: `create_folder`,
+`rename_folder` and `set_subscribed` are gated by
+`check_folder_change`, and still nothing is lost, since deleting a
+mailbox would lose every message in it and belongs to `full`.
+
+Two things sit outside the ladder on purpose:
+
+- **Renaming INBOX is refused at every level.** RFC 3501 §6.3.5 gives
+  it a special meaning — the server moves every message out into the
+  new mailbox and leaves INBOX empty. Nothing is destroyed, but nobody
+  means it by "rename", so it is an outright refusal rather than a rung.
+- **A special-use attribute (RFC 6154) can only be declared at
+  creation**, and only when the server advertises `CREATE-SPECIAL-USE`;
+  `create_folder` checks the capability and says so rather than sending
+  a command the server will reject. The LIST attributes a server
+  maintains itself — `\Noselect`, `\HasChildren`, `\Marked` — are not
+  settable by any client and are not offered.
+
+`organize` is defined to permit filing mail into another folder, but
+there is no `move` command yet; when one lands its gate goes here
+beside the others, and not in its handler.
+
 ### Passive read-only behaviour
 
 Nothing implicitly mutates the mailbox: there is no `MOVE`, `COPY` or

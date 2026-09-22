@@ -18,6 +18,8 @@ pub struct MockClient {
     thread_ids: Vec<(u32, Vec<String>, Vec<String>)>,
     /// uid -> flags/keywords, maintained by `store_flags` (flag/tag).
     message_flags: BTreeMap<u32, BTreeSet<String>>,
+    /// Mailboxes `set_subscribed` has been told about.
+    subscribed: BTreeSet<String>,
 }
 
 impl MockClient {
@@ -48,6 +50,7 @@ impl MockClient {
                 (5, vec!["<m5@mail>".into()], vec!["<m3@mail>".into()]),
             ],
             message_flags: BTreeMap::new(),
+            subscribed: BTreeSet::new(),
         })
     }
 
@@ -294,6 +297,49 @@ impl ImapBackend for MockClient {
             for a in add {
                 set.insert(a.clone());
             }
+        }
+        Ok(())
+    }
+
+    fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {
+        if self.folders.iter().any(|f| f == name) {
+            bail!("mailbox '{}' already exists", name);
+        }
+        // The mock advertises no capabilities, so it stands in for the
+        // servers that do not take a special-use attribute either.
+        if let Some(attr) = use_attr {
+            bail!(
+                "the mock backend does not advertise CREATE-SPECIAL-USE, so it will \
+                 not take USE ({}) for '{}'",
+                attr,
+                name
+            );
+        }
+        self.folders.push(name.to_string());
+        Ok(())
+    }
+
+    fn rename_folder(&mut self, from: &str, to: &str) -> Result<()> {
+        if self.folders.iter().any(|f| f == to) {
+            bail!("mailbox '{}' already exists", to);
+        }
+        match self.folders.iter_mut().find(|f| *f == from) {
+            Some(slot) => {
+                *slot = to.to_string();
+                Ok(())
+            }
+            None => bail!("no mailbox '{}'", from),
+        }
+    }
+
+    fn set_subscribed(&mut self, name: &str, subscribed: bool) -> Result<()> {
+        if !self.folders.iter().any(|f| f == name) {
+            bail!("no mailbox '{}'", name);
+        }
+        if subscribed {
+            self.subscribed.insert(name.to_string());
+        } else {
+            self.subscribed.remove(name);
         }
         Ok(())
     }
