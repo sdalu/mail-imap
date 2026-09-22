@@ -146,7 +146,12 @@ Connects, sends
 and
 .Ic LIST ,
 and changes nothing.
-.It Cm folder Op Fl l
+.It Cm folder
+List mailboxes, or change the folder tree.
+Every use takes a subcommand; the tree-changing ones need access level
+.Ic restructure .
+.Bl -tag -width Ds -compact
+.It Cm folder list Op Fl l
 List mailboxes, one name per line.
 .Fl l ,
 .Fl -long
@@ -154,12 +159,7 @@ adds each mailbox\(aqs hierarchy delimiter and its LIST attributes
 .Pq Ic \eSent , \eJunk , \eNoinferiors , ...
 in parentheses after the name.
 JSON output carries every field either way.
-Its subcommands change the folder tree and need access level
-.Ic restructure .
-.Bl -tag -width Ds -compact
-.It Cm folder create Ar folder
-.Op Fl -use Ar attr
-.Op Fl -wire
+.It Cm folder create Ar folder Oo Fl -use Ar attr Oc Oo Fl -wire Oc
 Create a mailbox, optionally declaring an RFC 6154 special use at
 creation:
 .Ic archive , drafts , junk , sent , trash , all ,
@@ -259,12 +259,10 @@ via
 .Ic \eRecent
 is server-managed and cannot be set.
 .Bl -tag -width Ds -compact
-.It Cm flag list Op Fl -wire
-.Ar selection No ...
+.It Cm flag list Oo Fl -wire Oc Ar selection No ...
 List the flags (system flags and keyword tags) of the selected
 email(s).
-.It Cm flag add Op Fl -wire
-.Ar selection No ... Ar flag No ...
+.It Cm flag add Oo Fl -wire Oc Ar selection No ... Ar flag No ...
 Enable the given flags
 .Po
 .Ic seen , answered , flagged , deleted , draft
@@ -276,8 +274,7 @@ to set any flag, and
 .Ic full
 to set
 .Ic deleted .
-.It Cm flag remove Op Fl -wire
-.Ar selection No ... Ar flag No ...
+.It Cm flag remove Oo Fl -wire Oc Ar selection No ... Ar flag No ...
 Disable the given flags on the selected email(s).
 Needs access level
 .Ic organize .
@@ -301,19 +298,16 @@ Needs access level
 Mark the selected email(s) not junk, the same, the other way.
 Needs access level
 .Ic organize .
-.It Cm tag list Op Fl -wire
-.Ar selection No ...
+.It Cm tag list Oo Fl -wire Oc Ar selection No ...
 List the custom keyword tags of the selected email(s); system flags
 are omitted.
-.It Cm tag add Op Fl -wire
-.Ar selection No ... Ar tag No ...
+.It Cm tag add Oo Fl -wire Oc Ar selection No ... Ar tag No ...
 Add the given keyword tags to the selected email(s).
 A non-ASCII tag is NFC-composed and encoded to modified UTF-7
 .Pq RFC 3501 5.1.3 .
 Needs access level
 .Ic organize .
-.It Cm tag remove Op Fl -wire
-.Ar selection No ... Ar tag No ...
+.It Cm tag remove Oo Fl -wire Oc Ar selection No ... Ar tag No ...
 Remove the given keyword tags from the selected email(s).
 Needs access level
 .Ic organize .

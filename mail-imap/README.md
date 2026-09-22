@@ -20,7 +20,7 @@ no server and no config at all:
 
 ```bash
 make build RELEASE=no
-./target/debug/mail-imap --mock folder
+./target/debug/mail-imap --mock folder list
 ./target/debug/mail-imap --mock search invoice
 ./target/debug/mail-imap --mock -j info
 ```
@@ -145,7 +145,7 @@ takes the folder flags `-f`/`-A`; see [Folder selection](#folder-selection).
 | Command              | Syntax                                            | Description                                                                                                                                                                     |
 | -------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `info`               | `info`                                            | What this run can do and what the server is: access level, hierarchy delimiter, special-use mailboxes, and the wire path filing / sorting / threading take here                 |
-| `folder`             | `folder [-l]`                                     | List mailboxes/folders; `-l`/`--long` adds each one's hierarchy delimiter and LIST attributes                                                                                   |
+| `folder list`        | `folder list [-l]`                                | List mailboxes/folders; `-l`/`--long` adds each one's hierarchy delimiter and LIST attributes                                                                                   |
 | `folder create`      | `folder create <FOLDER> [--use <ATTR>] [--wire]`  | Create a mailbox, optionally declaring an RFC 6154 special use at creation: `archive`, `junk`, `sent`, `trash`, `drafts`, `all`, `flagged` (needs `access-level` `restructure`) |
 | `folder rename`      | `folder rename <FROM> <TO>`                       | Rename a mailbox; INBOX is refused at every level (needs `restructure`)                                                                                                         |
 | `folder subscribe`   | `folder subscribe <FOLDER>`                       | Subscribe to a mailbox (needs `restructure`)                                                                                                                                    |
@@ -576,11 +576,11 @@ mail-imap --config incal.conf -j info
 
 ```bash
 # List folders -- just the names, so they can be typed back into -f
-mail-imap --config incal.conf folder
+mail-imap --config incal.conf folder list
 
 # ... with each one's hierarchy delimiter and LIST attributes
 # (\Sent, \Junk, \Noinferiors, ...)
-mail-imap --config incal.conf folder -l
+mail-imap --config incal.conf folder list -l
 
 # Change the folder tree (needs "access-level": "restructure")
 mail-imap --config incal.conf folder create Archive/2026
@@ -731,7 +731,7 @@ mail-imap --mock tag known
 mail-imap --config incal.conf -j -f INBOX search "SINCE 01-Jan-2026"
 
 # The in-memory mock backend: no server, no config
-mail-imap --mock folder
+mail-imap --mock folder list
 mail-imap --mock search invoice
 ```
 
@@ -743,7 +743,7 @@ Each command prints one compact JSON object to stdout:
 | Command                                                  | Shape                                                                                                                                                                                                                       |
 | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `info`                                                   | `{"tool", "config", "access", "folders", "defaults", "server"}` — see [`info`](#info) for the fields of each                                                                                                                |
-| `folder`                                                 | `{"count", "folders": [{"name", "delimiter", "no_inferiors", "attrs"}]}` (`delimiter` is `null` for a mailbox reported with none; `attrs` carries `\Marked` and the RFC 6154 special uses)                                  |
+| `folder list`                                            | `{"count", "folders": [{"name", "delimiter", "no_inferiors", "attrs"}]}` (`delimiter` is `null` for a mailbox reported with none; `attrs` carries `\Marked` and the RFC 6154 special uses)                                  |
 | `folder create` / `rename` / `subscribe` / `unsubscribe` | `{"action", "folder"}`, plus `"to"` for a `rename` and `"use"` for a `create` that declared a special use                                                                                                                   |
 | `search`                                                 | one folder: `{"folder", "query", "count", "results": [...]}`; several folders: `{"folders": [...], "query", "count", "results": [...]}`. Each result includes `"folder"` (its mailbox) and `"parts"` (number of MIME parts) |
 | `read`                                                   | one `{"folder", "uid", "content"}` object per selected UID                                                                                                                                                                  |

@@ -13,7 +13,7 @@ config, nothing to set up. Build once with `make build RELEASE=no`
 [Build & Install](README.md#build--install)), then paste these:
 
 ```bash
-$ target/debug/mail-imap --mock folder
+$ target/debug/mail-imap --mock folder list
 Folders (5):
   - INBOX
   - Sent Items

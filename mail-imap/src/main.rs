@@ -180,12 +180,9 @@ enum Command {
     /// List folders, or change the folder tree (create / rename /
     /// subscribe / unsubscribe — each needs access-level 'restructure')
     Folder {
-        /// Show each mailbox's hierarchy delimiter and LIST attributes
-        /// (\Sent, \Junk, \Noinferiors, ...) beside its name
-        #[clap(short = 'l', long = "long")]
-        long: bool,
+        /// What to do with the folders
         #[clap(subcommand)]
-        action: Option<FolderAction>,
+        action: FolderAction,
     },
     /// What this run can do and what the server is: the access level
     /// in force, the hierarchy delimiter to build folder paths with,
@@ -252,6 +249,13 @@ enum Command {
 
 #[derive(clap::Subcommand)]
 enum FolderAction {
+    /// List mailboxes
+    List {
+        /// Show each mailbox's hierarchy delimiter and LIST attributes
+        /// (\Sent, \Junk, \Noinferiors, ...) beside its name
+        #[clap(short = 'l', long = "long")]
+        long: bool,
+    },
     /// Create a mailbox
     Create {
         /// Mailbox name, with the server's hierarchy delimiter
@@ -456,20 +460,20 @@ fn main() {
     let debug = args.debug;
 
     let result = match &args.command {
-        Command::Folder { long, action } => match action {
-            None => cli::list_folders(&config, json, debug, *long),
-            Some(FolderAction::Create {
+        Command::Folder { action } => match action {
+            FolderAction::List { long } => cli::list_folders(&config, json, debug, *long),
+            FolderAction::Create {
                 name,
                 use_attr,
                 wire,
-            }) => cli::folder_create(&config, name, use_attr.as_deref(), *wire, json, debug),
-            Some(FolderAction::Rename { from, to }) => {
+            } => cli::folder_create(&config, name, use_attr.as_deref(), *wire, json, debug),
+            FolderAction::Rename { from, to } => {
                 cli::folder_rename(&config, from, to, json, debug)
             }
-            Some(FolderAction::Subscribe { name }) => {
+            FolderAction::Subscribe { name } => {
                 cli::folder_subscribe(&config, name, true, json, debug)
             }
-            Some(FolderAction::Unsubscribe { name }) => {
+            FolderAction::Unsubscribe { name } => {
                 cli::folder_subscribe(&config, name, false, json, debug)
             }
         },
