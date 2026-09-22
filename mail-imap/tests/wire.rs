@@ -574,3 +574,131 @@ fn readonly_changes_nothing_on_a_real_server() {
     assert!(!flags.iter().any(|f| f.eq_ignore_ascii_case("\\Flagged")));
     assert!(!flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen")));
 }
+
+// ------------------------------------------------ mock vs. real server
+
+/// One probe: what the backend did, reduced to the only thing the two
+/// backends can be expected to agree on.
+///
+/// Not the message -- a mock saying "no mailbox 'x' (mock)" and a
+/// server saying "SELECT failed. No such mailbox" are the same answer
+/// in different words -- and not the content, since the two hold
+/// different mail. What has to agree is whether the call was refused.
+type Probe = (&'static str, bool);
+
+/// Where to aim the probes: a folder that exists, one that does not, a
+/// UID that exists and one that does not.
+struct Ground {
+    folder: String,
+    absent_folder: String,
+    uid: u32,
+    absent_uid: u32,
+    /// A second real folder, to file into.
+    move_target: String,
+}
+
+/// Run every probe against one backend. Kept as a single list so the
+/// two runs cannot drift apart: there is one description of what is
+/// being asked, and both backends answer it.
+fn probe(c: &mut ImapClient, g: &Ground) -> Vec<Probe> {
+    let flag = vec!["\\Flagged".to_string()];
+    vec![
+        // A UID that is not there is ignored by UID STORE, not refused.
+        ("store_flags: absent uid", c.store_flags(&g.folder, &[g.absent_uid], &flag, &[]).is_ok()),
+        ("store_flags: present uid", c.store_flags(&g.folder, &[g.uid], &flag, &[]).is_ok()),
+        ("store_flags: clearing", c.store_flags(&g.folder, &[g.uid], &[], &flag).is_ok()),
+        ("store_flags: absent folder", c.store_flags(&g.absent_folder, &[g.uid], &flag, &[]).is_ok()),
+        // ... while a read of one is an error, because there is nothing
+        // to read.
+        ("message_flags: present uid", c.message_flags(&g.folder, g.uid).is_ok()),
+        ("message_flags: absent uid", c.message_flags(&g.folder, g.absent_uid).is_ok()),
+        ("get_email: present uid", c.get_email(&g.folder, g.uid).is_ok()),
+        ("get_email: absent uid", c.get_email(&g.folder, g.absent_uid).is_ok()),
+        ("list_parts: present uid", c.list_parts(&g.folder, g.uid).is_ok()),
+        ("list_parts: absent uid", c.list_parts(&g.folder, g.absent_uid).is_ok()),
+        ("thread_uids: present uid", c.thread_uids(&g.folder, g.uid).is_ok()),
+        ("thread_uids: absent uid", c.thread_uids(&g.folder, g.absent_uid).is_ok()),
+        // A folder has to exist before anything can be asked of it: a
+        // real backend SELECTs it first.
+        ("folder_uids: present folder", c.folder_uids(&g.folder).is_ok()),
+        ("folder_uids: absent folder", c.folder_uids(&g.absent_folder).is_ok()),
+        ("permanent_flags: present folder", c.permanent_flags(&g.folder).is_ok()),
+        ("permanent_flags: absent folder", c.permanent_flags(&g.absent_folder).is_ok()),
+        ("mailbox_counts: absent folder", c.mailbox_counts(Some(&g.absent_folder)).is_ok()),
+        ("search: present folder", c.search_folders(std::slice::from_ref(&g.folder), "ALL", 0, None).is_ok()),
+        ("search: absent folder", c.search_folders(std::slice::from_ref(&g.absent_folder), "ALL", 0, None).is_ok()),
+        // The folder tree.
+        ("create_folder: existing", c.create_folder(&g.folder, None).is_ok()),
+        ("rename_folder: absent", c.rename_folder(&g.absent_folder, "Whatever").is_ok()),
+        ("subscribe: absent folder", c.set_subscribed(&g.absent_folder, true).is_ok()),
+        ("unsubscribe: absent folder", c.set_subscribed(&g.absent_folder, false).is_ok()),
+        // Moving.
+        ("move: absent target", c.move_messages(&g.folder, &[g.uid], &g.absent_folder).is_ok()),
+        ("move: absent uid", c.move_messages(&g.folder, &[g.absent_uid], &g.move_target).is_ok()),
+        // A line break in a name never reaches either backend.
+        ("subscribe: name with CRLF", c.set_subscribed("Evil\r\nA1 NOOP", true).is_ok()),
+    ]
+}
+
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn the_mock_answers_like_a_real_server() {
+    // The mock is not a second implementation of IMAP -- it holds
+    // different mail and advertises nothing -- so this compares the one
+    // thing it must get right: which calls are refused. A fake that is
+    // *stricter* than the real thing is the dangerous direction, since
+    // it turns a live defect into an offline pass. That is not
+    // hypothetical: `tag junk` on a missing UID reported success on the
+    // wire and could not be reproduced here, because the mock refused
+    // where the server shrugged.
+    let mut real = client();
+    let (_token, uids) = fixture(&mut real, "conformance", 1);
+    let real_target = unique("conformance-target");
+    real.create_folder(&real_target, None).expect("a folder to file into");
+    let real_ground = Ground {
+        folder: "INBOX".to_string(),
+        absent_folder: unique("conformance-absent"),
+        uid: uids[0],
+        absent_uid: 4_000_000_001,
+        move_target: real_target,
+    };
+
+    let mut mock = ImapClient::connect(
+        &Config {
+            mock: true,
+            access: AccessLevel::Full,
+            ..Config::default()
+        },
+        false,
+    )
+    .expect("the mock needs no server");
+    let mock_ground = Ground {
+        folder: "INBOX".to_string(),
+        absent_folder: "Nowhere".to_string(),
+        uid: 1,
+        absent_uid: 4_000_000_001,
+        move_target: "Trash".to_string(),
+    };
+
+    let from_real = probe(&mut real, &real_ground);
+    let from_mock = probe(&mut mock, &mock_ground);
+
+    let mut differ: Vec<String> = Vec::new();
+    for ((name, real_ok), (mock_name, mock_ok)) in from_real.iter().zip(&from_mock) {
+        assert_eq!(name, mock_name, "the two runs asked different questions");
+        if real_ok != mock_ok {
+            differ.push(format!(
+                "  {:34}  server: {:<7}  mock: {}",
+                name,
+                if *real_ok { "ok" } else { "refused" },
+                if *mock_ok { "ok" } else { "refused" }
+            ));
+        }
+    }
+    assert!(
+        differ.is_empty(),
+        "the mock and a real server disagree, so a test passing against the mock \
+         proves nothing about these:\n{}",
+        differ.join("\n")
+    );
+}

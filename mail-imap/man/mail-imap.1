@@ -39,10 +39,14 @@ and every changing command names the level it needs.
 .Nm
 connects to a real IMAP server over implicit TLS, STARTTLS, or plain
 TCP.
-An in-memory mock backend
+A development build also carries an in-memory mock backend
 .Pq Fl -mock
-lets every command run with no server and no config, for testing and
+letting every command run with no server and no config, for testing and
 demonstration.
+It is a development aid rather than part of the product, so the released
+binary is built without it and
+.Fl -mock
+is not an option there.
 .Sh OPTIONS
 .Nm
 takes global options anywhere on the command line, before or after
@@ -103,6 +107,8 @@ Trace the exchange on stderr: the backend and access level, the
 capabilities, and which sort and threading path were taken.
 .It Fl -mock
 Use the in-memory mock backend instead of a real server.
+Development builds only: the released binary omits it, and rejects this
+option as unknown.
 .It Fl j , Fl -json
 Output results as one compact JSON object on stdout.
 Errors go to stderr as a JSON object with one key,
@@ -510,6 +516,8 @@ Default
 .Ic null .
 .It Ic mock
 Use the in-memory mock backend.
+A build without it refuses to start rather than reaching for a real
+server the caller did not ask for.
 Default
 .Ic false .
 .It Ic delimiter

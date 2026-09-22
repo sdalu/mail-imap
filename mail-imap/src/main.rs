@@ -50,7 +50,9 @@ struct Args {
     #[clap(short = 'A', long = "all-folders", global = true)]
     all_folders: bool,
 
-    /// Use the in-memory mock backend (no real server; for testing/demos)
+    /// Use the in-memory mock backend (no real server; for testing/demos).
+    /// Development builds only: the released binary is built without it
+    #[cfg(feature = "mock")]
     #[clap(long = "mock", global = true)]
     mock: bool,
 
@@ -92,6 +94,21 @@ struct Args {
     /// Subcommand to execute
     #[clap(subcommand)]
     command: Command,
+}
+
+impl Args {
+    /// Did this run ask for the mock backend? A build without it has no
+    /// such flag, so the answer is no and `--mock` is rejected by clap
+    /// as an unknown option rather than accepted and ignored.
+    #[cfg(feature = "mock")]
+    fn wants_mock(&self) -> bool {
+        self.mock
+    }
+
+    #[cfg(not(feature = "mock"))]
+    fn wants_mock(&self) -> bool {
+        false
+    }
 }
 
 /// Print an error (as `{"error": ...}` JSON when `json`) and exit non-zero.
@@ -435,7 +452,7 @@ fn main() {
     // was never opened.
     let mut config_file: Option<String> = None;
     let mut profile: Option<String> = None;
-    let mut config = if args.mock {
+    let mut config = if args.wants_mock() {
         // Mock mode needs no server, so a missing config is fine.
         match config::load_config(args.config_file.as_deref(), args.profile.as_deref()) {
             Ok(loaded) => {
@@ -458,7 +475,7 @@ fn main() {
             Err(e) => fail(args.json, &format!("Configuration error: {:#}", e)),
         }
     };
-    if args.mock {
+    if args.wants_mock() {
         config.mock = true;
     }
     if let Some(max) = args.max {

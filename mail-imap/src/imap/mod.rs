@@ -16,10 +16,12 @@
 //! Which backend is used is chosen by `Config::mock` (and the `--mock` flag).
 
 mod mime;
+#[cfg(feature = "mock")]
 mod mock;
 mod real;
 mod sort;
 
+#[cfg(feature = "mock")]
 pub use mock::MockClient;
 pub use real::RealClient;
 pub use sort::{parse_sort, sort_results, SortCriteria, SortKey};
@@ -237,6 +239,7 @@ mod permanent_tests {
 #[allow(clippy::large_enum_variant)]
 enum Backend {
     Real(RealClient),
+    #[cfg(feature = "mock")]
     Mock(MockClient),
 }
 
@@ -287,7 +290,22 @@ impl ImapClient {
             );
         }
         let backend = if config.mock {
-            Backend::Mock(MockClient::connect(config)?)
+            #[cfg(feature = "mock")]
+            {
+                Backend::Mock(MockClient::connect(config)?)
+            }
+            // A build without the mock has to say so rather than
+            // quietly reaching for a real server the caller did not ask
+            // for -- `--mock` means "do not touch my account".
+            #[cfg(not(feature = "mock"))]
+            {
+                bail!(
+                    "this build has no mock backend: it is a development aid, and the \
+                     released binary is built without it. Drop --mock (and `mock` from \
+                     the config) to use the configured account, or build one with it \
+                     (make build RELEASE=no)"
+                );
+            }
         } else {
             Backend::Real(RealClient::connect(config, debug)?)
         };
@@ -302,7 +320,14 @@ impl ImapClient {
     // asks, because it is the config that decides.
     #[allow(dead_code)]
     pub fn is_mock(&self) -> bool {
-        matches!(self.backend, Backend::Mock(_))
+        #[cfg(feature = "mock")]
+        {
+            matches!(self.backend, Backend::Mock(_))
+        }
+        #[cfg(not(feature = "mock"))]
+        {
+            false
+        }
     }
 
     /// Refuse a flag change the access level does not allow. Clearing a
@@ -352,12 +377,14 @@ impl ImapBackend for ImapClient {
     fn list_folders(&mut self) -> Result<Vec<FolderInfo>> {
         match &mut self.backend {
             Backend::Real(c) => c.list_folders(),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.list_folders(),
         }
     }
     fn capabilities(&mut self) -> Result<Vec<String>> {
         match &mut self.backend {
             Backend::Real(c) => c.capabilities(),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.capabilities(),
         }
     }
@@ -370,36 +397,42 @@ impl ImapBackend for ImapClient {
     ) -> Result<Vec<SearchResult>> {
         match &mut self.backend {
             Backend::Real(c) => c.search_folders(folders, query, max_results, sort),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.search_folders(folders, query, max_results, sort),
         }
     }
     fn get_email(&mut self, folder: &str, uid: u32) -> Result<String> {
         match &mut self.backend {
             Backend::Real(c) => c.get_email(folder, uid),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.get_email(folder, uid),
         }
     }
     fn mailbox_counts(&mut self, folder: Option<&str>) -> Result<Vec<Mailbox>> {
         match &mut self.backend {
             Backend::Real(c) => c.mailbox_counts(folder),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.mailbox_counts(folder),
         }
     }
     fn folder_uids(&mut self, folder: &str) -> Result<Vec<u32>> {
         match &mut self.backend {
             Backend::Real(c) => c.folder_uids(folder),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.folder_uids(folder),
         }
     }
     fn thread_uids(&mut self, folder: &str, uid: u32) -> Result<Vec<u32>> {
         match &mut self.backend {
             Backend::Real(c) => c.thread_uids(folder, uid),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.thread_uids(folder, uid),
         }
     }
     fn list_parts(&mut self, folder: &str, uid: u32) -> Result<Vec<PartInfo>> {
         match &mut self.backend {
             Backend::Real(c) => c.list_parts(folder, uid),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.list_parts(folder, uid),
         }
     }
@@ -413,12 +446,14 @@ impl ImapBackend for ImapClient {
         self.check_flag_change(add, remove)?;
         match &mut self.backend {
             Backend::Real(c) => c.store_flags(folder, uids, add, remove),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.store_flags(folder, uids, add, remove),
         }
     }
     fn permanent_flags(&mut self, folder: &str) -> Result<Permanent> {
         match &mut self.backend {
             Backend::Real(c) => c.permanent_flags(folder),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.permanent_flags(folder),
         }
     }
@@ -439,6 +474,7 @@ impl ImapBackend for ImapClient {
         }
         match &mut self.backend {
             Backend::Real(c) => c.move_messages(folder, uids, to),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.move_messages(folder, uids, to),
         }
     }
@@ -447,6 +483,7 @@ impl ImapBackend for ImapClient {
         check_mailbox_name(name, "folder create")?;
         match &mut self.backend {
             Backend::Real(c) => c.create_folder(name, use_attr),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.create_folder(name, use_attr),
         }
     }
@@ -469,6 +506,7 @@ impl ImapBackend for ImapClient {
         }
         match &mut self.backend {
             Backend::Real(c) => c.rename_folder(from, to),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.rename_folder(from, to),
         }
     }
@@ -484,12 +522,14 @@ impl ImapBackend for ImapClient {
         })?;
         match &mut self.backend {
             Backend::Real(c) => c.set_subscribed(name, subscribed),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.set_subscribed(name, subscribed),
         }
     }
     fn message_flags(&mut self, folder: &str, uid: u32) -> Result<Vec<String>> {
         match &mut self.backend {
             Backend::Real(c) => c.message_flags(folder, uid),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.message_flags(folder, uid),
         }
     }
@@ -502,12 +542,14 @@ impl ImapBackend for ImapClient {
     ) -> Result<u64> {
         match &mut self.backend {
             Backend::Real(c) => c.save_part(folder, uid, part, dest),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.save_part(folder, uid, part, dest),
         }
     }
     fn close(&mut self) {
         match &mut self.backend {
             Backend::Real(c) => c.close(),
+            #[cfg(feature = "mock")]
             Backend::Mock(c) => c.close(),
         }
     }

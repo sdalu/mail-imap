@@ -2092,11 +2092,11 @@ mod tests {
             &mut client,
             &spec,
             &mock_config(),
-            &sels(&["Archive::last:1", "Trash::first:2"]),
+            &sels(&["Drafts::last:1", "Trash::first:2"]),
         )
         .unwrap();
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].folder, "Archive");
+        assert_eq!(groups[0].folder, "Drafts");
         assert_eq!(groups[0].uids, vec![5]);
         assert_eq!(groups[1].folder, "Trash");
         assert_eq!(groups[1].uids, vec![1, 2]);

@@ -67,7 +67,7 @@ what it does):
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `make` (`help`)  | Print the target list and the current build variables                                                                                                           |
 | `make check`     | Preflight, running none of the project's code: clippy with warnings denied, the release number written only in `Cargo.toml`, and `man/mail-imap.1` well-formed mdoc |
-| `make build`     | Build the binary (`RELEASE=no` for a debug build; release is the default)                                                                                       |
+| `make build`     | Build the binary (`RELEASE=no` for a debug build, which is also the one that keeps `--mock`; release is the default and omits it)                                |
 | `make tests`     | The whole suite: `tests-unit` (cargo test) then `tests-examples` (every documented command line, run against `--mock`)                                          |
 | `make doc`       | Generate the API documentation (`cargo doc --no-deps`)                                                                                                          |
 | `make install`   | Install the binary under `BINDIR` and `man/mail-imap.1` under `MANDIR` (`DESTDIR` stages both)                                                                      |

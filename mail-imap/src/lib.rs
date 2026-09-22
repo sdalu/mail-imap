@@ -340,10 +340,31 @@ mod tests {
     }
 
     #[test]
-    fn mock_flag_unknown_uid_fails() {
+    fn mock_flag_unknown_uid_is_ignored_the_way_a_real_server_ignores_it() {
+        // RFC 3501 6.4.8, and measured against a real server: UID STORE
+        // answers OK for a UID that is not there and changes nothing.
+        // The mock used to refuse instead, which is why `tag junk` on a
+        // missing UID could report success on the wire and not be
+        // reproducible offline. Being *stricter* than the real thing is
+        // not the safe direction for a fake to be wrong in.
         let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
         assert!(client
             .store_flags("INBOX", &[999], &["\\Seen".to_string()], &[])
+            .is_ok());
+        // ... and the message that does exist in the same call is still
+        // flagged, rather than the whole call being dropped.
+        assert!(client
+            .store_flags("INBOX", &[999, 1], &["\\Seen".to_string()], &[])
+            .is_ok());
+        assert!(client
+            .message_flags("INBOX", 1)
+            .expect("flags")
+            .iter()
+            .any(|f| f == "\\Seen"));
+        // A folder that is not there is still an error, because a real
+        // backend has to SELECT it first.
+        assert!(client
+            .store_flags("Nowhere", &[1], &["\\Seen".to_string()], &[])
             .is_err());
     }
 

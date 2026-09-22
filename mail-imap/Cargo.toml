@@ -3,6 +3,15 @@ name = "mail-imap"
 version = "0.1.0"
 edition = "2021"
 
+# The mock backend is a development aid, not part of the product: it is
+# how the suite and `scripts/check-examples.sh` run with no server, and
+# how QUICKSTART demonstrates the tool without an account. The released
+# binary talks to real servers, so it is built without it -- see the
+# RELEASE knob in the Makefile.
+[features]
+default = ["mock"]
+mock = []
+
 [dependencies]
 # LOCAL DEV: forks with RFC 5256 THREAD support (upstream imap-proto
 # release pending; see forks/ in the workspace root).

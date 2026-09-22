@@ -48,6 +48,22 @@ Gate: `make check && make tests`
   `--mock` and fails on a clap usage error. That covers the
   *documented* shapes only: a shape nobody wrote down is still
   unchecked, so run `--mock` invocations of what you changed.
+- **The mock is behind a default-on `mock` cargo feature, and the
+  release build turns it off** (`F_yes = --no-default-features` in the
+  Makefile). So `make build` produces a binary where `--mock` is an
+  unknown argument, while `make build RELEASE=no` keeps it -- and the
+  suite, `scripts/check-examples.sh` and QUICKSTART all need the
+  development build. `make check` lints both configurations, because
+  `cfg`-gated code that only compiles one way is the failure this
+  invites.
+- **The mock is held to the real server's behaviour, not guessed at.**
+  `tests/wire.rs::the_mock_answers_like_a_real_server` runs the same
+  probes against both and requires them to agree on which calls are
+  refused. Before it existed the mock was *stricter* than a real
+  server -- it refused a `UID STORE` to a UID that does not exist,
+  where the server answers OK -- and that is what hid the `tag junk`
+  defect from the offline suite. A fake being stricter than the thing
+  it stands in for turns a live bug into an offline pass.
 - **The config is UCL, and the UCL parser is built from source.** The
   `libucl` crate pulls `libucl-bind`, whose `build.rs` runs **cmake**
   over a *vendored libucl 0.5.0* and links it statically — it does not

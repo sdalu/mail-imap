@@ -59,6 +59,19 @@ impl MockClient {
         })
     }
 
+    /// Does this mailbox exist?
+    ///
+    /// A real backend selects the folder before it does anything with
+    /// it, so naming one that is not there is an error. The mock used
+    /// to ignore the folder argument entirely and answer anyway, which
+    /// made `-f Nonexistent` succeed here and fail on the wire.
+    fn require_folder(&self, folder: &str) -> Result<()> {
+        if !self.folders.iter().any(|f| f == folder) {
+            bail!("no mailbox '{}' (mock)", folder);
+        }
+        Ok(())
+    }
+
     /// Fixed part metadata: message 3 carries a spreadsheet,
     /// message 5 a PDF. Every message also has its plain-text body as
     /// part 1.
@@ -98,6 +111,7 @@ impl MockClient {
         cap: usize,
         sort: Option<&SortCriteria>,
     ) -> Result<Vec<SearchResult>> {
+        self.require_folder(folder)?;
         let raw = query.trim().to_lowercase();
         // The mock carries no flags and has no notion of mailbox content,
         // so the standard "match everything" keys ALL and UNSEEN are
@@ -190,7 +204,8 @@ impl ImapBackend for MockClient {
         Ok(out)
     }
 
-    fn get_email(&mut self, _folder: &str, uid: u32) -> Result<String> {
+    fn get_email(&mut self, folder: &str, uid: u32) -> Result<String> {
+        self.require_folder(folder)?;
         let (_, subject, from, body) = self
             .messages
             .iter()
@@ -230,6 +245,7 @@ impl ImapBackend for MockClient {
     }
 
     fn folder_uids(&mut self, folder: &str) -> Result<Vec<u32>> {
+        self.require_folder(folder)?;
         Ok(self
             .messages
             .iter()
@@ -239,6 +255,7 @@ impl ImapBackend for MockClient {
     }
 
     fn thread_uids(&mut self, folder: &str, uid: u32) -> Result<Vec<u32>> {
+        self.require_folder(folder)?;
         if !self.messages.iter().any(|(u, _, _, _)| *u == uid) {
             bail!("no email with UID {} (mock)", uid);
         }
@@ -255,7 +272,8 @@ impl ImapBackend for MockClient {
             .with_context(|| format!("threading UID {} in '{}'", uid, folder))
     }
 
-    fn list_parts(&mut self, _folder: &str, uid: u32) -> Result<Vec<PartInfo>> {
+    fn list_parts(&mut self, folder: &str, uid: u32) -> Result<Vec<PartInfo>> {
+        self.require_folder(folder)?;
         if !self.messages.iter().any(|(u, _, _, _)| *u == uid) {
             bail!("no email with UID {} (mock)", uid);
         }
@@ -264,12 +282,12 @@ impl ImapBackend for MockClient {
 
     fn save_part(
         &mut self,
-        _folder: &str,
+        folder: &str,
         uid: u32,
         part: u32,
         dest: &Path,
     ) -> Result<u64> {
-        let parts = self.list_parts(_folder, uid)?;
+        let parts = self.list_parts(folder, uid)?;
         let max_part = parts.iter().map(|p| p.part).max().unwrap_or(0);
         if part == 0 || part > max_part {
             bail!(
@@ -304,17 +322,23 @@ impl ImapBackend for MockClient {
 
     fn store_flags(
         &mut self,
-        _folder: &str,
+        folder: &str,
         uids: &[u32],
         add: &[String],
         remove: &[String],
     ) -> Result<()> {
+        self.require_folder(folder)?;
+        // RFC 3501 6.4.8: `UID STORE` ignores a UID that does not
+        // exist, without an error -- measured against a real server,
+        // which answers OK. Refusing here instead made the mock
+        // stricter than the thing it stands in for, and that is not a
+        // safe direction to be wrong in: it hid a real defect, where
+        // `tag junk` on a missing UID reported success on the wire and
+        // could not be reproduced offline.
         for uid in uids {
             if !self.messages.iter().any(|(u, _, _, _)| u == uid) {
-                bail!("no email with UID {} (mock)", uid);
+                continue;
             }
-        }
-        for uid in uids {
             let set = self.message_flags.entry(*uid).or_default();
             for r in remove {
                 set.remove(r);
@@ -326,7 +350,8 @@ impl ImapBackend for MockClient {
         Ok(())
     }
 
-    fn permanent_flags(&mut self, _folder: &str) -> Result<Permanent> {
+    fn permanent_flags(&mut self, folder: &str) -> Result<Permanent> {
+        self.require_folder(folder)?;
         // The mock keeps whatever it is told, and says so.
         Ok(Permanent {
             any_keyword: true,
@@ -335,12 +360,15 @@ impl ImapBackend for MockClient {
     }
 
     fn move_messages(&mut self, folder: &str, uids: &[u32], to: &str) -> Result<()> {
+        self.require_folder(folder)?;
         if !self.folders.iter().any(|f| f == to) {
             bail!("no mailbox '{}' to file into", to);
         }
+        // As with `store_flags`: a UID that is not there is ignored,
+        // which is what a real `UID MOVE` does (measured).
         for uid in uids {
             if !self.messages.iter().any(|(u, _, _, _)| u == uid) {
-                bail!("no message with UID {} in '{}'", uid, folder);
+                continue;
             }
             self.moved.insert((folder.to_string(), *uid));
         }
@@ -390,7 +418,8 @@ impl ImapBackend for MockClient {
         Ok(())
     }
 
-    fn message_flags(&mut self, _folder: &str, uid: u32) -> Result<Vec<String>> {
+    fn message_flags(&mut self, folder: &str, uid: u32) -> Result<Vec<String>> {
+        self.require_folder(folder)?;
         if !self.messages.iter().any(|(u, _, _, _)| *u == uid) {
             bail!("no email with UID {} (mock)", uid);
         }

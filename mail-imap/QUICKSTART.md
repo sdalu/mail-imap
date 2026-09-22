@@ -7,10 +7,11 @@ everything else is capped by an `access-level` in the config
 
 ## Try it with no server
 
-An in-memory mock backend ships with the binary: no server, no
-config, nothing to set up. Build once with `make build RELEASE=no`
-(or `make build` for a release binary; see
-[Build & Install](README.md#build--install)), then paste these:
+A development build carries an in-memory mock backend: no server, no
+config, nothing to set up. It is a development aid rather than part of
+the product, so **the release binary is built without it** and `--mock`
+is not a flag there. Build one that has it -- `make build RELEASE=no`,
+which is what the rest of this page uses -- then paste these:
 
 ```bash
 $ target/debug/mail-imap --mock folder list

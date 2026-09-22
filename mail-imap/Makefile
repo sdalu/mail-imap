@@ -20,6 +20,12 @@ TESTS_TMP	?= tests-tmp
 
 R_yes		= --release
 R_no		=
+
+# The mock backend is a development aid and the released binary does
+# not carry it (Cargo.toml says why). RELEASE=no keeps it, which is
+# what the suite, scripts/check-examples.sh and QUICKSTART need.
+F_yes		= --no-default-features
+F_no		=
 D_yes		= release
 D_no		= debug
 
@@ -58,7 +64,7 @@ help:						## show this help (the default)
 	@echo 'Variables (current value):'
 	@printf '  %-16s %s\n' \
 	    CARGO    '$(CARGO)' \
-	    RELEASE  '$(RELEASE)  (no builds and installs the debug profile)' \
+	    RELEASE  '$(RELEASE)  (no builds and installs the debug profile, which keeps --mock)' \
 	    PREFIX   '$(PREFIX)  (install prefix)' \
 	    BINDIR   '$(BINDIR)' \
 	    MANDIR   '$(MANDIR)  ($(MAN1PAGE) goes in man1 under it)' \
@@ -75,8 +81,9 @@ all: check build					## check, then build
 
 check: check-lint check-version check-man	## preflight: this tree is fit to build
 
-check-lint:					## clippy is clean, warnings included
+check-lint:					## clippy is clean, warnings included -- both with the mock and as it ships
 	$(CARGO) clippy --all-targets -- -D warnings
+	$(CARGO) clippy --no-default-features -- -D warnings
 
 check-version:					## the release number is written once, in Cargo.toml
 	@if grep -RnE '"[0-9]+\.[0-9]+\.[0-9]+"' src | grep -v CARGO_PKG_VERSION; then \
@@ -90,8 +97,8 @@ check-man:					## the man page is well-formed mdoc
 	    echo 'make: $(MAN1) is missing' >&2; exit 1; fi
 	$(MANDOC) -Tlint -Wall $(MAN1)
 
-build:						## build the binary (RELEASE=no for a debug build)
-	$(CARGO) build $(R_$(RELEASE))
+build:						## build the binary (RELEASE=no for a debug build, which keeps --mock)
+	$(CARGO) build $(R_$(RELEASE)) $(F_$(RELEASE))
 
 tests: tests-unit tests-examples		## run the whole suite (mock backend, no server)
 
