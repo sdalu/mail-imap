@@ -25,6 +25,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use chrono::DateTime;
 use mail_imap::config::{AccessLevel, Config};
 use mail_imap::imap::{ImapBackend, ImapClient};
 
@@ -170,6 +171,33 @@ fn append_raw(message: &str) {
         .append("INBOX", message.as_bytes())
         .finish()
         .unwrap_or_else(|e| panic!("APPEND failed ({:#}).", e));
+}
+
+/// The exact bytes `BODY[]` returns for one UID in INBOX, over a raw
+/// connection of its own -- not through `ImapClient::get_email`, which
+/// rebuilds its own summary text and would hide the very thing a
+/// line-ending check needs to see.
+fn fetch_raw_body(uid: u32) -> Vec<u8> {
+    let cfg = config();
+    let client = ClientBuilder::new(cfg.server.as_str(), cfg.port)
+        .mode(ConnectionMode::Plaintext)
+        .connect()
+        .unwrap_or_else(|e| panic!("could not connect for raw FETCH ({:#}).", e));
+    let mut session = client
+        .login(cfg.username.as_str(), cfg.password.as_str())
+        .map_err(|(e, _)| e)
+        .unwrap_or_else(|e| panic!("login as '{}' failed for raw FETCH ({:#}).", cfg.username, e));
+    session.select("INBOX").expect("SELECT INBOX for raw FETCH");
+    let fetches = session
+        .uid_fetch(uid.to_string(), "BODY[]")
+        .unwrap_or_else(|e| panic!("UID FETCH {} BODY[] failed ({:#}).", uid, e));
+    let f = fetches
+        .iter()
+        .next()
+        .unwrap_or_else(|| panic!("no FETCH response for UID {}", uid));
+    f.body()
+        .unwrap_or_else(|| panic!("no BODY[] in the FETCH response for UID {}", uid))
+        .to_vec()
 }
 
 /// The UIDs of the messages carrying `token`, ascending.
@@ -596,6 +624,169 @@ fn expunge_removes_only_the_messages_already_marked_deleted() {
 
 #[test]
 #[ignore = "needs an IMAP server: make tests-wire"]
+fn an_appended_message_can_be_found_by_search_and_read_back() {
+    let mut c = client();
+    let token = unique("append");
+    let msg = format!(
+        "From: alice@example.com\r\nTo: {}\r\nSubject: {}\r\nContent-Type: text/plain\r\n\r\n\
+         appended body\r\n",
+        RECIPIENT, token
+    );
+    // Wire-form: this calls `ImapClient::append_message` directly, not
+    // through the CLI, so it bypasses `cli::parse_flag_names` (which is
+    // what turns the bare word `flag add` takes into this).
+    let flagged = vec!["\\Flagged".to_string()];
+
+    let uid = c
+        .append_message("INBOX", msg.as_bytes(), &flagged, None)
+        .expect("append")
+        .expect("GreenMail advertises UIDPLUS, so APPENDUID must come back");
+
+    let hits = c
+        .search_folders(
+            &["INBOX".to_string()],
+            &format!("HEADER SUBJECT \"{}\"", token),
+            0,
+            None,
+        )
+        .expect("search");
+    assert_eq!(hits.len(), 1, "the appended message was not found by search");
+    assert_eq!(hits[0].uid, uid, "the reported UID does not match what search found");
+
+    let body = c.get_email("INBOX", uid).expect("read");
+    assert!(body.contains("appended body"), "body not returned: {}", body);
+
+    let flags = c.message_flags("INBOX", uid).expect("flags");
+    assert!(
+        flags.iter().any(|f| f.eq_ignore_ascii_case("\\Flagged")),
+        "--flag did not stick at creation: {:?}",
+        flags
+    );
+}
+
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn a_lone_lf_is_normalized_to_crlf_before_appending() {
+    // An IMAP literal is exact bytes: a message file saved on this host
+    // commonly has bare `\n` line endings, and appending it verbatim
+    // would put an unterminated line on the wire -- wrong on the
+    // server while every local check still shows the message as fine.
+    // `ImapClient::append_message` normalizes a lone LF to CRLF before
+    // sending; this reads the message back over a raw socket (see
+    // `fetch_raw_body`'s own doc comment for why not `get_email`) and
+    // checks every line ending it actually got is CRLF, not LF alone.
+    let mut c = client();
+    let token = unique("crlf");
+    let lf_only = format!(
+        "From: alice@example.com\nTo: {}\nSubject: {}\nContent-Type: text/plain\n\n\
+         line one\nline two\n",
+        RECIPIENT, token
+    );
+    assert!(!lf_only.contains('\r'), "fixture must be LF-only to test anything");
+
+    let uid = c
+        .append_message("INBOX", lf_only.as_bytes(), &[], None)
+        .expect("append")
+        .expect("GreenMail advertises UIDPLUS, so APPENDUID must come back");
+
+    let raw = fetch_raw_body(uid);
+    let mut prev = 0u8;
+    for &b in raw.iter() {
+        if b == b'\n' {
+            assert_eq!(
+                prev,
+                b'\r',
+                "a bare LF reached the server: {:?}",
+                String::from_utf8_lossy(&raw)
+            );
+        }
+        prev = b;
+    }
+    assert!(
+        raw.windows(2).any(|w| w == b"\r\n"),
+        "sanity: no CRLF found at all in {:?}",
+        String::from_utf8_lossy(&raw)
+    );
+}
+
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn appending_to_a_missing_folder_names_folder_create() {
+    let mut c = client();
+    let absent = unique("append-missing");
+    let msg = "From: a@b\r\nTo: c@d\r\nSubject: x\r\nContent-Type: text/plain\r\n\r\nbody\r\n";
+
+    let err = c
+        .append_message(&absent, msg.as_bytes(), &[], None)
+        .expect_err("the folder does not exist");
+    assert!(
+        err.to_string().contains("folder create"),
+        "the server's raw TRYCREATE text leaked through untranslated: {}",
+        err
+    );
+}
+
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn appending_with_an_explicit_date_sets_internaldate() {
+    // Proves the flag reaches the server, not only that it parses:
+    // deliberately far from "now", so a server stamping the current
+    // time instead (silently ignoring the override) would be
+    // unmistakable in the result rather than accidentally close enough
+    // to pass anyway.
+    let mut c = client();
+    let token = unique("date");
+    let when = DateTime::parse_from_rfc3339("2015-03-14T09:26:53+01:00").expect("fixture date");
+    let msg = format!(
+        "From: alice@example.com\r\nTo: {}\r\nSubject: {}\r\nContent-Type: text/plain\r\n\r\n\
+         body\r\n",
+        RECIPIENT, token
+    );
+
+    let uid = c
+        .append_message("INBOX", msg.as_bytes(), &[], Some(when))
+        .expect("append")
+        .expect("GreenMail advertises UIDPLUS, so APPENDUID must come back");
+
+    // `search_folders` reports INTERNALDATE as `SearchResult.date`
+    // (formatted "%Y-%m-%d %H:%M:%S %z" from the FETCH response, see
+    // `RealClient::fetch_to_result`), so reading it back this way
+    // exercises the same FETCH INTERNALDATE path a caller would see --
+    // not a special read built just for this test. If GreenMail turned
+    // out not to report INTERNALDATE at all, `hits[0].date` would be
+    // `None` and `.expect` below would fail loudly rather than this
+    // silently asserting nothing; that has not happened in practice.
+    let hits = c
+        .search_folders(
+            &["INBOX".to_string()],
+            &format!("HEADER SUBJECT \"{}\"", token),
+            0,
+            None,
+        )
+        .expect("search");
+    assert_eq!(hits.len(), 1, "the appended message was not found by search");
+    assert_eq!(hits[0].uid, uid);
+    let reported = hits[0]
+        .date
+        .as_deref()
+        .expect("GreenMail did not report an INTERNALDATE for this message");
+    let got = DateTime::parse_from_str(reported, "%Y-%m-%d %H:%M:%S %z")
+        .unwrap_or_else(|e| panic!("could not parse the reported date '{}' ({:#})", reported, e));
+    // Compare the instant, not the string: a server is free to report
+    // the zone it stored the timestamp in rather than echo the one it
+    // was given, and that would not mean the date failed to reach it.
+    assert_eq!(
+        got.timestamp(),
+        when.timestamp(),
+        "INTERNALDATE did not reach the server: sent {}, got {} (raw: {:?})",
+        when.to_rfc3339(),
+        got.to_rfc3339(),
+        reported
+    );
+}
+
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
 fn the_folder_tree_can_be_created_renamed_and_subscribed() {
     let mut c = client();
     let first = unique("tree");
@@ -783,6 +974,7 @@ fn a_line_break_in_a_folder_name_never_reaches_the_server() {
         c.move_messages("INBOX", &[1], evil).err(),
         c.copy_messages("INBOX", &[1], evil).err(),
         c.delete_folder(evil, true).err(),
+        c.append_message(evil, b"To: a@b\r\n\r\nbody\r\n", &[], None).err(),
     ] {
         let err = err.expect("a line break must be refused before the socket");
         assert!(
@@ -828,6 +1020,10 @@ fn readonly_changes_nothing_on_a_real_server() {
 /// in different words -- and not the content, since the two hold
 /// different mail. What has to agree is whether the call was refused.
 type Probe = (&'static str, bool);
+
+/// A minimal well-formed message for the `append` probes: only whether
+/// the call is refused is under test here, not its content.
+const PROBE_MESSAGE: &[u8] = b"From: a@example.com\r\nTo: b@example.com\r\nSubject: probe\r\n\r\nbody\r\n";
 
 /// Where to aim the probes: a folder that exists, one that does not, a
 /// UID that exists and one that does not.
@@ -884,6 +1080,10 @@ fn probe(c: &mut ImapClient, g: &Ground) -> Vec<Probe> {
         // afterwards, so these probes do not have to avoid spending it.
         ("copy: absent target", c.copy_messages(&g.folder, &[g.uid], &g.absent_folder).is_ok()),
         ("copy: absent uid", c.copy_messages(&g.folder, &[g.absent_uid], &g.move_target).is_ok()),
+        // Appending. Adds a message rather than touching any named UID,
+        // so it cannot disturb what a later probe expects to find.
+        ("append: existing folder", c.append_message(&g.folder, PROBE_MESSAGE, &[], None).is_ok()),
+        ("append: absent folder", c.append_message(&g.absent_folder, PROBE_MESSAGE, &[], None).is_ok()),
         // Removing. `g.uid` is not yet marked \Deleted, so this refuses
         // -- both of the next two probes must still see it afterwards,
         // which is why the probe that actually marks and removes it

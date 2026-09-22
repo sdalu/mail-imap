@@ -369,6 +369,45 @@ For the same reason there is no form that expunges a mailbox's whole
 `expunge` takes them, and the unbounded version is never a keystroke
 away from the bounded one.
 
+### Putting a message in (`append`)
+
+The one direction that did not exist. `APPEND` takes a mailbox, a
+literal, and optionally flags and an internaldate; `ImapClient` gates it
+on `AccessLevel::may_append` (`full`) and does two things to the content
+before either backend sees it, so that a wire test calling the trait
+directly exercises what the CLI gets.
+
+**A lone LF is normalised to CRLF.** An IMAP literal is a byte count
+followed by exactly that many bytes, and the protocol's lines end CRLF.
+A message file written on a Unix host ends its lines with LF alone, so
+appending it verbatim stores a message whose lines are unterminated by
+the protocol's reckoning — and nothing local will say so, because every
+local check is reading the same bytes it wrote. This is why the test for
+it is a *wire* test (`a_lone_lf_is_normalized_to_crlf_before_appending`)
+that reads the message back over a raw socket and inspects the bytes,
+rather than a unit test asserting the normaliser against itself.
+
+**The content is checked for an RFC 5322 shape** — a header block and a
+blank line — and refused here if it has none. A server refuses garbage
+too, in language considerably less useful.
+
+`--date` is ISO 8601 and sets the internaldate. Without it, nothing is
+sent and the server's own default (the moment of the append) applies.
+It is deliberately not read from the message's `Date:` header: that is
+the sender's clock and records when the message was *written*, while
+internaldate records when this mailbox *received* it. They differ by
+however long the message sat somewhere else, and silently substituting
+one for the other misdates every message an import brings in.
+
+`--flag` goes through the same `parse_flag_names` the `flag` command
+uses, so the spellings cannot drift apart. That parser refuses an empty
+list, which is right for `flag add` and wrong here — `append` with no
+flags is ordinary — so the handler calls it only when names were given.
+The refusal is unreachable from the other call sites, which guard
+earlier in `split_args`; it is a precondition of those commands rather
+than a fact about parsing names, and it would read better at the call
+sites that need it.
+
 ### Passive read-only behaviour
 
 Nothing implicitly mutates the mailbox: there is no `MOVE`, `COPY` or

@@ -286,6 +286,27 @@ enum Command {
         #[clap(flatten)]
         sel: Sel,
     },
+    /// Put a message into a mailbox (APPEND, RFC 3501 6.3.11): `append
+    /// INBOX msg.eml`, or `-` as FILE to read it from stdin. Needs
+    /// access-level 'full'; the folder must already exist -- this does
+    /// not create it. The content must be shaped like an RFC 5322
+    /// message (a header block ended by a blank line); a lone LF line
+    /// ending is normalized to CRLF before it is sent
+    Append {
+        /// Mailbox to append into
+        folder: String,
+        /// Message file, or '-' to read it from stdin
+        file: String,
+        /// Flags to set on the new message, comma-separated: seen,
+        /// answered, flagged, deleted, draft (none by default)
+        #[clap(long = "flag", value_name = "FLAG", value_delimiter = ',')]
+        flag: Vec<String>,
+        /// INTERNALDATE for the new message, ISO 8601
+        /// (2026-09-22T18:40:11+02:00). Without it the server stamps
+        /// it with now; never taken from the message's own Date: header
+        #[clap(long = "date", value_name = "TIMESTAMP")]
+        date: Option<String>,
+    },
     /// List or save MIME parts of an email
     Part {
         /// What to do with the parts
@@ -678,6 +699,9 @@ fn main() {
                 json,
                 debug,
             )
+        }
+        Command::Append { folder, file, flag, date } => {
+            cli::append_message(&config, folder, file, flag, date.as_deref(), json, debug)
         }
         Command::Part { action } => match action {
             PartsAction::List { sel } => {

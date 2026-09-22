@@ -5,7 +5,8 @@ pub mod tbkey;
 
 use crate::config::Config;
 use crate::imap::{FolderInfo, ImapBackend, ImapClient, Mailbox, PartInfo, SearchResult};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use chrono::{DateTime, FixedOffset};
 use serde::Serialize;
 use select::Selection;
 use unicode_normalization::UnicodeNormalization;
@@ -268,6 +269,17 @@ struct ExpungeOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct AppendOutput<'a> {
+    folder: &'a str,
+    bytes: usize,
+    flags: &'a [String],
+    /// The UID the server assigned, when it advertises `UIDPLUS` and
+    /// reported one; `null` otherwise -- the caller then has no handle
+    /// on the message it just created.
+    uid: Option<u32>,
+}
+
+#[derive(Serialize)]
 struct FolderChangeOutput<'a> {
     action: &'a str,
     folder: &'a str,
@@ -518,6 +530,8 @@ struct AccessMay {
     set_deleted: bool,
     /// `UID EXPUNGE` a message already marked `\Deleted`.
     expunge: bool,
+    /// `APPEND` a message into a mailbox.
+    append: bool,
 }
 
 #[derive(Serialize)]
@@ -664,6 +678,7 @@ fn build_info<'a>(
                 delete_folders: level.may_delete_folder(),
                 set_deleted: level.may_set("\\Deleted"),
                 expunge: level.may_expunge(),
+                append: level.may_append(),
             },
         },
         folders: FoldersInfo {
@@ -769,6 +784,7 @@ fn print_info(i: &InfoOutput) {
     println!("  {:<MAY$} {}", "delete a folder", yes_no(i.access.may.delete_folders));
     println!("  {:<MAY$} {}", "set \\Deleted", yes_no(i.access.may.set_deleted));
     println!("  {:<MAY$} {}", "expunge a \\Deleted message", yes_no(i.access.may.expunge));
+    println!("  {:<MAY$} {}", "append a message into a mailbox", yes_no(i.access.may.append));
 
     println!();
     println!("Folders");
@@ -1201,6 +1217,85 @@ pub fn expunge_messages(
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+    Ok(())
+}
+
+/// `append <FOLDER> <FILE>`: put the message in `file` into `folder`.
+/// `file` of `-` reads it from stdin. `flag_names` are parsed by
+/// `parse_flag_names` -- the same spellings `flag add` takes -- and set
+/// on the message as it is created; empty sets none. `date`, when
+/// given, is an ISO 8601 timestamp (`2026-09-22T18:40:11+02:00`) that
+/// sets INTERNALDATE; an unparseable one is refused here, naming the
+/// expected shape, rather than left for the server to reject less
+/// legibly. Without it, INTERNALDATE is left to the server -- RFC 3501
+/// has that default to now -- and it is never taken from the message's
+/// own `Date:` header: that is the sender's clock, not when this
+/// mailbox received it, and conflating the two would silently misdate
+/// every import. Gated in `ImapClient` on `full`, and CRLF-normalized
+/// and RFC 5322 shape-checked there too, so both happen regardless of
+/// backend.
+///
+/// `folder` must already exist: `append` does not create it, and a
+/// server's `NO [TRYCREATE]` comes back naming `folder create` instead
+/// of the server's own wording.
+pub fn append_message(
+    config: &Config,
+    folder: &str,
+    file: &str,
+    flag_names: &[String],
+    date: Option<&str>,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    // `parse_flag_names` refuses an empty list outright (it exists to
+    // catch `flag add <selection>` with no flag named at all) -- but
+    // `--flag` here is optional, and no flags at creation is an
+    // ordinary, valid append, not an empty list of names to reject.
+    let flags = if flag_names.is_empty() {
+        Vec::new()
+    } else {
+        parse_flag_names(flag_names, true, false)?
+    };
+    let internal_date: Option<DateTime<FixedOffset>> = match date {
+        None => None,
+        Some(d) => Some(DateTime::parse_from_rfc3339(d).map_err(|e| {
+            anyhow::anyhow!(
+                "--date '{}' is not ISO 8601 ({:#}): write it like \
+                 2026-09-22T18:40:11+02:00",
+                d,
+                e
+            )
+        })?),
+    };
+    let content: Vec<u8> = if file == "-" {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut buf)
+            .context("reading the message from stdin")?;
+        buf
+    } else {
+        std::fs::read(file).with_context(|| format!("reading '{}'", file))?
+    };
+
+    let mut client = ImapClient::connect(config, debug)?;
+    let uid = client.append_message(folder, &content, &flags, internal_date)?;
+    if json {
+        return emit_json(&AppendOutput {
+            folder,
+            bytes: content.len(),
+            flags: &flags,
+            uid,
+        });
+    }
+    match uid {
+        Some(uid) => println!("Appended {} byte(s) to '{}': UID {}", content.len(), folder, uid),
+        None => println!(
+            "Appended {} byte(s) to '{}'; the server did not report a UID (no UIDPLUS)",
+            content.len(),
+            folder
+        ),
     }
     Ok(())
 }
@@ -2606,13 +2701,14 @@ mod tests {
         assert_eq!(out.server.threading, "client");
         assert!(!out.server.create_special_use);
         // organize: flags and filing (move, copy) yes, the tree,
-        // \Deleted and expunge no -- expunge is held to the same rung
-        // as setting \Deleted itself.
+        // \Deleted, expunge and append no -- append is held to the same
+        // rung as setting \Deleted itself.
         assert_eq!(out.access.effective, "organize");
         assert!(out.access.may.store_flags && out.access.may.move_messages);
         assert!(out.access.may.copy_messages);
         assert!(!out.access.may.change_folders && !out.access.may.set_deleted);
         assert!(!out.access.may.expunge);
+        assert!(!out.access.may.append);
     }
 
     #[test]

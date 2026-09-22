@@ -47,16 +47,6 @@ doing on its own — it is one config field, one `std::process::Command`,
 and it makes `pass`, `gpg` and a keyring all work without this tool
 knowing about any of them.
 
-## 5. No `append`
-
-Nothing puts a message *into* a mailbox: no draft upload, no `.eml`
-import, no re-filing something saved elsewhere. Every other direction
-is covered. `APPEND` takes an optional flag list and internaldate
-(RFC 3501 §6.3.11), and both have to be passed or the imported message
-arrives unflagged and dated now.
-
-This is also the operation §6 below is built on.
-
 ## 6. `part strip`
 
 Decided: the command is `part strip`, not `part remove`. Removing a
@@ -163,10 +153,12 @@ what this run may do.
 
 ### What it needs first
 
-§5 (`append`). The expunge half arrived with §4, so what is still
-missing is the ability to put the rebuilt message back — this command
-is `append` plus `expunge` plus a MIME writer, and only the first of
-those is still absent. And the writer is the work: `src/imap/mime.rs` is a
+Nothing, now. `append` arrived with §5 and `expunge` with §4, so this
+command is those two plus a MIME writer — and the writer is all that is
+left to build. `src/imap/mime.rs` is still a parser only (`leaves`,
+`decoded`, `parse_message`, `decode_body`); what is missing is boundary
+generation, transfer-encoding and `Content-Type` rewriting, plus the
+SHA-256 of the removed bytes for the stub. And the writer is the work: `src/imap/mime.rs` is a
 parser only (`leaves`, `decoded`, `parse_message`, `decode_body`), so
 what is missing is boundary generation, transfer-encoding and
 `Content-Type` rewriting. Removal never changes a message's top-level
@@ -196,6 +188,13 @@ attachment to put in Drafts — is §5 and belongs to `append`.
 - **No shell completions.** clap 4 is already a dependency;
   `clap_complete` plus a `make install` hook is cheap, and `install`
   already places the man page.
+- **`parse_flag_names` refuses an empty list**, which is a precondition
+  of `flag add` / `tag add` rather than a fact about parsing names —
+  and one `split_args` already enforces earlier, with a better message.
+  It made `append --flag` optional awkward (the handler calls the
+  parser only when names were given), and a unit test pins the bail, so
+  moving it to the call sites that want it is a small change with its
+  own test to update. Worth doing on its own, not inside a feature.
 - **`info` advertises capabilities with no command behind them**
   (`README.md:314`): `QUOTA`, `IDLE`. Either give them commands
   (`quota`; a `watch`) or say in DESIGN.md that the line reports what
@@ -205,13 +204,15 @@ attachment to put in Drafts — is §5 and belongs to `append`.
 
 Done and out of this list: the `SEARCH` charset declaration,
 `part save --all` / `-o -`, §3 (`folder delete` and
-`folder list --subscribed`) and §4 (`copy` and `expunge`). What they
+`folder list --subscribed`), §4 (`copy` and `expunge`) and §5
+(`append`). What they
 left behind is recorded where it belongs rather than here: the untested
 charset fallback in DESIGN.md under *Declaring a charset on `SEARCH`*,
 why `fetch_part` is the trait's primitive under *MIME parsing*, where
 the line falls between `restructure` and `full` under *Access level*,
-and why `expunge` never marks `\Deleted` itself under *Copying and
-expunging*.
+why `expunge` never marks `\Deleted` itself under *Copying and
+expunging*, and why a lone LF is normalised before an `append` under
+*Putting a message in*.
 
 The numbers of what remains do not close up as entries leave. §6 cites
 §5 by number, and a renumbering that made the list tidier would quietly

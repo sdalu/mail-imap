@@ -6,6 +6,7 @@ use crate::imap::{
     SortCriteria, SortKey, ThreadRefs,
 };
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, FixedOffset};
 use imap::extensions::sort::{SortCharset, SortCriterion};
 use imap::extensions::thread::{ThreadAlgorithm, ThreadCharset};
 use imap::{ClientBuilder, Connection, ConnectionMode, Session};
@@ -1110,6 +1111,65 @@ impl ImapBackend for RealClient {
                 .with_context(|| format!("UID EXPUNGE {} in '{}'", list, folder))?;
         }
         Ok(eligible)
+    }
+
+    fn append_message(
+        &mut self,
+        folder: &str,
+        content: &[u8],
+        flags: &[String],
+        internal_date: Option<DateTime<FixedOffset>>,
+    ) -> Result<Option<u32>> {
+        // APPEND does not need the mailbox selected -- it names the
+        // destination itself (RFC 3501 §6.3.11).
+        if self.debug {
+            eprintln!(
+                "Appending {} byte(s) to '{}'{}{}",
+                content.len(),
+                folder,
+                if flags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" with flags ({})", flags.join(" "))
+                },
+                match internal_date {
+                    Some(d) => format!(", INTERNALDATE {}", d.to_rfc3339()),
+                    None => String::new(),
+                }
+            );
+        }
+        let mut cmd = self.session.append(folder, content);
+        if !flags.is_empty() {
+            cmd.flags(flags.iter().map(|f| Flag::from(f.as_str())));
+        }
+        if let Some(date) = internal_date {
+            cmd.internal_date(date);
+        }
+        let appended = match cmd.finish() {
+            Ok(a) => a,
+            // The mailbox does not exist: RFC 3501 has the server
+            // answer NO with a TRYCREATE code rather than creating it.
+            // 'append' does not create mailboxes, so this is where that
+            // refusal turns into something naming the command that does.
+            Err(imap::Error::No(no))
+                if matches!(no.code, Some(imap_proto::types::ResponseCode::TryCreate)) =>
+            {
+                bail!(
+                    "no mailbox '{}' to append into: 'append' does not create it -- \
+                     'folder create {}' first",
+                    folder,
+                    folder
+                );
+            }
+            Err(e) => {
+                return Err(anyhow::Error::from(e).context(format!("APPEND to '{}' failed", folder)));
+            }
+        };
+        Ok(match appended.uids.as_ref().and_then(|v| v.first()) {
+            Some(imap_proto::types::UidSetMember::Uid(u)) => Some(*u),
+            Some(imap_proto::types::UidSetMember::UidRange(r)) => Some(*r.start()),
+            None => None,
+        })
     }
 
     fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {

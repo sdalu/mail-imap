@@ -5,6 +5,7 @@ use crate::imap::{
     SortCriteria, ThreadRefs,
 };
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, FixedOffset};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// In-memory mock backend. This is the original mockup, kept for offline
@@ -428,6 +429,68 @@ impl ImapBackend for MockClient {
         self.thread_ids.retain(|(u, _, _)| !eligible.contains(u));
         self.message_flags.retain(|u, _| !eligible.contains(u));
         Ok(eligible)
+    }
+
+    fn append_message(
+        &mut self,
+        folder: &str,
+        content: &[u8],
+        flags: &[String],
+        // Not stored: the mock has nowhere to keep it and nothing reads
+        // INTERNALDATE back from it. Taking the parameter (rather than
+        // refusing it) is what matters -- a date a real server accepts
+        // must not be refused here, which would make the mock stricter
+        // than the thing it stands in for.
+        _internal_date: Option<DateTime<FixedOffset>>,
+    ) -> Result<Option<u32>> {
+        if !self.folders.iter().any(|f| f == folder) {
+            // Mirrors the real backend's NO [TRYCREATE] translation --
+            // 'append' does not create the mailbox on either backend.
+            bail!(
+                "no mailbox '{}' to append into: 'append' does not create it -- 'folder \
+                 create {}' first (mock)",
+                folder,
+                folder
+            );
+        }
+        // A demo aid, not a MIME parser: pull Subject/From out of the
+        // header block by hand and keep everything after the blank
+        // line as the body, which is all `search`/`get_email` need.
+        let text = String::from_utf8_lossy(content);
+        let mut subject = "(no subject)".to_string();
+        let mut from = "(unknown)".to_string();
+        let mut body = String::new();
+        let mut in_body = false;
+        for line in text.split("\r\n") {
+            if in_body {
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(line);
+                continue;
+            }
+            if line.is_empty() {
+                in_body = true;
+                continue;
+            }
+            if let Some(v) = line.strip_prefix("Subject:") {
+                subject = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("From:") {
+                from = v.trim().to_string();
+            }
+        }
+        let uid = self.messages.iter().map(|(u, _, _, _)| *u).max().unwrap_or(0) + 1;
+        self.messages.push((uid, subject, from, body));
+        if !flags.is_empty() {
+            self.message_flags
+                .insert(uid, flags.iter().cloned().collect());
+        }
+        // No UIDPLUS gate: `capabilities()` advertises nothing here
+        // (see its own doc comment), but reporting a UID unconditionally
+        // is the *permissive* direction -- CLAUDE.md's rule is that the
+        // mock must never be stricter than a real server, not that it
+        // must match every detail of one.
+        Ok(Some(uid))
     }
 
     fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {

@@ -110,6 +110,10 @@ cargo run -- --help
 - List the MIME parts of an email, and save one part to a file, every
   part to a directory (`--all`), or one part to stdout (`-o -`) for
   piping
+- Put a message into a mailbox from a file or stdin (`append`, an
+  IMAP `APPEND`): `--flag` sets its initial flags, `--date` its
+  internaldate, and a lone LF is normalised to CRLF on the way
+  (`access-level` `full`)
 - Copy email(s) into another folder, named last as `mv` does: `UID COPY`
   (`access-level` `organize`) — the originals stay where they are
 - Permanently remove messages already marked `\Deleted`: `expunge`,
@@ -166,6 +170,7 @@ takes the folder flags `-f`/`-A`; see [Folder selection](#folder-selection).
 | `move`               | `move <SELECTION...> <FOLDER>`                    | File the selected email(s) into another folder, named last as `mv` does; it must already exist (needs `organize`)                                                               |
 | `copy`               | `copy <SELECTION...> <FOLDER>`                    | Copy the selected email(s) into another folder, leaving the originals; it must already exist (needs `organize`)                                                                |
 | `expunge`            | `expunge <SELECTION...>`                          | Permanently remove the selected email(s), but only those already marked `\Deleted`; needs `UIDPLUS` (needs `full`)                                                             |
+| `append`             | `append <FOLDER> <FILE\|-> [--flag <F,...>] [--date <ISO8601>]` | Put an RFC 5322 message into a mailbox from a file or stdin (needs `full`)                                                                             |
 | `flag list`          | `flag list [--wire] <SELECTION...>`               | List the flags (system flags + keyword tags) of the selected email(s)                                                                                                           |
 | `flag add`           | `flag add [--wire] <SELECTION...> <FLAG...>`      | Enable IMAP-defined flags on the selected email(s): `seen`, `answered`, `flagged`, `deleted`, `draft`                                                                           |
 | `flag remove`        | `flag remove <SELECTION...> <FLAG...>`            | Disable flags on the selected email(s)                                                                                                                                          |
@@ -312,6 +317,7 @@ Access level: organize
   delete a folder                     no
   set \Deleted                        no
   expunge a \Deleted message          no
+  append a message into a mailbox     no
 
 Folders
   delimiter   '/' (from the server)
@@ -338,7 +344,7 @@ This server
 
 What each block is for:
 
-- **Access level** — the level in force, and the seven things it governs,
+- **Access level** — the level in force, and the eight things it governs,
   so an agent can tell `flag add` from `folder create` before trying
   one. A run narrowed with `--access-level` says so and names the
   ceiling the config still allows.
@@ -368,7 +374,7 @@ What each block is for:
            "may":{"store_flags":true,"move_messages":true,
                   "copy_messages":true,"change_folders":false,
                   "delete_folders":false,"set_deleted":false,
-                  "expunge":false}},
+                  "expunge":false,"append":false}},
  "folders":{"delimiter":"/","delimiter_source":"server","server_delimiter":"/",
             "delimiters_seen":["/"],"default":"INBOX","default_exists":true,
             "count":12,"special_use":{"\\Trash":"Trash","\\Junk":"Spam"}},
@@ -727,6 +733,40 @@ mail-imap --config incal.conf -f INBOX flag add 12345 deleted
 mail-imap --config incal.conf -f INBOX expunge 12345
 ```
 
+#### Putting a message in (`append`)
+
+`append` is the one direction that was missing: a message goes *into* a
+mailbox, from a file or from stdin (`-`). It is an IMAP `APPEND`, it
+needs `"access-level": "full"`, and the mailbox has to exist already —
+a server's `NO [TRYCREATE]` comes back as an error naming
+`folder create`.
+
+Three things it does to what you hand it:
+
+- **A lone LF becomes CRLF.** An IMAP literal is exact bytes and a
+  message file saved on this host has LF line endings; appending it
+  verbatim puts unterminated lines on the server, which looks fine
+  everywhere local and is wrong where it counts.
+- **`--flag seen,flagged` sets the initial flags**, in the spellings
+  `flag add` already takes, because it is the same parser.
+- **`--date` sets the internaldate**, as ISO 8601. Without it the
+  internaldate is now. It is deliberately *not* read from the message's
+  own `Date:` header — that is the sender's clock and says when the
+  message was written, while internaldate says when this mailbox
+  received it. Conflating them silently misdates an import.
+
+The content must be an RFC 5322 message — a header block and a blank
+line — and anything else is refused here rather than at the server,
+where the rejection is far less legible. When the server has `UIDPLUS`
+the new UID is reported; when it does not, `append` says so rather than
+leaving you to guess what was created.
+
+```bash
+mail-imap --config incal.conf append Drafts /tmp/draft.eml
+mail-imap --config incal.conf append Archive/2026 /tmp/old.eml --flag seen
+mail-imap --config incal.conf append Drafts - --date 2026-09-22T18:40:11+02:00
+```
+
 #### Counts, UIDs and threads
 
 ```bash
@@ -1045,7 +1085,7 @@ change. The levels are a ladder, each permitting everything below it:
 | `readonly`    | Nothing changes. Reads use `BODY.PEEK[]`, so even `\Seen` stays as it was            |
 | `organize`    | *(default)* Read, plus set and clear flags and tags, and move mail to another folder |
 | `restructure` | That, plus the folder tree: `folder create`, `rename`, `subscribe`, `unsubscribe`    |
-| `full`        | Everything the tool can do, including setting `\Deleted`, `expunge` and deleting a mailbox |
+| `full`        | Everything the tool can do, including setting `\Deleted`, `expunge`, `append` and deleting a mailbox |
 
 The two lines the ladder draws: `organize` is about **messages** —
 nothing is lost, so `\Deleted` cannot be *set* (it can be cleared,

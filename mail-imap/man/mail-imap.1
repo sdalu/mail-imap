@@ -295,6 +295,40 @@ There is deliberately no form that expunges a whole mailbox's
 .Ic \eDeleted
 set; compose it with
 .Cm search Ic DELETED .
+.It Cm append Ar folder Ar file Oo Fl -flag Ar names Oc Oo Fl -date Ar iso8601 Oc
+Put an RFC 5322 message into
+.Ar folder
+.Pq an Ic APPEND ,
+reading it from
+.Ar file ,
+or from standard input when
+.Ar file
+is
+.Ql - .
+Needs access level
+.Ic full .
+.Ar folder
+must already exist; a server\(aqs
+.Ic NO [TRYCREATE]
+is reported as an error naming
+.Cm folder create .
+A lone LF in the message is normalised to CRLF, since an IMAP literal
+is exact bytes and a message file written on this host commonly has
+bare LF endings.
+.Fl -flag
+sets the initial flags, in the same spellings
+.Cm flag add
+takes.
+.Fl -date
+sets the INTERNALDATE, as ISO 8601
+.Pq Ql 2026-09-22T18:40:11+02:00 ;
+without it the INTERNALDATE is the moment of the append, and it is
+never taken from the message\(aqs own
+.Ic Date
+header, which is the sender\(aqs clock and means something else.
+The new UID is reported where the server advertises
+.Ic UIDPLUS ,
+and its absence is stated where it does not.
 .It Cm part
 List or save the MIME parts of an email.
 .Bl -tag -width Ds -compact

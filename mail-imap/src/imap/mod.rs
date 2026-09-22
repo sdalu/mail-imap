@@ -4,7 +4,8 @@
 //! fetching a message does not set `\Seen`. The mutating operations are
 //! [`ImapBackend::store_flags`] (`flag`, `tag`),
 //! [`ImapBackend::move_messages`] (`move`), [`ImapBackend::copy_messages`]
-//! (`copy`), [`ImapBackend::expunge_messages`] (`expunge`), and the
+//! (`copy`), [`ImapBackend::expunge_messages`] (`expunge`),
+//! [`ImapBackend::append_message`] (`append`), and the
 //! folder-tree four — [`ImapBackend::create_folder`],
 //! [`ImapBackend::rename_folder`], [`ImapBackend::set_subscribed`] and
 //! [`ImapBackend::delete_folder`]. Every one of them is gated by
@@ -33,6 +34,7 @@ pub use sort::{parse_sort, sort_results, SortCriteria, SortKey};
 
 use crate::config::{AccessLevel, Config};
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, FixedOffset};
 use std::path::Path;
 
 /// A single mailbox as reported by `LIST`.
@@ -116,8 +118,9 @@ pub struct PartInfo {
 ///
 /// Most are reads. The ones that change the server are `store_flags`
 /// (`flag`, `tag`), `move_messages` (`move`), `copy_messages` (`copy`),
-/// `expunge_messages` (`expunge`), and `create_folder`,
-/// `rename_folder`, `set_subscribed` and `delete_folder` (`folder`).
+/// `expunge_messages` (`expunge`), `append_message` (`append`), and
+/// `create_folder`, `rename_folder`, `set_subscribed` and
+/// `delete_folder` (`folder`).
 /// `save_part` writes a local file and touches nothing on the server.
 ///
 /// None of them gates itself. `access-level` is enforced in
@@ -195,6 +198,26 @@ pub trait ImapBackend {
     /// are returned. `flag add <selection> deleted` is what marks a
     /// message for removal.
     fn expunge_messages(&mut self, folder: &str, uids: &[u32]) -> Result<Vec<u32>>;
+    /// Put one message into a mailbox: `APPEND` (RFC 3501 §6.3.11).
+    /// `content` is the exact bytes to send -- CRLF-normalized and
+    /// checked for an RFC 5322 shape by [`ImapClient`] before either
+    /// backend ever sees it, so neither has to repeat that. `flags` are
+    /// wire-form system flags (`cli::parse_flag_names`) to set on the
+    /// message as it is created. `internal_date`, when given, sets
+    /// INTERNALDATE (`--date`); `None` leaves it to the server, which
+    /// RFC 3501 has default to now -- this is never taken from the
+    /// message's own `Date:` header, which is the sender's clock, not
+    /// when this mailbox received it. The target mailbox must already
+    /// exist; this does not create it. Returns the UID the server
+    /// assigned when it advertises `UIDPLUS` and reports one
+    /// (`APPENDUID`), else `None`.
+    fn append_message(
+        &mut self,
+        folder: &str,
+        content: &[u8],
+        flags: &[String],
+        internal_date: Option<DateTime<FixedOffset>>,
+    ) -> Result<Option<u32>>;
     /// Create a mailbox. `use_attr` is an RFC 6154 special-use
     /// attribute (`\Archive`, `\Sent`, ...) to declare at creation —
     /// the only moment IMAP lets a client set one — and needs the
@@ -313,6 +336,65 @@ fn check_mailbox_name(name: &str, what: &str) -> Result<()> {
              IMAP command and start another: refusing to send it",
             what
         );
+    }
+    Ok(())
+}
+
+/// Turn a lone `LF` into `CRLF`, leaving an existing `CRLF` alone.
+///
+/// An IMAP literal carries exact bytes: RFC 3501/5322 lines are
+/// CRLF-terminated, but a message file saved on this host (or piped
+/// in) commonly has bare `\n` endings. Appended as-is, that puts
+/// unterminated lines on the wire -- a message that is subtly wrong on
+/// the server while looking fine in every local check, since nothing
+/// on this side ever reads it back byte-for-byte. Run on the whole
+/// message, headers and body alike: MIME requires any non-ASCII body
+/// content to already be transfer-encoded to ASCII text lines, so this
+/// is safe uniformly, the same way SMTP transport already assumes.
+fn normalize_line_endings(content: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(content.len());
+    for &b in content {
+        if b == b'\n' && out.last() != Some(&b'\r') {
+            out.push(b'\r');
+        }
+        out.push(b);
+    }
+    out
+}
+
+/// Refuse content that is not shaped like an RFC 5322 message: a
+/// header block -- each line either `"Name: value"` or a folded
+/// continuation (starts with a space or tab) -- terminated by a blank
+/// line. Cheap, and far more legible than a server's own rejection of
+/// garbage. `content` is expected to already be CRLF-normalized
+/// (`normalize_line_endings`).
+fn check_rfc5322_shape(content: &[u8]) -> Result<()> {
+    let shape_error = || {
+        anyhow::anyhow!(
+            "the content given to 'append' is not shaped like an RFC 5322 message: an \
+             RFC 5322 message is expected -- a header block (\"Name: value\" lines, \
+             folded continuations indented) terminated by a blank line"
+        )
+    };
+    let header_end = content
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(shape_error)?;
+    let headers = &content[..header_end];
+    if headers.is_empty() {
+        return Err(shape_error());
+    }
+    for line in headers.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            continue;
+        }
+        if line[0] == b' ' || line[0] == b'\t' {
+            continue; // a folded continuation of the previous header
+        }
+        if !line.contains(&b':') {
+            return Err(shape_error());
+        }
     }
     Ok(())
 }
@@ -451,6 +533,24 @@ impl ImapClient {
         if !self.access.may_expunge() {
             bail!(
                 "access level '{}' will not remove a message: raise \"access-level\" to \
+                 'full' in the config",
+                self.access.as_str()
+            );
+        }
+        Ok(())
+    }
+
+    /// Refuse `APPEND` unless the access level is `full`. Putting a
+    /// message into a mailbox is held to the same rung as
+    /// `check_expunge`/setting `\Deleted`: nothing below `full` puts
+    /// mail into an account any more than it takes mail out.
+    fn check_append(&self) -> Result<()> {
+        // Asks `AccessLevel`, rather than comparing here, for the same
+        // reason `check_expunge` does: so this gate and the `put a
+        // message into a mailbox` line `info` prints cannot drift apart.
+        if !self.access.may_append() {
+            bail!(
+                "access level '{}' will not append a message: raise \"access-level\" to \
                  'full' in the config",
                 self.access.as_str()
             );
@@ -598,6 +698,26 @@ impl ImapBackend for ImapClient {
             Backend::Real(c) => c.expunge_messages(folder, uids),
             #[cfg(feature = "mock")]
             Backend::Mock(c) => c.expunge_messages(folder, uids),
+        }
+    }
+    fn append_message(
+        &mut self,
+        folder: &str,
+        content: &[u8],
+        flags: &[String],
+        internal_date: Option<DateTime<FixedOffset>>,
+    ) -> Result<Option<u32>> {
+        self.check_append()?;
+        check_mailbox_name(folder, "append")?;
+        // Normalized and shape-checked here, once, so neither backend
+        // has to repeat it and a wire test calling this directly (not
+        // through the CLI) still exercises it.
+        let content = normalize_line_endings(content);
+        check_rfc5322_shape(&content)?;
+        match &mut self.backend {
+            Backend::Real(c) => c.append_message(folder, &content, flags, internal_date),
+            #[cfg(feature = "mock")]
+            Backend::Mock(c) => c.append_message(folder, &content, flags, internal_date),
         }
     }
     fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {
@@ -807,6 +927,7 @@ mod mailbox_name_tests {
             c.move_messages("INBOX", &[1], evil).err(),
             c.copy_messages("INBOX", &[1], evil).err(),
             c.delete_folder(evil, false).err(),
+            c.append_message(evil, b"To: a@b\r\n\r\nbody\r\n", &[], None).err(),
         ] {
             let err = err.expect("a line break must never reach the wire");
             assert!(err.to_string().contains("line break"), "wrong reason: {}", err);
@@ -815,6 +936,82 @@ mod mailbox_name_tests {
         assert!(c.set_subscribed("Evil\nX LOGOUT", true).is_err());
         // ... and an ordinary name is untouched.
         assert!(c.create_folder("Archive/2026", None).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod append_tests {
+    use super::*;
+    use crate::config::Config;
+
+    fn client() -> ImapClient {
+        ImapClient::connect(
+            &Config { mock: true, access: AccessLevel::Full, ..Config::default() },
+            false,
+        )
+        .expect("connect")
+    }
+
+    #[test]
+    fn a_lone_lf_becomes_crlf_and_an_existing_crlf_is_left_alone() {
+        assert_eq!(normalize_line_endings(b"a\nb\r\nc\n"), b"a\r\nb\r\nc\r\n");
+        // No line ending at all: untouched.
+        assert_eq!(normalize_line_endings(b"abc"), b"abc");
+        // Already all-CRLF: untouched, not doubled.
+        assert_eq!(normalize_line_endings(b"a\r\nb\r\n"), b"a\r\nb\r\n");
+    }
+
+    #[test]
+    fn rfc5322_shape_needs_a_header_block_ended_by_a_blank_line() {
+        assert!(check_rfc5322_shape(b"To: a@b\r\nSubject: x\r\n\r\nbody\r\n").is_ok());
+        // A folded continuation line is still a header line.
+        assert!(check_rfc5322_shape(b"To: a@b\r\n  continued\r\n\r\nbody\r\n").is_ok());
+        // No blank line at all: not a message.
+        assert!(check_rfc5322_shape(b"To: a@b\r\nSubject: x\r\n").is_err());
+        // No header block, only a blank line: not a message.
+        assert!(check_rfc5322_shape(b"\r\n\r\nbody\r\n").is_err());
+        // A "header" line with no colon: not a message.
+        assert!(check_rfc5322_shape(b"not a header\r\n\r\nbody\r\n").is_err());
+        // Plain garbage.
+        assert!(check_rfc5322_shape(b"just some bytes").is_err());
+    }
+
+    #[test]
+    fn append_needs_full_access() {
+        let mut c = ImapClient::connect(
+            &Config { mock: true, access: AccessLevel::Organize, ..Config::default() },
+            false,
+        )
+        .expect("connect");
+        let err = c
+            .append_message("INBOX", b"To: a@b\r\n\r\nbody\r\n", &[], None)
+            .expect_err("organize must not append");
+        assert!(err.to_string().contains("'full'"), "wrong reason: {}", err);
+    }
+
+    #[test]
+    fn append_refuses_a_missing_folder_and_garbage_content() {
+        let mut c = client();
+        assert!(c.append_message("Nowhere", b"To: a@b\r\n\r\nbody\r\n", &[], None).is_err());
+        assert!(c.append_message("INBOX", b"not a message", &[], None).is_err());
+        // A lone LF is accepted -- normalized before the shape check
+        // ever sees it, not refused for carrying one.
+        assert!(c
+            .append_message("INBOX", b"To: a@b\nSubject: x\n\nbody\n", &[], None)
+            .is_ok());
+    }
+
+    #[test]
+    fn the_mock_does_not_refuse_a_date_a_real_server_accepts() {
+        // The mock has nowhere to keep INTERNALDATE, but taking the
+        // parameter without erroring is what CLAUDE.md's rule is about:
+        // a fake that is *stricter* than the real thing turns a live
+        // feature into an offline refusal.
+        let mut c = client();
+        let when = DateTime::parse_from_rfc3339("2020-01-02T03:04:05+00:00").expect("fixture");
+        assert!(c
+            .append_message("INBOX", b"To: a@b\r\n\r\nbody\r\n", &[], Some(when))
+            .is_ok());
     }
 }
 

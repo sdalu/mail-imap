@@ -62,6 +62,14 @@ impl AccessLevel {
         self >= AccessLevel::Full
     }
 
+    /// May a message be put into a mailbox (`APPEND`)? Held to the same
+    /// rung as `may_expunge`/setting `\Deleted`: putting mail into an
+    /// account is as far from "nothing is lost" as taking it out is, so
+    /// nothing below `full` does either.
+    pub fn may_append(self) -> bool {
+        self >= AccessLevel::Full
+    }
+
     /// May the folder tree be changed — created, renamed, subscribed?
     /// `organize` deliberately stops short: it moves messages between
     /// folders that already exist and leaves the tree alone.
@@ -451,6 +459,7 @@ mod tests {
     fn full_permits_everything() {
         assert!(AccessLevel::Full.may_set("\\Deleted"));
         assert!(AccessLevel::Full.may_expunge());
+        assert!(AccessLevel::Full.may_append());
     }
 
     #[test]
@@ -461,6 +470,14 @@ mod tests {
         assert!(!AccessLevel::Organize.may_expunge());
         assert!(!AccessLevel::Restructure.may_expunge());
         assert!(AccessLevel::Full.may_expunge());
+    }
+
+    #[test]
+    fn only_full_may_append() {
+        assert!(!AccessLevel::ReadOnly.may_append());
+        assert!(!AccessLevel::Organize.may_append());
+        assert!(!AccessLevel::Restructure.may_append());
+        assert!(AccessLevel::Full.may_append());
     }
 
     #[test]

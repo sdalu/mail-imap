@@ -18,6 +18,12 @@ mock = []
 imap = { path = "../forks/rust-imap", features = ["native-tls"] }
 imap-proto = { path = "../forks/tokio-imap/imap-proto" }
 base64 = "0.13"
+# Direct, though it also arrives under `imap`: `append --date` has to
+# hand `AppendCmd::internal_date` a `DateTime<FixedOffset>`, and Rust's
+# extern prelude only exposes direct dependencies. The version tracks
+# the fork's own constraint; `Cargo.lock` already resolves it, so this
+# adds a name, not a build.
+chrono = "0.4"
 native-tls = "0.2"
 clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
