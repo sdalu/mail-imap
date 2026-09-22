@@ -36,20 +36,20 @@ MAN1		= $(MANSRC)/$(MAN1PAGE)
 VERSION		!= sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml
 
 .PHONY: help all check check-lint check-version check-man build tests \
-	tests-unit tests-examples tests-wire tests-server tests-server-stop \
-	doc version \
-	options clean distclean install uninstall
+	tests-unit tests-examples tests-wire tests-server-start \
+	tests-server-stop doc version options clean distclean \
+	install uninstall
 
 help:						## show this help (the default)
 	@echo '$(NAME) -- query and read email over IMAP, for programmatic / AI use'
 	@echo ''
 	@echo 'Targets:'
 	@awk -F':.*## ' '/^[a-z][a-z0-9-]*:.*## /{ \
-	    pre = sprintf("  %-16s ", $$1); n = split($$2, w, / /); line = ""; \
+	    pre = sprintf("  %-18s ", $$1); n = split($$2, w, / /); line = ""; \
 	    for (i = 1; i <= n; i++) { \
 	        cand = (line == "" ? w[i] : line " " w[i]); \
 	        if (length(pre) + length(cand) > 80 && line != "") { \
-	            print pre line; pre = "                   "; line = w[i]; \
+	            print pre line; pre = "                     "; line = w[i]; \
 	        } else line = cand; \
 	    } \
 	    if (line != "") print pre line; \
@@ -113,9 +113,9 @@ tests-wire:					## run the wire checks against a throwaway server (starts and st
 	    sh $(SCRIPTS)/greenmail-server.sh stop; \
 	    exit $$status
 
-# `tests-server` leaves it running instead, for poking at by hand --
+# `tests-server-start` leaves it running instead, for poking at by hand --
 # it prints the config path to point -c at.
-tests-server:					## start a throwaway IMAP server (GreenMail) for exercising the real backend
+tests-server-start:				## start a throwaway IMAP server (GreenMail) for exercising the real backend
 	@sh $(SCRIPTS)/greenmail-server.sh start
 
 tests-server-stop:				## stop the throwaway IMAP server
@@ -142,7 +142,7 @@ clean:						## remove what a build here made
 	@sh $(SCRIPTS)/greenmail-server.sh stop
 	$(CARGO) clean
 	rm -rf mutants.out mutants.out.old
-	rm -f $(TESTS_TMP)/greenmail.log $(TESTS_TMP)/greenmail.conf
+	rm -f $(TESTS_TMP)/greenmail.log $(TESTS_TMP)/greenmail.conf $(TESTS_TMP)/greenmail.pid
 
 # The GreenMail jar is a 10 MB download, so `clean` keeps it and only
 # `distclean` throws it away: re-fetching it on every build would be a

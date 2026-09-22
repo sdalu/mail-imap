@@ -44,7 +44,7 @@ fn config() -> Config {
         Err(e) => panic!(
             "no wire config at '{}' ({:#}).\n\
              These tests need a server. Run `make tests-wire`, which starts one, \
-             or `make tests-server` and then set {}={}.",
+             or `make tests-server-start` and then set {}={}.",
             path, e, CONFIG_ENV, DEFAULT_CONFIG
         ),
     }
