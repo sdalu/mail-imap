@@ -1,0 +1,8 @@
+[submodule "forks/rust-imap"]
+	path = forks/rust-imap
+	url = https://github.com/sdalu/rust-imap.git
+	branch = thread-support
+[submodule "forks/tokio-imap"]
+	path = forks/tokio-imap
+	url = https://github.com/sdalu/imap-proto.git
+	branch = thread-support-0.16.x
