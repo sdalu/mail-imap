@@ -180,6 +180,10 @@ enum Command {
     /// List folders, or change the folder tree (create / rename /
     /// subscribe / unsubscribe — each needs access-level 'restructure')
     Folder {
+        /// Show each mailbox's hierarchy delimiter and LIST attributes
+        /// (\Sent, \Junk, \Noinferiors, ...) beside its name
+        #[clap(short = 'l', long = "long")]
+        long: bool,
         #[clap(subcommand)]
         action: Option<FolderAction>,
     },
@@ -452,8 +456,8 @@ fn main() {
     let debug = args.debug;
 
     let result = match &args.command {
-        Command::Folder { action } => match action {
-            None => cli::list_folders(&config, json, debug),
+        Command::Folder { long, action } => match action {
+            None => cli::list_folders(&config, json, debug, *long),
             Some(FolderAction::Create {
                 name,
                 use_attr,

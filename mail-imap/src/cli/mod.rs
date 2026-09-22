@@ -359,7 +359,15 @@ pub fn tags_known(json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn list_folders(config: &Config, json: bool, debug: bool) -> Result<()> {
+/// List mailboxes.
+///
+/// `long` adds the hierarchy delimiter and the LIST attributes to each
+/// line. They are off by default because the common use of this
+/// command is to find out what a folder is *called* so it can be typed
+/// back into `-f`, and a name buried in parentheses is harder to read
+/// off and harder to copy. JSON ignores `long` and always carries
+/// every field: it is read by a caller, which cannot ask again.
+pub fn list_folders(config: &Config, json: bool, debug: bool, long: bool) -> Result<()> {
     if debug {
         eprintln!("Connecting to {}:{} as {}", config.server, config.port, config.username);
     }
@@ -387,24 +395,37 @@ pub fn list_folders(config: &Config, json: bool, debug: bool) -> Result<()> {
 
     println!("Folders ({}):", folders.len());
     for f in folders {
-        let mut meta = Vec::new();
-        if let Some(d) = &f.delimiter {
-            if !d.is_empty() {
-                meta.push(format!("delim='{}'", d));
-            }
-        }
-        if f.no_inferiors {
-            meta.push("\\Noinferiors".to_string());
-        }
-        meta.extend(f.attrs.iter().cloned());
-        let extra = meta.join(" ");
-        if extra.is_empty() {
-            println!("  - {}", f.name);
-        } else {
-            println!("  - {} ({})", f.name, extra);
-        }
+        println!("{}", folder_line(&f, long));
     }
     Ok(())
+}
+
+/// One line of the `folder` listing.
+///
+/// Without `long` this is the name and nothing else, so it can be read
+/// off and typed straight back into `-f`. With it, the hierarchy
+/// delimiter and the LIST attributes follow in parentheses. A mailbox
+/// the server described with neither still prints as a bare name: an
+/// empty `()` would say something was withheld.
+fn folder_line(f: &FolderInfo, long: bool) -> String {
+    if !long {
+        return format!("  - {}", f.name);
+    }
+    let mut meta = Vec::new();
+    if let Some(d) = &f.delimiter {
+        if !d.is_empty() {
+            meta.push(format!("delim='{}'", d));
+        }
+    }
+    if f.no_inferiors {
+        meta.push("\\Noinferiors".to_string());
+    }
+    meta.extend(f.attrs.iter().cloned());
+    if meta.is_empty() {
+        format!("  - {}", f.name)
+    } else {
+        format!("  - {} ({})", f.name, meta.join(" "))
+    }
 }
 
 // ---------------------------------------------------------------- info
@@ -2549,5 +2570,40 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&out).unwrap()).expect("parse");
         assert_eq!(value["junk"], "contradictory");
+    }
+
+    // ------------------------------------------- the folder listing
+
+    fn folder(name: &str, delim: Option<&str>, no_inf: bool, attrs: &[&str]) -> FolderInfo {
+        FolderInfo {
+            name: name.to_string(),
+            delimiter: delim.map(|d| d.to_string()),
+            no_inferiors: no_inf,
+            attrs: attrs.iter().map(|a| a.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_plain_listing_prints_names_that_can_be_typed_back() {
+        // The name is what goes into -f, so nothing may sit beside it.
+        let f = folder("Sent Items", Some("/"), false, &["\\Sent"]);
+        assert_eq!(folder_line(&f, false), "  - Sent Items");
+    }
+
+    #[test]
+    fn long_adds_the_delimiter_and_the_list_attributes() {
+        let f = folder("Sent Items", Some("/"), false, &["\\Sent"]);
+        assert_eq!(folder_line(&f, true), "  - Sent Items (delim='/' \\Sent)");
+        let inbox = folder("INBOX", Some("/"), true, &[]);
+        assert_eq!(folder_line(&inbox, true), "  - INBOX (delim='/' \\Noinferiors)");
+    }
+
+    #[test]
+    fn a_mailbox_the_server_described_with_nothing_gets_no_empty_parentheses() {
+        // An empty "()" would read as something withheld.
+        let bare = folder("Odd", None, false, &[]);
+        assert_eq!(folder_line(&bare, true), "  - Odd");
+        let empty_delim = folder("Odd", Some(""), false, &[]);
+        assert_eq!(folder_line(&empty_delim, true), "  - Odd");
     }
 }

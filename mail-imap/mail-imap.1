@@ -138,8 +138,14 @@ Connects, sends
 and
 .Ic LIST ,
 and changes nothing.
-.It Cm folder
-List mailboxes.
+.It Cm folder Op Fl l
+List mailboxes, one name per line.
+.Fl l ,
+.Fl -long
+adds each mailbox\(aqs hierarchy delimiter and its LIST attributes
+.Pq Ic \eSent , \eJunk , \eNoinferiors , ...
+in parentheses after the name.
+JSON output carries every field either way.
 Its subcommands change the folder tree and need access level
 .Ic restructure .
 .Bl -tag -width Ds -compact

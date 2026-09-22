@@ -751,6 +751,14 @@ What is decided here is how they are shaped.
   the keyword names in `added`/`removed` are the atoms that went to the
   server. Text output is for a reader, who benefits from decoding; JSON
   is for a caller, who has to be able to send back what it was given.
+- **Text may show less than JSON, never something different.**
+  `folder` prints bare names until `-l`/`--long` asks for the
+  hierarchy delimiter and the LIST attributes, because the usual
+  reason to run it is to find out what a mailbox is *called* so the
+  name can go back into `-f`, and a name trailed by parentheses is
+  worse to read off and to copy. JSON ignores `-l` and always carries
+  every field: a caller cannot ask again, and a field that appears
+  only under a flag is a field no caller can rely on.
 - **The shapes are types, not `serde_json::json!` literals.** Every
   object above is a `#[derive(Serialize)]` struct in `src/cli/mod.rs`
   (or, for `FolderInfo`, `SearchResult`, `Mailbox` and `PartInfo`, the

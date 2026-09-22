@@ -145,7 +145,7 @@ takes the folder flags `-f`/`-A`; see [Folder selection](#folder-selection).
 | Command              | Syntax                                            | Description                                                                                                                                                                     |
 | -------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `info`               | `info`                                            | What this run can do and what the server is: access level, hierarchy delimiter, special-use mailboxes, and the wire path filing / sorting / threading take here                 |
-| `folder`             | `folder`                                          | List mailboxes/folders                                                                                                                                                          |
+| `folder`             | `folder [-l]`                                     | List mailboxes/folders; `-l`/`--long` adds each one's hierarchy delimiter and LIST attributes                                                                                   |
 | `folder create`      | `folder create <FOLDER> [--use <ATTR>] [--wire]`  | Create a mailbox, optionally declaring an RFC 6154 special use at creation: `archive`, `junk`, `sent`, `trash`, `drafts`, `all`, `flagged` (needs `access-level` `restructure`) |
 | `folder rename`      | `folder rename <FROM> <TO>`                       | Rename a mailbox; INBOX is refused at every level (needs `restructure`)                                                                                                         |
 | `folder subscribe`   | `folder subscribe <FOLDER>`                       | Subscribe to a mailbox (needs `restructure`)                                                                                                                                    |
@@ -574,8 +574,12 @@ mail-imap --config incal.conf -j info
 #### Folders
 
 ```bash
-# List folders
+# List folders -- just the names, so they can be typed back into -f
 mail-imap --config incal.conf folder
+
+# ... with each one's hierarchy delimiter and LIST attributes
+# (\Sent, \Junk, \Noinferiors, ...)
+mail-imap --config incal.conf folder -l
 
 # Change the folder tree (needs "access-level": "restructure")
 mail-imap --config incal.conf folder create Archive/2026

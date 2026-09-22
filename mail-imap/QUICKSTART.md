@@ -15,11 +15,11 @@ config, nothing to set up. Build once with `make build RELEASE=no`
 ```bash
 $ target/debug/mail-imap --mock folder
 Folders (5):
-  - INBOX (delim='/' \Noinferiors)
-  - Sent Items (delim='/' \Sent)
-  - Drafts (delim='/' \Drafts)
-  - Trash (delim='/' \Trash)
-  - Spam (delim='/' \Junk)
+  - INBOX
+  - Sent Items
+  - Drafts
+  - Trash
+  - Spam
 
 $ target/debug/mail-imap --mock search invoice
 Found 1 email(s) in 'INBOX' matching: invoice
