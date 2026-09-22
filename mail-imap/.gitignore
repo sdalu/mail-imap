@@ -1,5 +1,4 @@
 target/
-Cargo.lock
 *~
 # real configs contain credentials — ignore all .conf except the template
 *.conf
