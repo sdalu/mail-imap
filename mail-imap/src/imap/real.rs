@@ -61,16 +61,13 @@ fn is_poisoned(e: &imap::Error) -> bool {
 impl RealClient {
     pub fn connect(config: &Config, debug: bool) -> Result<Self> {
         let session = Self::establish_session(config, debug)?;
-        let mut client = RealClient {
+        let client = RealClient {
             session,
             config: config.clone(),
             debug,
             capabilities: None,
             closed: false,
         };
-        if debug {
-            client.ensure_capabilities();
-        }
         Ok(client)
     }
 
@@ -129,9 +126,6 @@ impl RealClient {
         self.session = Self::establish_session(&self.config, self.debug)
             .with_context(|| format!("reconnecting to {}", self.config.server))?;
         self.capabilities = None;
-        if self.debug {
-            self.ensure_capabilities();
-        }
         self.session
             .select(folder)
             .with_context(|| format!("re-selecting '{}' after reconnect", folder))?;
@@ -155,15 +149,14 @@ impl RealClient {
                     .collect::<BTreeSet<String>>()
             })
             .unwrap_or_default();
-        if self.debug {
-            if caps.is_empty() {
-                eprintln!("Could not fetch server capabilities");
-            } else {
-                eprintln!(
-                    "Server capabilities: {}",
-                    caps.iter().cloned().collect::<Vec<_>>().join(" ")
-                );
-            }
+        // The list itself is `info`'s to report, on its `advertises`
+        // line -- a debug trace repeating it is noise in front of the
+        // exchange it exists to show. A failed fetch still gets a word,
+        // because that is the one thing `info` cannot distinguish: an
+        // empty `advertises` looks the same whether the server named
+        // nothing or the CAPABILITY command failed.
+        if self.debug && caps.is_empty() {
+            eprintln!("Could not fetch server capabilities");
         }
         self.capabilities = Some(caps);
     }

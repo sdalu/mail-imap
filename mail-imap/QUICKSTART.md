@@ -5,49 +5,6 @@ Reads change nothing on the server -- they use `BODY.PEEK[]` -- and
 everything else is capped by an `access-level` in the config
 (`readonly` / `organize` / `restructure` / `full`).
 
-## Try it with no server
-
-A development build carries an in-memory mock backend: no server, no
-config, nothing to set up. It is a development aid rather than part of
-the product, so **the release binary is built without it** and `--mock`
-is not a flag there. Build one that has it -- `make build RELEASE=no`,
-which is what the rest of this page uses -- then paste these:
-
-```bash
-$ target/debug/mail-imap --mock folder list
-Folders (5):
-  - INBOX
-  - Sent Items
-  - Drafts
-  - Trash
-  - Spam
-
-$ target/debug/mail-imap --mock search invoice
-Found 1 email(s) in 'INBOX' matching: invoice
-  UID 5 | 2026-09-20 12:00:00 +0000 | Your invoice | billing@example.com  [120 bytes]  [2 part(s)]
-
-$ target/debug/mail-imap --mock read 5
-Subject: Your invoice
-From: billing@example.com
-Date: 2026-09-20 12:00:00 +0000
-
-Invoice #42 is due.
-```
-
-That's a full first query -- list, search, read -- against canned
-data, no account needed. `-j` gives the same thing as one line of
-JSON, for scripting:
-
-```bash
-$ target/debug/mail-imap --mock -j info
-{"tool":{"name":"mail-imap","version":"0.1.0","backend":"mock"},
- "config":{"path":null,"server":"localhost", ...}, "access":{...},
- "folders":{...}, "defaults":{...}, "server":{...}}
-```
-
-(trimmed and wrapped for this page; the real output is one line --
-see [`info`](README.md#info) for every field.)
-
 ## Point it at a real account
 
 A real account needs four fields: where to connect, who as, and how
@@ -79,28 +36,38 @@ the config's own default if the field is left out. See [Access
 level](README.md#access-level) for what each of the four levels
 permits.
 
-The same `--mock` commands above work unchanged once you swap
-`--mock` for `-c myaccount.conf`: `folder`, `search invoice`, `read
-5` (or whatever `search` finds) now reach the real server instead of
-the canned mock data. To confirm the file itself parses before
-risking a connection, run it with `--mock` still attached -- the
-backend stays mock, but the config really is read:
+Then a first query -- list, search, read:
 
 ```bash
-$ target/debug/mail-imap -c myaccount.conf --mock info
-mail-imap 0.1.0 (mock backend)
-  config      myaccount.conf
-  account     you@example.com@imap.example.com:993 (implicit TLS)
-  ...
+$ mail-imap -c myaccount.conf folder list
+$ mail-imap -c myaccount.conf search invoice
+$ mail-imap -c myaccount.conf read 5
 ```
 
-(trimmed -- `info` also reports the access level, the folder
-hierarchy delimiter, and which wire path each operation takes; see
-[`info`](README.md#info).)
+`info` is the one to run first, though: it reports what this run may
+change, which file it read the settings from, the folder hierarchy
+delimiter, and which wire path each operation will take on this
+server.
+
+```bash
+$ mail-imap -c myaccount.conf info
+```
+
+A config that will not parse is reported before anything connects --
+the error says `Configuration error:` and names the file -- so a typo
+never shows up as a mysterious network failure. `-j` gives any of
+these as one line of JSON, for scripting; see
+[`info`](README.md#info) for every field.
+
+Two commands need no account at all, and no config: `tag known`
+(the keywords with an agreed meaning, read from a table in the
+binary) and `--version`.
 
 ## What to read next
 
 - [README.md](README.md) -- every command, flag and config field.
-- [DESIGN.md](DESIGN.md) -- why it is shaped this way.
+- [DESIGN.md](DESIGN.md) -- why it is shaped this way, including the
+  in-memory mock backend that development builds carry for running the
+  suite without a server.
 - `mail-imap.1` -- the man page (`man mail-imap` after
   `make install`).

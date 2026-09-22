@@ -62,6 +62,50 @@ this morning is a claim, not a fact.
       template. `scripts/check-examples.sh` does not read configs, so nothing
       catches a stale one but this line.
 
+## Dependencies
+
+- [ ] **Has upstream taken the THREAD support yet?** `imap` and
+      `imap-proto` are local forks, and it is worth being exact about
+      why, because the answer is narrower than "RFC 5256":
+
+      | | upstream | the fork adds |
+      | --- | --- | --- |
+      | `SORT` (RFC 5256) | already there (`uid_sort`) | nothing |
+      | `THREAD` (RFC 5256) | missing | `uid_thread` + `extensions/thread.rs`, and the parser for untagged `THREAD` responses |
+
+      Two commits carry it, one per repository:
+
+      - `sdalu/rust-imap` — *Add support for the THREAD extension*
+      - the `imap-proto` fork — *Add parser support for the THREAD
+        extension*, tracked upstream as djc/tokio-imap#212
+
+      Note that the `imap-proto` fork calls itself **0.16.8**, a local
+      bump: crates.io has 0.16.7 and no 0.16.8 exists. A `cargo search`
+      showing 0.16.8 is the signal that the real thing shipped.
+
+      So, each round:
+
+      ```sh
+      cargo search imap-proto --limit 1     # > 0.16.7 with the THREAD parser?
+      cargo search imap --limit 1           # a release carrying uid_thread?
+      ```
+
+      If both have it: point `Cargo.toml` at versions instead of
+      `path = `, drop the submodules, and delete the fork trap from
+      CLAUDE.md. `make tests-wire` is what says the swap worked —
+      `a_reply_chain_is_threaded_from_the_headers` exercises the
+      feature the fork exists for. (It passes either way: the threading
+      falls back to client-side reconstruction when the server does not
+      advertise `THREAD=REFERENCES`, and the throwaway server does not.
+      So also run it against an account whose server does, or check
+      `info` reports `threading  server`.)
+
+      The debt is worth re-reading each round rather than settling in:
+      the forks are rebased by hand, they are why a checkout without
+      `../forks` does not build, and their own bugs are ours to carry —
+      the CRLF hole that let a folder name inject an IMAP command was
+      in the fork's `quote!`, not in this tree.
+
 ## Release
 
 - [ ] Does the number move? A change that alters no behaviour usually

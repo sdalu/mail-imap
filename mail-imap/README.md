@@ -10,22 +10,11 @@ does not even mark it `\Seen`. What it may change is capped by
 needs. See [Access level](#access-level).
 
 It connects to a **real IMAP server** using the `imap` crate (over implicit TLS
-on port 993, STARTTLS, or plain TCP). An **in-memory mock backend** is kept so
-the tool can be built, demoed and unit-tested without a reachable server.
+on port 993, STARTTLS, or plain TCP).
 
 ## Quick start
 
-Nothing to configure to see it work — the in-memory mock backend needs
-no server and no config at all:
-
-```bash
-make build RELEASE=no
-./target/debug/mail-imap --mock folder list
-./target/debug/mail-imap --mock search invoice
-./target/debug/mail-imap --mock -j info
-```
-
-For a real account, the smallest config that works is four fields:
+The smallest config that works is four fields:
 
 ```json
 {
@@ -68,7 +57,7 @@ what it does):
 | `make` (`help`)  | Print the target list and the current build variables                                                                                                           |
 | `make check`     | Preflight, running none of the project's code: clippy with warnings denied, the release number written only in `Cargo.toml`, and `man/mail-imap.1` well-formed mdoc |
 | `make build`     | Build the binary (`RELEASE=no` for a debug build, which is also the one that keeps `--mock`; release is the default and omits it)                                |
-| `make tests`     | The whole suite: `tests-unit` (cargo test) then `tests-examples` (every documented command line, run against `--mock`)                                          |
+| `make tests`     | The whole suite: `tests-unit` (cargo test) then `tests-examples` (every documented command line, run against the in-memory backend a development build carries) |
 | `make doc`       | Generate the API documentation (`cargo doc --no-deps`)                                                                                                          |
 | `make install`   | Install the binary under `BINDIR` and `man/mail-imap.1` under `MANDIR` (`DESTDIR` stages both)                                                                      |
 | `make uninstall` | Remove what `install` put down                                                                                                                                  |
@@ -213,7 +202,7 @@ option      = ( "-c" | "--config" ) , path
             | "--access-level" , level
             | ( "-M" | "--max" ) , number
             | ( "-S" | "--sort" ) , sort-spec
-            | "-j" | "--json" | "-d" | "--debug" | "--mock"
+            | "-j" | "--json" | "-d" | "--debug"
             | "-h" | "--help" | "-V" | "--version" ;
 
 command =
@@ -365,7 +354,7 @@ What each block is for:
 ```
 
 (shown wrapped; the real output is one line). `config.path` is `null`
-when no config file was read, which `--mock` allows.
+when no config file was read.
 
 ### Message selections
 
@@ -557,9 +546,7 @@ different atom. JSON always carries the wire form.
 
 Every line below is a complete command. They assume a config at
 `incal.conf`; drop `--config` to search `$MAIL_IMAP_CONFIG`,
-`~/.config/mail-imap.conf` and `/etc/mail-imap.conf` in turn, and add
-`--mock` to run any of them against the
-in-memory backend with no server and no config at all.
+`~/.config/mail-imap.conf` and `/etc/mail-imap.conf` in turn.
 
 #### Where am I, and what may this run do?
 
@@ -728,21 +715,18 @@ mail-imap --config incal.conf -f INBOX flag list --wire 12345
 ```
 
 The keywords with an agreed meaning — the IANA registry, then what
-clients write without one — need no server:
+clients write without one — are a table in the binary, so this one
+needs neither a server nor a config:
 
 ```bash
-mail-imap --mock tag known
+mail-imap tag known
 ```
 
-#### JSON, and trying it without a server
+#### JSON
 
 ```bash
 # One compact JSON object on stdout
 mail-imap --config incal.conf -j -f INBOX search "SINCE 01-Jan-2026"
-
-# The in-memory mock backend: no server, no config
-mail-imap --mock folder list
-mail-imap --mock search invoice
 ```
 
 
@@ -807,10 +791,9 @@ command.
   stdout; errors become `{"error": ...}` on stderr. See
   [JSON output](#json-output--j).
 - **`-d, --debug`** — trace the exchange on stderr: the backend and
-  access level in force, the server's capabilities, and which threading
-  and sort paths were taken.
-- **`--mock`** — use the in-memory mock backend instead of a real
-  server. Needs no config; an unreadable one is ignored.
+  access level in force, which threading and sort paths were taken, and
+  the commands as they go out. The capability list is not repeated here
+  — [`info`](#info) reports it on its `advertises` line.
 - **`-h, --help`** — print help and exit. Also on every subcommand
   (`mail-imap flag add --help`).
 - **`-V, --version`** — print the version and exit.
@@ -879,7 +862,6 @@ password of `30s` stays the text `30s` rather than becoming a number.
 | `folder`       | `INBOX`    | Default folder for commands that need one                                                                                 |
 | `max`          | `0`        | Cap on search results; `0` is no cap. Overridden by `-M/--max` on the command line                                        |
 | `sort`         | `null`     | Default sort spec for `search`/`unread` (same format as `-S/--sort`); overridden by `-S` on the command line              |
-| `mock`         | `false`    | Use the in-memory mock backend                                                                                            |
 | `delimiter`    | `null`     | The hierarchy delimiter `info` reports, overriding the server's own answer. Advisory only: nothing rewrites a folder name |
 | `access-level` | `organize` | How much this tool may change: `readonly`, `organize`, `restructure` or `full` — see [Access level](#access-level)        |
 

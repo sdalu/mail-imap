@@ -10,10 +10,10 @@ line becomes per-folder UID groups.
 Operations are exposed through the `ImapBackend` trait (`src/imap/mod.rs`).
 Two implementations exist and are selected by `Config::mock`:
 
-| Backend      | File               | Used by                                        |
-| ------------ | ------------------ | ---------------------------------------------- |
-| `RealClient` | `src/imap/real.rs` | The released binary (real servers)             |
-| `MockClient` | `src/imap/mock.rs` | Tests / demos (in-memory, the original mockup) |
+| Backend      | File               | Used by                                                     |
+| ------------ | ------------------ | ----------------------------------------------------------- |
+| `RealClient` | `src/imap/real.rs` | The released binary (real servers)                           |
+| `MockClient` | `src/imap/mock.rs` | Development builds only — the suite, and `check-examples.sh` |
 
 The CLI always calls the trait; it does not know which backend is active.
 `ImapClient::connect` picks one:
@@ -687,6 +687,59 @@ to its fixed message set with the same client-side comparator the real
 backend uses as fallback. `flag`/`tag` mutate an in-memory per-UID
 keyword set (`message_flags`), which shows up in the `flags` of subsequent
 mock `search` results.
+
+### It is a development aid, and does not ship
+
+The mock sits behind a cargo feature, `mock`, which is on by default and
+which the release build turns off (`F_yes = --no-default-features` in
+the Makefile). So `make build` produces a binary where `--mock` is an
+unknown argument and `--help` does not offer it, while
+`make build RELEASE=no` keeps it — which is what `make tests`,
+`scripts/check-examples.sh` and QUICKSTART's worked example all use.
+
+A build without it does not silently fall back to a real server when a
+config says `mock = true`: it refuses to start. `--mock` means *do not
+touch my account*, and quietly touching it is the worst available
+reading of that flag.
+
+`make check` lints both configurations. `cfg`-gated code that compiles
+one way and not the other is exactly the failure this arrangement
+invites, and linting only the default would not see it.
+
+### It is held to what a real server does
+
+A fake is only worth having if it behaves like the thing it stands in
+for, and for a long time this one did not — its behaviour was reasoned
+about rather than checked. Measured against a real server, it was wrong
+in four places, in two opposite directions:
+
+| | real server | mock, before |
+| --- | --- | --- |
+| `UID STORE` / `UID MOVE` naming a UID that does not exist | `OK`, ignored (RFC 3501 §6.4.8) | refused |
+| anything naming a mailbox that does not exist | error — it `SELECT`s first | answered anyway |
+
+Which direction a fake is wrong in matters more than that it is wrong.
+Being **stricter** than the real thing is the dangerous one, because it
+turns a live defect into an offline pass: `tag junk` on a missing UID
+reported success on the wire and could not be reproduced under `--mock`,
+because the mock refused where the server shrugs. Being laxer is the
+same mistake facing the other way — `-f Nonexistent` succeeded here and
+failed on the wire.
+
+`tests/wire.rs::the_mock_answers_like_a_real_server` is what stops this
+drifting again. One list of probes is run against both backends and
+they must agree on **which calls are refused** — not on the messages,
+since a mock saying `no mailbox 'x' (mock)` and a server saying
+`SELECT failed. No such mailbox` are the same answer in different
+words, and not on content, since the two hold different mail. It runs
+under `make tests-wire`, because checking a fake against a real server
+needs the real server.
+
+What the mock deliberately does *not* imitate: it advertises no
+capabilities at all, which is the point — it stands in for the barest
+server there is, so every degradation ladder is exercised offline. And
+it holds the same five messages in every folder, a simplification the
+fixtures depend on.
 
 ## Testing
 

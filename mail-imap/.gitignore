@@ -3,7 +3,6 @@ target/
 # real configs contain credentials — ignore all .conf except the template
 *.conf
 !example.conf
-incal.conf
 # cargo-mutants scratch output
 mutants.out/
 mutants.out.old/

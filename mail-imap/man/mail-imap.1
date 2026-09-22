@@ -14,7 +14,6 @@
 .Op Fl S Ar spec
 .Op Fl d
 .Op Fl j
-.Op Fl -mock
 .Cm command
 .Op Ar args ...
 .Nm
@@ -39,14 +38,6 @@ and every changing command names the level it needs.
 .Nm
 connects to a real IMAP server over implicit TLS, STARTTLS, or plain
 TCP.
-A development build also carries an in-memory mock backend
-.Pq Fl -mock
-letting every command run with no server and no config, for testing and
-demonstration.
-It is a development aid rather than part of the product, so the released
-binary is built without it and
-.Fl -mock
-is not an option there.
 .Sh OPTIONS
 .Nm
 takes global options anywhere on the command line, before or after
@@ -103,12 +94,11 @@ or
 .Ic full .
 Can only lower what the config allows, never raise it.
 .It Fl d , Fl -debug
-Trace the exchange on stderr: the backend and access level, the
-capabilities, and which sort and threading path were taken.
-.It Fl -mock
-Use the in-memory mock backend instead of a real server.
-Development builds only: the released binary omits it, and rejects this
-option as unknown.
+Trace the exchange on stderr: the backend and access level, and which
+sort and threading path were taken.
+The capability list is not repeated here;
+.Ic info
+reports it.
 .It Fl j , Fl -json
 Output results as one compact JSON object on stdout.
 Errors go to stderr as a JSON object with one key,
@@ -514,12 +504,6 @@ overridden by
 .Fl S .
 Default
 .Ic null .
-.It Ic mock
-Use the in-memory mock backend.
-A build without it refuses to start rather than reaching for a real
-server the caller did not ask for.
-Default
-.Ic false .
 .It Ic delimiter
 The hierarchy delimiter
 .Cm info
@@ -640,10 +624,10 @@ $ mail-imap -c incal.conf -f INBOX flag add 12345 67890 flagged
 $ mail-imap -c incal.conf -f INBOX flag list --wire 12345
 .Ed
 .Pp
-Run against the in-memory mock backend, no server or config needed:
+The keywords with an agreed meaning are a table in the binary, so this
+needs neither a server nor a config:
 .Bd -literal -offset indent
-$ mail-imap --mock folder
-$ mail-imap --mock tag known
+$ mail-imap tag known
 .Ed
 .Sh SEE ALSO
 .Pa README.md ,

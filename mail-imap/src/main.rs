@@ -447,6 +447,23 @@ enum PartsAction {
 fn main() {
     let args = Args::parse();
 
+    // `tag known` reads a table compiled into the binary: no account,
+    // no server, and so no config either. Answering it before the
+    // config is loaded is what keeps that true -- otherwise the one
+    // command that needs nothing is the one refusing to run for want
+    // of a file it never reads. (While --mock existed this was hidden:
+    // it was the documented way to run this command, and it happened
+    // to make a missing config non-fatal.)
+    if let Command::Tag {
+        action: TagAction::Known,
+    } = &args.command
+    {
+        if let Err(e) = cli::tags_known(args.json) {
+            fail(args.json, &format!("{:#}", e));
+        }
+        return;
+    }
+
     // `info` reports which file the rest of the run read; under --mock
     // there may well be none, and saying so beats naming a path that
     // was never opened.
