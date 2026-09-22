@@ -18,7 +18,7 @@ pub enum AccessLevel {
     #[serde(rename = "readonly", alias = "read-only")]
     ReadOnly,
     /// Read, plus the changes that keep every message: set and clear
-    /// flags and keywords, and file mail into another folder. `\Deleted`
+    /// flags and tags, and move mail to another folder. `\Deleted`
     /// cannot be *set* here — it is the one flag whose point is removal
     /// — though it can be cleared, which rescues a message rather than
     /// losing one.
@@ -320,7 +320,7 @@ mod tests {
         assert!(!AccessLevel::ReadOnly.may_change_folders());
         assert!(
             !AccessLevel::Organize.may_change_folders(),
-            "it files mail into folders that exist; it does not make them"
+            "it moves mail into folders that exist; it does not make them"
         );
         assert!(AccessLevel::Restructure.may_change_folders());
         assert!(AccessLevel::Full.may_change_folders());

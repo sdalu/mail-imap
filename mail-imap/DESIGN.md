@@ -97,7 +97,7 @@ nothing.
   the server said, `info` prints both: silently preferring one would
   hide exactly the case the field is for.
 - **Capabilities are reported as the path taken, not as names.**
-  `MOVE`/`UIDPLUS` become `filing mail: UID MOVE | UID COPY + UID
+  `MOVE`/`UIDPLUS` become `moving mail: UID MOVE | UID COPY + UID
   EXPUNGE | refused`, `SORT` and `THREAD=REFERENCES` become
   `server-side`/`client-side`. The raw list is printed too, but the
   derived line is the one a caller can act on, and it is derived by the
@@ -224,7 +224,7 @@ Two asymmetries are deliberate:
 
 The two rungs above `readonly` draw different lines. `organize` is
 about messages: nothing is lost, and the folder tree is left exactly as
-it was found — it files mail into folders that exist, it does not make
+it was found — it moves mail into folders that exist, it does not make
 them. `restructure` is about the tree: `create_folder`,
 `rename_folder` and `set_subscribed` are gated by
 `check_folder_change`, and still nothing is lost, since deleting a
@@ -249,7 +249,7 @@ Two things sit outside the ladder on purpose:
   `\HasChildren`, `\Marked` — are not settable by any client and are
   not offered.
 
-### Filing mail (`move`)
+### Moving mail (`move`)
 
 `UID MOVE` (RFC 6851) is one command and the server does the rest.
 Without it the sequence is `UID COPY`, then `\Deleted` on the

@@ -941,7 +941,7 @@ impl ImapBackend for RealClient {
             // marked. Refusing beats quietly deleting a stranger's mail.
             bail!(
                 "the server advertises neither MOVE (RFC 6851) nor UIDPLUS (RFC 4315), \
-                 so filing mail would have to end in a plain EXPUNGE -- which removes \
+                 so moving mail would have to end in a plain EXPUNGE -- which removes \
                  every message marked \\Deleted in '{}', not only these. Refusing",
                 folder
             );

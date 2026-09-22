@@ -113,7 +113,7 @@ cargo run -- --help
   (`-S`/`--sort`): server-side `UID SORT` (RFC 5256) when the server
   advertises `SORT`, client-side sorting otherwise
 - List the MIME parts of an email, and save one part to a file
-- File email(s) into another folder, named last as `mv` does: `UID MOVE`
+- Move email(s) to another folder, named last as `mv` does: `UID MOVE`
   (RFC 6851) where the server has it, `UID COPY` + `UID EXPUNGE`
   (RFC 4315) where it does not, and a refusal where it has neither
   (`access-level` `organize`)
@@ -298,10 +298,10 @@ mail-imap 0.1.0 (real backend)
   account     user@example.com@imap.example.com:993 (implicit TLS)
 
 Access level: organize
-  set and clear flags and keywords   yes
-  file mail into another folder      yes
-  create / rename / subscribe        no
-  set \Deleted                       no
+  set and clear flags and tags        yes
+  move mail to another folder         yes
+  create / rename / subscribe         no
+  set \Deleted                        no
 
 Folders
   delimiter   '/' (from the server)
@@ -318,7 +318,7 @@ Search defaults
   sort        (none: most recent first)
 
 This server
-  filing mail         UID MOVE
+  moving mail         UID MOVE
   sorting (-S)        server-side
   threading           server-side
   folder create --use available
@@ -645,7 +645,7 @@ mail-imap --config incal.conf -f INBOX read '*'
 mail-imap --config incal.conf read Archive::12345 "Sent Items::1-5"
 ```
 
-#### Filing mail
+#### Moving mail
 
 The folder is named last, as `mv` has it. Needs `"access-level":
 "organize"`, and the target folder has to exist already.
@@ -874,12 +874,12 @@ password of `30s` stays the text `30s` rather than becoming a number.
 `access-level` in the config says how much of the account this tool may
 change. The levels are a ladder, each permitting everything below it:
 
-| Level         | Permits                                                                                    |
-| ------------- | ------------------------------------------------------------------------------------------ |
-| `readonly`    | Nothing changes. Reads use `BODY.PEEK[]`, so even `\Seen` stays as it was                  |
-| `organize`    | *(default)* Read, plus set and clear flags and keywords, and file mail into another folder |
-| `restructure` | That, plus the folder tree: `folder create`, `rename`, `subscribe`, `unsubscribe`          |
-| `full`        | Everything the tool can do, including setting `\Deleted`                                   |
+| Level         | Permits                                                                              |
+| ------------- | ------------------------------------------------------------------------------------ |
+| `readonly`    | Nothing changes. Reads use `BODY.PEEK[]`, so even `\Seen` stays as it was            |
+| `organize`    | *(default)* Read, plus set and clear flags and tags, and move mail to another folder |
+| `restructure` | That, plus the folder tree: `folder create`, `rename`, `subscribe`, `unsubscribe`    |
+| `full`        | Everything the tool can do, including setting `\Deleted`                             |
 
 The two lines the ladder draws: `organize` is about **messages** —
 nothing is lost, so `\Deleted` cannot be *set* (it can be cleared,
@@ -912,10 +912,10 @@ other client with the same password. It is a guard against *this* tool
 doing more than you meant it to — which matters most when an agent is
 driving it.
 
-Filing mail needs `MOVE` (RFC 6851) or `UIDPLUS` (RFC 4315) on the
+Moving mail needs `MOVE` (RFC 6851) or `UIDPLUS` (RFC 4315) on the
 server; with neither, `move` is **refused** rather than served. `info`
 reports which of the two paths this account will take — see
-[Filing mail](DESIGN.md#filing-mail-move) for why the third is a
+[Moving mail](DESIGN.md#moving-mail-move) for why the third is a
 refusal.
 
 ## Testing

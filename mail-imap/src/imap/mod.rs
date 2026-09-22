@@ -307,7 +307,7 @@ impl ImapClient {
     }
 
     /// Refuse a change to the folder tree the access level does not
-    /// allow. `organize` stops here on purpose: it files mail into
+    /// allow. `organize` stops here on purpose: it moves mail into
     /// folders that exist and leaves the tree as it found it.
     fn check_folder_change(&self, what: &str) -> Result<()> {
         if !self.access.may_change_folders() {
@@ -399,7 +399,7 @@ impl ImapBackend for ImapClient {
     fn move_messages(&mut self, folder: &str, uids: &[u32], to: &str) -> Result<()> {
         if !self.access.may_move() {
             bail!(
-                "access level '{}' allows no changes, and filing mail into '{}' is one: \
+                "access level '{}' allows no changes, and moving mail to '{}' is one: \
                  raise \"access-level\" to 'organize' in the config",
                 self.access.as_str(),
                 to

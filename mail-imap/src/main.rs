@@ -219,7 +219,7 @@ enum Command {
     },
     /// List unread emails of the selected folder(s)
     Unread,
-    /// File email(s) into another folder, named last, as `mv` does:
+    /// Move email(s) to another folder, named last, as `mv` does:
     /// `move 1-5 Archive` (needs access-level 'organize'; the folder
     /// must already exist)
     #[clap(after_help = SELECTION_HELP)]

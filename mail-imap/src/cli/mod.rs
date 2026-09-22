@@ -701,10 +701,13 @@ fn print_info(i: &InfoOutput) {
     if i.access.effective != i.access.configured {
         println!("  (narrowed for this run; the config allows {})", i.access.configured);
     }
-    println!("  set and clear flags and keywords   {}", yes_no(i.access.may.store_flags));
-    println!("  file mail into another folder      {}", yes_no(i.access.may.move_messages));
-    println!("  create / rename / subscribe        {}", yes_no(i.access.may.change_folders));
-    println!("  set \\Deleted                       {}", yes_no(i.access.may.set_deleted));
+    // Width, not hand-counted spaces: the labels change, the column
+    // should not have to be re-counted when they do.
+    const MAY: usize = 35;
+    println!("  {:<MAY$} {}", "set and clear flags and tags", yes_no(i.access.may.store_flags));
+    println!("  {:<MAY$} {}", "move mail to another folder", yes_no(i.access.may.move_messages));
+    println!("  {:<MAY$} {}", "create / rename / subscribe", yes_no(i.access.may.change_folders));
+    println!("  {:<MAY$} {}", "set \\Deleted", yes_no(i.access.may.set_deleted));
 
     println!();
     println!("Folders");
@@ -766,7 +769,7 @@ fn print_info(i: &InfoOutput) {
 
     println!();
     println!("This server");
-    println!("  {:<19} {}", "filing mail", i.server.filing);
+    println!("  {:<19} {}", "moving mail", i.server.filing);
     println!("  {:<19} {}-side", "sorting (-S)", i.server.sorting);
     println!("  {:<19} {}-side", "threading", i.server.threading);
     println!(
