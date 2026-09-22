@@ -8,5 +8,8 @@
     "insecure": false,
     "folder": "INBOX",
     "max": 50,
-    "mock": false
+    "sort": null,
+    "mock": false,
+    "delimiter": null,
+    "access-level": "organize"
 }

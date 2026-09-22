@@ -9,13 +9,14 @@
 //! ```text
 //! 12345            the default folder (-f, or "folder" from the config)
 //! 1,4,7            a list
-//! 1-9              a UID range (IMAP's 1:9 is accepted too)
+//! 1-9              a UID range
 //! 3,9-12           a mix
-//! *                every message of the folder
-//! 9-*              from UID 9 to the end ('9-' says the same, unquoted)
-//!                  (only this way round: '*-9' is refused as misleading)
+//! *                every message of the folder (and '*' is only this)
+//! last:20          the 20 newest messages (a count, not an interval)
+//! first:5          the 5 oldest
+//! 9-               from UID 9 to the end of the mailbox
 //! Archive::1-5     a folder-qualified selection ('::' binds the folder,
-//!                  so a single ':' is free to be IMAP's range operator)
+//!                  so a single ':' is free to introduce a count)
 //! ```
 //!
 //! A **folder pattern** names mailboxes: a literal name, or an IMAP
@@ -33,14 +34,14 @@ pub enum UidItem {
     One(u32),
     /// An inclusive interval, endpoints normalized so low <= high.
     Range(u32, u32),
-    /// `n-*`: from `n` to the highest UID in the folder.
+    /// `n-`: from `n` to the highest UID in the folder.
     From(u32),
     /// `*`: every message in the folder.
     All,
-    /// `--last N`: the N newest messages, i.e. the N highest UIDs.
+    /// `last:N`: the N newest messages, i.e. the N highest UIDs.
     /// A count, not an interval — the thing no UID range can express.
     Last(u32),
-    /// `--first N`: the N oldest messages, i.e. the N lowest UIDs.
+    /// `first:N`: the N oldest messages, i.e. the N lowest UIDs.
     First(u32),
 }
 
@@ -56,9 +57,22 @@ pub struct Selection {
 
 impl Selection {
     /// Whether resolving this selection needs the folder's UID list
-    /// (true as soon as it holds a range or `*`).
+    /// (true as soon as it holds a range, a count or `*`).
     pub fn needs_uid_list(&self) -> bool {
         !self.items.iter().all(|i| matches!(i, UidItem::One(_)))
+    }
+
+    /// Whether every item is a count (`last:20`, `first:5`).
+    ///
+    /// A count names no UID, so it is not ambiguous across folders the
+    /// way a bare UID is: it means N *per folder*, and an unqualified
+    /// one applies to each folder `-f`/`-A` selected.
+    pub fn is_count_only(&self) -> bool {
+        !self.items.is_empty()
+            && self
+                .items
+                .iter()
+                .all(|i| matches!(i, UidItem::Last(_) | UidItem::First(_)))
     }
 
     /// Resolve to concrete UIDs.
@@ -136,16 +150,16 @@ fn show_item(item: &UidItem) -> String {
     match item {
         UidItem::One(uid) => uid.to_string(),
         UidItem::Range(low, high) => format!("{}-{}", low, high),
-        UidItem::From(low) => format!("{}-*", low),
+        UidItem::From(low) => format!("{}-", low),
         UidItem::All => "*".to_string(),
-        UidItem::Last(n) => format!("--last {}", n),
-        UidItem::First(n) => format!("--first {}", n),
+        UidItem::Last(n) => format!("last:{}", n),
+        UidItem::First(n) => format!("first:{}", n),
     }
 }
 
-/// Parse a UID spec: a comma-separated list of UIDs, ranges (`4-7`, or
-/// IMAP's `4:7`), open ranges (`9-*`, or `9-` for the same without the
-/// character the shell expands) and `*`.
+/// Parse a UID spec: a comma-separated list of UIDs, ranges (`4-7`),
+/// ranges running to the end of the mailbox (`9-`), counts (`last:20`,
+/// `first:5`) and `*` for every message.
 fn parse_uid_items(spec: &str) -> Result<Vec<UidItem>> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -163,17 +177,50 @@ fn parse_uid_items(spec: &str) -> Result<Vec<UidItem>> {
 }
 
 fn parse_uid_item(token: &str, spec: &str) -> Result<UidItem> {
+    // '*' is every message, and that is all it is: it is not a range
+    // endpoint. "From 9 to the end" is '9-'.
     if token == "*" {
         return Ok(UidItem::All);
     }
-    let sep = token.find(['-', ':']);
-    let Some(sep) = sep else {
+    if token.contains('*') {
+        bail!(
+            "invalid item '{}' in '{}': '*' means every message and stands alone; \
+             for a range running to the end of the mailbox write 9-",
+            token,
+            spec
+        );
+    }
+    // A count, not an interval. ':' is this and nothing else — it is
+    // not IMAP's range operator here, and '::' binds the folder.
+    if let Some((word, n)) = token.split_once(':') {
+        if word.eq_ignore_ascii_case("last") || word.eq_ignore_ascii_case("first") {
+            let count: u32 = n.parse().map_err(|_| {
+                anyhow::anyhow!("'{}' needs a count, as in {}:20 (in '{}')", word, word, spec)
+            })?;
+            if count == 0 {
+                bail!("'{}' asks for no messages (in '{}')", token, spec);
+            }
+            return Ok(if word.eq_ignore_ascii_case("last") {
+                UidItem::Last(count)
+            } else {
+                UidItem::First(count)
+            });
+        }
+        bail!(
+            "invalid item '{}' in '{}': ':' introduces a count (last:20, first:5); \
+             a folder is bound with '::' and a range written with '-'",
+            token,
+            spec
+        );
+    }
+    let Some(sep) = token.find('-') else {
         return Ok(UidItem::One(parse_uid(token, spec)?));
     };
     let (low, high) = (&token[..sep], &token[sep + 1..]);
-    if high.contains(['-', ':']) {
+    if high.contains('-') {
         bail!(
-            "invalid range '{}' in UID spec '{}': a range is LOW-HIGH (e.g. 4-7, 9-*)",
+            "invalid range '{}' in UID spec '{}': a range is LOW-HIGH (4-7) or LOW- \
+             (4 to the end)",
             token,
             spec
         );
@@ -181,31 +228,17 @@ fn parse_uid_item(token: &str, spec: &str) -> Result<UidItem> {
     match (low, high) {
         // A missing lower end would have to be written '-20', which the
         // argument parser reads as an option anyway. For "the first N
-        // messages" there is --first.
+        // messages" there is first:N.
         ("", _) => bail!(
             "invalid range '{}' in UID spec '{}': a range needs a lower end \
-             (write 1-{}, or --first N for a count)",
+             (write 1-{}, or first:{} for a count)",
             token,
             spec,
+            high,
             high
         ),
-        ("*", "") | ("*", "*") => Ok(UidItem::All),
-        // IMAP accepts the open range both ways round, but '*-4' reads
-        // as "up to 4" to half its readers and means "4 to the end";
-        // and in a selection it looks like a folder wildcard. One
-        // spelling only.
-        ("*", n) => bail!(
-            "invalid range '{}' in UID spec '{}': write the open range as {}-* \
-             (it means {} to the end, not up to {})",
-            token,
-            spec,
-            n,
-            n,
-            n
-        ),
-        // '9-' is '9-*' without the character the shell expands.
+        // '9-' is 9 to the end of the mailbox.
         (n, "") => Ok(UidItem::From(parse_uid(n, spec)?)),
-        (n, "*") => Ok(UidItem::From(parse_uid(n, spec)?)),
         (a, b) => {
             let (a, b) = (parse_uid(a, spec)?, parse_uid(b, spec)?);
             Ok(UidItem::Range(a.min(b), a.max(b)))
@@ -233,7 +266,7 @@ pub fn parse_selection(token: &str) -> Result<Selection> {
 
     // '::' binds a folder to a UID spec, and it is the only thing that
     // does. A single ':' therefore belongs entirely to the UID spec,
-    // where it is IMAP's range operator — so '1:5' is the range 1-5,
+    // where it introduces a count — so 'last:3' is the 3 newest,
     // '2026::5' is UID 5 of a folder named 2026, and neither has to be
     // guessed at. Split at the LAST '::', so a folder whose own name
     // contains '::' is still writable.
@@ -247,7 +280,7 @@ pub fn parse_selection(token: &str) -> Result<Selection> {
         }
         return Ok(Selection {
             folder: None,
-            items: describe_uid_error(parse_uid_items(token), token)?,
+            items: describe_uid_error(parse_uid_items(token))?,
             source,
         });
     };
@@ -264,33 +297,18 @@ pub fn parse_selection(token: &str) -> Result<Selection> {
     }
     Ok(Selection {
         folder: Some(canonical_folder(left)),
-        items: describe_uid_error(parse_uid_items(right), token)?,
+        items: describe_uid_error(parse_uid_items(right))?,
         source,
     })
 }
 
-/// Turn a UID-spec error into one about the whole selection. The
-/// likeliest slip is one colon where two are needed, so name that fix
-/// rather than reciting the grammar.
-fn describe_uid_error(result: Result<Vec<UidItem>>, token: &str) -> Result<Vec<UidItem>> {
+/// Turn a UID-spec error into one about the whole selection, adding
+/// what a selection looks like.
+fn describe_uid_error(result: Result<Vec<UidItem>>) -> Result<Vec<UidItem>> {
     result.map_err(|e| {
-        // Only when the token has no '::' of its own, and the left side
-        // could actually be a folder name — otherwise the underlying
-        // error (a bad range, say) is the more useful one.
-        if let Some(sep) = token.rfind(':').filter(|_| !token.contains("::")) {
-            let (left, right) = (&token[..sep], &token[sep + 1..]);
-            if !left.is_empty() && !left.contains(['*', '%']) && parse_uid_items(right).is_ok() {
-                return anyhow::anyhow!(
-                    "invalid message selection '{}': a folder is bound to a UID spec \
-                     with '::' — did you mean '{}::{}'?",
-                    token,
-                    left,
-                    right
-                );
-            }
-        }
         anyhow::anyhow!(
-            "{} (a selection is [FOLDER::]UIDS, e.g. 5, 1,4,7, 1-9, '*', Archive::1-5)",
+            "{} (a selection is [FOLDER::]UIDS, e.g. 5, 1,4,7, 1-9, 9-, '*', \
+             last:20, Archive::1-5)",
             e
         )
     })
@@ -424,39 +442,47 @@ mod tests {
     }
 
     #[test]
-    fn ranges_parse_in_both_notations_and_normalize() {
+    fn ranges_use_a_hyphen_and_normalize() {
         assert_eq!(sel("4-7").items, vec![UidItem::Range(4, 7)]);
-        assert_eq!(sel("4:7").items, vec![UidItem::Range(4, 7)]);
         assert_eq!(sel("7-4").items, vec![UidItem::Range(4, 7)]);
     }
 
     #[test]
-    fn star_forms_parse() {
-        assert_eq!(sel("*").items, vec![UidItem::All]);
-        assert_eq!(sel("9-*").items, vec![UidItem::From(9)]);
-        assert_eq!(sel("*:*").items, vec![UidItem::All]);
+    fn imaps_colon_range_is_not_taken() {
+        // ':' is last:N / first:N here, and '::' binds the folder.
+        // Accepting IMAP's own 4:7 as well would give one concept two
+        // spellings and put ':' back to doing two jobs.
+        let err = parse_selection("4:7").expect_err("':' is not a range operator");
+        assert!(err.to_string().contains("count"), "{}", err);
+        // The message names the form to use, not the one refused.
+        assert!(!err.to_string().contains("4::7"), "{}", err);
+        assert!(parse_selection("9:").is_err());
+        assert!(parse_selection("1:*").is_err());
     }
 
     #[test]
-    fn the_reversed_open_range_is_refused() {
-        // IMAP accepts '*:9', but half its readers take it for "up to 9"
-        // (it is 9 to the end), and in a selection it looks like a
-        // folder wildcard — which is how '*:4' slipped past the
-        // wildcard refusal. One spelling only.
-        for bad in ["*-9", "*:9", "INBOX::*:9"] {
+    fn star_is_every_message_and_only_that() {
+        assert_eq!(sel("*").items, vec![UidItem::All]);
+        assert_eq!(sel("INBOX::*").items, vec![UidItem::All]);
+        // Not a range endpoint, in either position or any spelling.
+        for bad in ["9-*", "*-9", "*:*", "*-*", "1,*-9", "INBOX::9-*"] {
             let err = parse_selection(bad).expect_err(bad);
-            assert!(err.to_string().contains("9-*"), "{}: {}", bad, err);
+            assert!(
+                err.to_string().contains("stands alone")
+                    || err.to_string().contains("wildcards are not allowed"),
+                "{}: {}",
+                bad,
+                err
+            );
         }
     }
 
     #[test]
-    fn an_open_range_can_be_written_without_the_star() {
-        // '9-' is '9-*' the shell cannot glob.
+    fn a_trailing_hyphen_runs_to_the_end_of_the_mailbox() {
         assert_eq!(sel("9-").items, vec![UidItem::From(9)]);
-        assert_eq!(sel("9:").items, vec![UidItem::From(9)]);
         assert_eq!(sel("1-").items, vec![UidItem::From(1)]);
-        assert_eq!(sel("*-").items, vec![UidItem::All]);
         assert_eq!(sel("3,20-").items, vec![UidItem::One(3), UidItem::From(20)]);
+        assert_eq!(sel("Archive::20-").items, vec![UidItem::From(20)]);
     }
 
     #[test]
@@ -483,8 +509,8 @@ mod tests {
         // IMAP would fold 99:* onto the last message; the tool errors
         // instead, so a mutation aimed past the end of the mailbox
         // neither hits the newest message nor passes silently.
-        assert!(sel("99-*").resolve(Some(&[1, 2, 3])).is_err());
-        assert_eq!(sel("2-*").resolve(Some(&[1, 2, 3])).unwrap(), vec![2, 3]);
+        assert!(sel("99-").resolve(Some(&[1, 2, 3])).is_err());
+        assert_eq!(sel("2-").resolve(Some(&[1, 2, 3])).unwrap(), vec![2, 3]);
         assert_eq!(sel("*").resolve(Some(&[1, 2, 3])).unwrap(), vec![1, 2, 3]);
     }
 
@@ -494,14 +520,14 @@ mod tests {
         let last = Selection {
             folder: None,
             items: vec![UidItem::Last(2)],
-            source: "--last 2".into(),
+            source: "last:2".into(),
         };
         assert!(last.needs_uid_list());
         assert_eq!(last.resolve(Some(&available)).unwrap(), vec![40, 41]);
         let first = Selection {
             folder: None,
             items: vec![UidItem::First(2)],
-            source: "--first 2".into(),
+            source: "first:2".into(),
         };
         assert_eq!(first.resolve(Some(&available)).unwrap(), vec![3, 7]);
     }
@@ -511,7 +537,7 @@ mod tests {
         let sel = Selection {
             folder: None,
             items: vec![UidItem::Last(99)],
-            source: "--last 99".into(),
+            source: "last:99".into(),
         };
         assert_eq!(sel.resolve(Some(&[3, 7])).unwrap(), vec![3, 7]);
         // ... but an empty mailbox matches nothing, which is an error
@@ -520,11 +546,26 @@ mod tests {
     }
 
     #[test]
-    fn a_recency_count_is_not_spellable_as_a_selection_token() {
-        // 'last:20' is not a UID spec and names no folder with '::',
-        // so a count has to be a flag.
-        assert!(parse_selection("last:20").is_err());
-        assert!(parse_selection("~20").is_err());
+    fn counts_are_spellable_because_the_single_colon_is_free() {
+        assert_eq!(sel("last:20").items, vec![UidItem::Last(20)]);
+        assert_eq!(sel("first:5").items, vec![UidItem::First(5)]);
+        assert_eq!(sel("LAST:3").items, vec![UidItem::Last(3)]);
+        assert!(sel("last:20").is_count_only());
+        assert!(sel("last:3,first:3").is_count_only());
+        assert!(!sel("1,last:3").is_count_only(), "a UID is in there too");
+        assert!(!sel("1-5").is_count_only());
+        // Folder-qualified, which is what '::' freed the colon for.
+        let s = sel("Archive::last:5");
+        assert_eq!(s.folder.as_deref(), Some("Archive"));
+        assert_eq!(s.items, vec![UidItem::Last(5)]);
+    }
+
+    #[test]
+    fn a_count_needs_a_number() {
+        assert!(parse_selection("last:").is_err());
+        assert!(parse_selection("last:x").is_err());
+        assert!(parse_selection("last:0").is_err());
+        assert!(parse_selection("~20").is_err(), "not a spelling we take");
     }
 
     #[test]
@@ -543,28 +584,15 @@ mod tests {
     fn the_double_colon_frees_the_single_one() {
         // Everything the single-colon binding had to refuse or guess at
         // is now plain, because ':' belongs to the UID spec alone.
-        assert_eq!(sel("INBOX::1:5").folder.as_deref(), Some("INBOX"));
-        assert_eq!(sel("INBOX::1:5").items, vec![UidItem::Range(1, 5)]);
+        assert_eq!(sel("INBOX::1-5").folder.as_deref(), Some("INBOX"));
+        assert_eq!(sel("INBOX::1-5").items, vec![UidItem::Range(1, 5)]);
         // a folder whose name is a UID spec:
         assert_eq!(sel("2026::5").folder.as_deref(), Some("2026"));
         assert_eq!(sel("2026::5").items, vec![UidItem::One(5)]);
-        // ... and the same characters without '::' are still a range:
-        assert_eq!(sel("5:2026").folder, None);
+        // ... while a single ':' is not a range at all:
+        assert!(parse_selection("5:2026").is_err());
         // a folder whose name contains '::' (split at the last one):
         assert_eq!(sel("A::B::5").folder.as_deref(), Some("A::B"));
-    }
-
-    #[test]
-    fn a_single_colon_binding_names_its_replacement() {
-        let err = parse_selection("Trash:2").expect_err("':' no longer binds");
-        assert!(err.to_string().contains("Trash::2"), "{}", err);
-    }
-
-    #[test]
-    fn imap_range_is_not_read_as_a_folder() {
-        let s = sel("1:5");
-        assert_eq!(s.folder, None);
-        assert_eq!(s.items, vec![UidItem::Range(1, 5)]);
     }
 
     #[test]
@@ -576,9 +604,9 @@ mod tests {
     fn an_item_matching_nothing_is_an_error_even_beside_one_that_matched() {
         // The whole point: 'flag add 5 999-*' must not quietly become
         // 'flag add 5'.
-        let s = sel("5,999-*");
+        let s = sel("5,999-");
         let err = s.resolve(Some(&[1, 5, 9])).expect_err("must not drop the item");
-        assert!(err.to_string().contains("999-*"), "{}", err);
+        assert!(err.to_string().contains("999-"), "{}", err);
     }
 
     #[test]
@@ -617,6 +645,7 @@ mod tests {
         assert!(parse_selection("-5").is_err());
         assert!(parse_selection("1-2-3").is_err());
         assert!(parse_selection(":5").is_err());
+        assert!(parse_selection("1:5").is_err());
     }
 
     #[test]

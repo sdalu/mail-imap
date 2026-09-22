@@ -1,0 +1,592 @@
+.Dd September 22, 2026
+.Dt MAIL-IMAP 1
+.Os
+.Sh NAME
+.Nm mail-imap
+.Nd command-line IMAP client for programmatic and AI use
+.Sh SYNOPSIS
+.Nm
+.Op Fl c Ar path
+.Op Fl f Ar folder
+.Op Fl A
+.Op Fl -access-level Ar level
+.Op Fl M Ar n
+.Op Fl S Ar spec
+.Op Fl d
+.Op Fl j
+.Op Fl -mock
+.Cm command
+.Op Ar args ...
+.Nm
+.Op Fl h | Fl V
+.Sh DESCRIPTION
+.Nm
+queries and reads email over IMAP, and can change flags, keyword tags,
+and message location and the folder tree, depending on the access
+level in force.
+Reads use
+.Li BODY.PEEK[] ,
+so fetching a message never marks it
+.Li \eSeen .
+What
+.Nm
+may change is capped by the
+.Ic access-level
+in the config file
+.Pq Sx ACCESS LEVELS ,
+and every changing command names the level it needs.
+.Pp
+.Nm
+connects to a real IMAP server over implicit TLS, STARTTLS, or plain
+TCP.
+An in-memory mock backend
+.Pq Fl -mock
+lets every command run with no server and no config, for testing and
+demonstration.
+.Sh OPTIONS
+.Nm
+takes global options anywhere on the command line, before or after
+the command.
+.Bl -tag -width Ds
+.It Fl c Ar path , Fl -config Ar path
+Config file path.
+Otherwise
+.Ev MAIL_IMAP_CONFIG
+is read, then
+.Pa /etc/mail-imap.conf .
+.It Fl f Ar name , Fl -folder Ar name
+Folder(s) to operate on: a literal name, or an IMAP
+.Ic LIST
+pattern.
+A
+.Ql *
+in the pattern crosses the hierarchy delimiter; a
+.Ql %
+does not.
+Repeatable and comma-separated.
+Default: the config's
+.Ic folder
+.Pq Ic INBOX ,
+except for
+.Cm count ,
+which defaults to every mailbox.
+An empty name
+.Pq Fl f Ar \(aq\(aq
+is refused.
+.It Fl A , Fl -all-folders
+Every selectable mailbox of the account; shorthand for
+.Fl f Ar \(aq*\(aq .
+.It Fl -access-level Ar level
+Narrow what this run may change:
+.Ic readonly , organize , restructure ,
+or
+.Ic full .
+Can only lower what the config allows, never raise it.
+.It Fl d , Fl -debug
+Trace the exchange on stderr: the backend and access level, the
+capabilities, and which sort and threading path were taken.
+.It Fl -mock
+Use the in-memory mock backend instead of a real server.
+.It Fl j , Fl -json
+Output results as one compact JSON object on stdout.
+Errors go to stderr as a JSON object with one key,
+.Ic error .
+.It Fl M Ar n , Fl -max Ar n
+Cap search results for this run, overriding
+.Ic max
+from the config
+.Pq Ar 0 No means unlimited .
+.It Fl S Ar spec , Fl -sort Ar spec
+Sort
+.Cm search Ns / Ns Cm unread
+results: comma-separated criteria
+.Po
+.Ic uid , date , arrival , size , subject , from , to , cc
+.Pc ,
+first is primary, a
+.Ql -
+prefix reverses it
+.Po e.g. Ar -date , Ar subject,-size Pc .
+Overrides
+.Ic sort
+from the config.
+Default: most recent first.
+.It Fl h , Fl -help
+Print help and exit.
+.It Fl V , Fl -version
+Print the version and exit.
+.El
+.Sh COMMANDS
+Every command that works on messages
+.Po
+.Cm read , thread , part , flag , tag
+.Pc
+takes one or more message
+.Ar selection Ns s ;
+see
+.Sx MESSAGE SELECTIONS .
+Every command also takes the folder options
+.Fl f Ns / Ns Fl A .
+.Bl -tag -width Ds
+.It Cm info
+What this run can do and what the server is: the access level in
+force, the hierarchy delimiter to build folder paths with, the
+special-use mailboxes, and which wire path filing, sorting, and
+threading take here.
+Connects, sends
+.Ic CAPABILITY
+and
+.Ic LIST ,
+and changes nothing.
+.It Cm folder
+List mailboxes.
+Its subcommands change the folder tree and need access level
+.Ic restructure .
+.Bl -tag -width Ds -compact
+.It Cm folder create Ar folder
+.Op Fl -use Ar attr
+.Op Fl -wire
+Create a mailbox, optionally declaring an RFC 6154 special use at
+creation:
+.Ic archive , drafts , junk , sent , trash , all ,
+or
+.Ic flagged .
+.Fl -wire
+takes
+.Ar attr
+in the form a listing prints it
+.Pq Ic \eArchive
+rather than as a bare word.
+.It Cm folder rename Ar from Ar to
+Rename a mailbox.
+.Ic INBOX
+is refused at every access level.
+.It Cm folder subscribe Ar folder
+Subscribe to a mailbox.
+.It Cm folder unsubscribe Ar folder
+Unsubscribe from a mailbox.
+.El
+.It Cm search Ar query
+Search email in the selected folder(s) with any IMAP
+.Ic SEARCH
+query
+.Po
+.Ar ALL , UNSEEN , Qq FROM bob ,
+or any combination
+.Pc .
+Most recent first unless
+.Fl S
+is given.
+Results are capped by
+.Fl M Ns / Ns Ic max .
+.It Cm read Ar selection No ...
+Read the selected email(s).
+.It Cm count
+Message counts and status
+.Pq Ic STATUS
+of the selected folder(s), or every mailbox if none is given.
+Alias:
+.Cm status .
+.It Cm uid
+List the message UIDs of the selected folder(s), one block per
+folder.
+.It Cm thread Ar selection No ...
+List the UIDs of every message in the thread(s) containing the
+selected message(s).
+Uses server-side RFC 5256
+.Ic THREAD
+when the server advertises
+.Ic THREAD=REFERENCES ,
+otherwise client-side reconstruction from
+.Li Message-ID Ns / Ns Li References
+headers.
+.It Cm unread
+List unread email of the selected folder(s)
+.Pq Cm search Ar UNSEEN .
+.It Cm move Ar selection No ... Ar folder
+File the selected email(s) into
+.Ar folder ,
+named last, as
+.Xr mv 1
+does.
+.Ar folder
+must already exist.
+Needs access level
+.Ic organize .
+Uses
+.Ic UID MOVE
+.Pq RFC 6851
+where the server has it,
+.Ic UID COPY
+plus
+.Ic UID EXPUNGE
+.Pq RFC 4315
+where it does not, and refuses where the server has neither.
+.It Cm part
+List or save the MIME parts of an email.
+.Bl -tag -width Ds -compact
+.It Cm part list Ar selection No ...
+List the MIME parts of the selected email(s).
+.It Cm part save Ar selection Ar part Op Fl o | Fl -out Ar file
+Save one MIME part of one message to a file.
+.Ar selection
+must name exactly one message.
+Default destination: the part's filename, else
+.Ar uid Ns Ar N Ns _part Ns Ar M ,
+in the current directory.
+.El
+.It Cm flag
+Enable, disable, or list the IMAP-defined message flags
+.Po
+.Ic \eSeen , \eAnswered , \eFlagged , \eDeleted , \eDraft
+.Pc
+via
+.Ic UID STORE .
+.Ic \eRecent
+is server-managed and cannot be set.
+.Bl -tag -width Ds -compact
+.It Cm flag list Op Fl -wire
+.Ar selection No ...
+List the flags (system flags and keyword tags) of the selected
+email(s).
+.It Cm flag add Op Fl -wire
+.Ar selection No ... Ar flag No ...
+Enable the given flags
+.Po
+.Ic seen , answered , flagged , deleted , draft
+.Pc
+on the selected email(s).
+Needs access level
+.Ic organize
+to set any flag, and
+.Ic full
+to set
+.Ic deleted .
+.It Cm flag remove Op Fl -wire
+.Ar selection No ... Ar flag No ...
+Disable the given flags on the selected email(s).
+Needs access level
+.Ic organize .
+.El
+.It Cm tag
+Add, remove, or list user-defined keyword tags (plain keywords, no
+system flags) via
+.Ic UID STORE .
+.Bl -tag -width Ds -compact
+.It Cm tag known
+List the keywords with an agreed meaning: the IANA
+.Em IMAP/JMAP Keywords
+registry, and the conventions no registry covers.
+Needs no server.
+.It Cm tag junk Ar selection No ...
+Mark the selected email(s) junk: set every spelling the mailbox
+keeps, clear every spelling of the opposite.
+Needs access level
+.Ic organize .
+.It Cm tag notjunk Ar selection No ...
+Mark the selected email(s) not junk, the same, the other way.
+Needs access level
+.Ic organize .
+.It Cm tag list Op Fl -wire
+.Ar selection No ...
+List the custom keyword tags of the selected email(s); system flags
+are omitted.
+.It Cm tag add Op Fl -wire
+.Ar selection No ... Ar tag No ...
+Add the given keyword tags to the selected email(s).
+A non-ASCII tag is NFC-composed and encoded to modified UTF-7
+.Pq RFC 3501 5.1.3 .
+Needs access level
+.Ic organize .
+.It Cm tag remove Op Fl -wire
+.Ar selection No ... Ar tag No ...
+Remove the given keyword tags from the selected email(s).
+Needs access level
+.Ic organize .
+.El
+.El
+.Pp
+.Fl -wire ,
+on
+.Cm flag
+and
+.Cm tag ,
+means the atom exactly as the server has it.
+On
+.Cm add Ns / Ns Cm remove
+it is what the names are taken as; on
+.Cm list
+it is what they are printed as.
+Without it, a listing prints what
+.Cm add
+takes back, and
+.Cm add
+takes what a listing printed.
+.Sh MESSAGE SELECTIONS
+A message selection names messages, and optionally the folder to find
+them in:
+.Bd -literal -offset indent
+[folder::]uid-spec
+.Ed
+.Pp
+.Ar uid-spec
+is one or more comma-separated items:
+.Bl -tag -width "first:N, last:Nxx" -compact
+.It Ar N
+one UID
+.Pq Ar N No is 1 or more; 0 is refused
+.It Ar N Ns - Ns Ar M
+an inclusive UID range (an interval of the UID space, not a count:
+it may match fewer messages than its span, or none)
+.It Ar N Ns -
+from
+.Ar N
+to the highest UID in the folder
+.It Ic \&*
+every message of the folder;
+.Ic \&*
+is only ever this, never a range endpoint
+.Po
+.Ar N Ns -* No and Ic \&* Ns - Ns Ar N
+are both refused
+.Pc
+.It Ic last:N
+the
+.Ar N
+newest messages, by UID
+.Pq a count, not an interval
+.It Ic first:N
+the
+.Ar N
+oldest messages, by UID
+.El
+.Pp
+.Ql ::
+binds the folder to the spec and nothing else does; the split is at
+the last
+.Ql :: .
+Without a folder, a selection means the folder(s) selected by
+.Fl f Ns / Ns Fl A
+(or the config); if several folders are selected, a bare UID is
+ambiguous and refused.
+A single
+.Ql \&:
+introduces
+.Ic last:N
+or
+.Ic first:N
+and nothing else — IMAP's own
+.Ar N Ns \&: Ns Ar M
+range is not accepted;
+write
+.Ar N Ns - Ns Ar M
+instead.
+.Ic INBOX
+matches case-insensitively, as IMAP requires; other folder names do
+not.
+Folder wildcards
+.Pq Ic * , %
+are refused inside a selection.
+Ranges and
+.Ic \&*
+are resolved against the folder's real UID list; every item must
+match at least one message.
+.Sh ACCESS LEVELS
+.Ic access-level
+in the config says how much of the account
+.Nm
+may change.
+The levels are a ladder; each permits everything below it.
+.Bl -tag -width "restructure"
+.It Ic readonly
+Nothing changes.
+.It Ic organize
+The default.
+Set and clear flags and keywords, except setting
+.Ic \eDeleted ;
+file mail into a folder that already exists.
+.It Ic restructure
+That, plus the folder tree:
+.Cm folder create , rename , subscribe , unsubscribe .
+.It Ic full
+Everything, including setting
+.Ic \eDeleted .
+.El
+.Pp
+.Fl -access-level
+on the command line can only lower what the config allows, never
+raise it.
+Two older spellings are also accepted wherever a level is named:
+.Ic read-only
+for
+.Ic readonly ,
+and
+.Ic non-destructive
+for
+.Ic organize .
+This is not a security boundary: the same account can be reached by
+any other client with the same password.
+.Sh CONFIGURATION
+The config file is UCL, the Universal Configuration Language.
+UCL is a superset of JSON, so a config written as a JSON object
+is read unchanged.
+All fields except
+.Ic server , username ,
+and
+.Ic password
+have defaults.
+.Bl -tag -width "access-level"
+.It Ic server
+IMAP host.
+No default.
+.It Ic port
+IMAP port.
+Default
+.Ar 993 .
+.It Ic username
+Login user.
+No default.
+.It Ic password
+Login password.
+No default.
+.It Ic ssl
+Implicit TLS.
+Default
+.Ic true .
+.It Ic starttls
+Upgrade a plain connection with STARTTLS, used when
+.Ic ssl
+is
+.Ic false .
+Default
+.Ic false .
+.It Ic insecure
+Accept invalid TLS certificates.
+Default
+.Ic false .
+.It Ic folder
+Default folder for commands that need one.
+Default
+.Ic INBOX .
+.It Ic max
+Maximum search results to fetch
+.Pq Ar 0 No means unlimited ;
+overridden by
+.Fl M Ns / Ns Fl -max .
+Default
+.Ar 50 .
+.It Ic sort
+Default sort spec for
+.Cm search Ns / Ns Cm unread ,
+same format as
+.Fl S Ns / Ns Fl -sort ;
+overridden by
+.Fl S .
+Default
+.Ic null .
+.It Ic mock
+Use the in-memory mock backend.
+Default
+.Ic false .
+.It Ic delimiter
+The hierarchy delimiter
+.Cm info
+reports, overriding the server's own answer.
+Advisory only; nothing rewrites a folder name.
+Default
+.Ic null .
+.It Ic access-level
+How much this tool may change; see
+.Sx ACCESS LEVELS .
+The key is also read as
+.Ic access_level .
+Default
+.Ic organize .
+.El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev MAIL_IMAP_CONFIG
+Config file path, read when
+.Fl c Ns / Ns Fl -config
+is not given.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa /etc/mail-imap.conf
+Default config file path, read when neither
+.Fl c Ns / Ns Fl -config
+nor
+.Ev MAIL_IMAP_CONFIG
+is given.
+.El
+.Sh EXIT STATUS
+.Ex -std
+On failure, an error is printed to stderr: plain text by default, or
+under
+.Fl j
+a JSON object with one key,
+.Ic error .
+.Sh EXAMPLES
+What this run can do, and what the server is:
+.Bd -literal -offset indent
+$ mail-imap -c incal.conf info
+.Ed
+.Pp
+List folders, then read one message:
+.Bd -literal -offset indent
+$ mail-imap -c incal.conf folder
+$ mail-imap -c incal.conf -f INBOX read 12345
+.Ed
+.Pp
+Search, capped at 200 results, most recent first:
+.Bd -literal -offset indent
+$ mail-imap -c incal.conf -f INBOX -M 200 search ALL
+.Ed
+.Pp
+File the 20 newest messages of INBOX into Archive/2026 (needs access
+level
+.Ic organize ) :
+.Bd -literal -offset indent
+$ mail-imap -c incal.conf -f INBOX move last:20 Archive/2026
+.Ed
+.Pp
+Set and list flags:
+.Bd -literal -offset indent
+$ mail-imap -c incal.conf -f INBOX flag add 12345 67890 flagged
+$ mail-imap -c incal.conf -f INBOX flag list --wire 12345
+.Ed
+.Pp
+Run against the in-memory mock backend, no server or config needed:
+.Bd -literal -offset indent
+$ mail-imap --mock folder
+$ mail-imap --mock tag known
+.Ed
+.Sh SEE ALSO
+.Pa README.md ,
+.Pa DESIGN.md
+in the
+.Nm
+source distribution.
+.Sh STANDARDS
+.Bl -tag -width "RFC 6154" -compact
+.It RFC 2047
+MIME
+.Pq Multipurpose Internet Mail Extensions
+Part Three: Message Header Extensions for Non-ASCII Text; subject
+decoding.
+.It RFC 3501
+Internet Message Access Protocol - Version 4rev1; the base protocol,
+modified UTF-7
+.Pq Sx 5.1.3 ,
+and the message-selection deviations noted above.
+.It RFC 4315
+Internet Message Access Protocol (IMAP) - UIDPLUS extension; the
+.Cm move
+fallback path.
+.It RFC 5256
+Internet Message Access Protocol - SORT and THREAD Extensions.
+.It RFC 6154
+IMAP LIST Extension for Special-Use Mailboxes.
+.It RFC 6851
+Internet Message Access Protocol (IMAP) - MOVE Extension.
+.El

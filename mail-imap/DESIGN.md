@@ -41,7 +41,11 @@ operation body can be shared by a `with_backend!` macro.
 
 | CLI command                                           | IMAP commands used                                                                                                                                                                                                                                                                                                                  |
 | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `info`                                                | `CAPABILITY` + `LIST "" *`; no mailbox is selected and nothing is changed                                                                                                                                                                                                                                                           |
 | `folder`                                              | `LIST "" *` (non-`\Noselect` names)                                                                                                                                                                                                                                                                                                 |
+| `folder create`                                       | `CREATE <name>`, or `CREATE "<name>" (USE (<attr>))` (RFC 6154) when `--use` is given — and only when `CREATE-SPECIAL-USE` is advertised, else refused before anything is sent. `--use` takes a bare word (`archive`), or the atom with `--wire`                                                                                    |
+| `folder rename`                                       | `RENAME <from> <to>` (INBOX refused outright, at every access level)                                                                                                                                                                                                                                                                |
+| `folder subscribe` / `folder unsubscribe`             | `SUBSCRIBE <name>` / `UNSUBSCRIBE <name>`                                                                                                                                                                                                                                                                                           |
 | `search` / `unread`                                   | per folder: `SELECT` + (`UID SORT <crit> UTF-8 <query>` when `--sort` is given and `SORT` is advertised, else `UID SEARCH <query>`) + batched `UID FETCH` (envelope/flags/date/size/`BODYSTRUCTURE`); folders are searched in order and the results aggregated                                                                      |
 | `read`                                                | `SELECT` + `UID FETCH <uid> (UID ENVELOPE FLAGS INTERNALDATE BODY.PEEK[])`                                                                                                                                                                                                                                                          |
 | `count` / `status`                                    | `LIST "" *` + `STATUS <folder> (MESSAGES UNSEEN RECENT UIDNEXT UIDVALIDITY)` per mailbox (or one folder when given)                                                                                                                                                                                                                 |
@@ -51,6 +55,7 @@ operation body can be shared by a `with_backend!` macro.
 | `part list`                                           | per selected message: `SELECT` + `UID FETCH <uid> (UID BODY.PEEK[])`, then MIME part enumeration locally                                                                                                                                                                                                                            |
 | `part save`                                           | same fetch, then the selected part is CTE-decoded and written to a file                                                                                                                                                                                                                                                             |
 | `flag list` / `tag list`                              | per selected message: `SELECT` + `UID FETCH <uid> (UID FLAGS)`                                                                                                                                                                                                                                                                      |
+| `move`                                                | per selected folder: `SELECT` + `UID MOVE <uids> <target>` (RFC 6851) when `MOVE` is advertised, else `UID COPY` + `UID STORE +FLAGS (\Deleted)` + `UID EXPUNGE` (RFC 4315); a server with neither is refused                                                                                                                       |
 | `flag add` / `flag remove` / `tag add` / `tag remove` | per selected folder: `SELECT` + `UID STORE <uids> +FLAGS (...)` / `-FLAGS (...)` per batch of 50                                                                                                                                                                                                                                    |
 
 IMAP can only search the selected mailbox, so `search`/`unread` iterate over
@@ -66,6 +71,43 @@ output uses `"folder"` for a single folder and `"folders"` for several.
 *selections* rather than bare UIDs; each selection resolves to one or more
 `(folder, uid)` pairs before any of the operations above run — see
 [From a command line to per-folder UID groups](#from-a-command-line-to-per-folder-uid-groups).
+
+### What `info` reports
+
+`info` exists because everything else in this tool assumes the caller
+already knows three things: what it is allowed to change, how to spell
+a folder path on this account, and which of the degradation ladders
+below this server will land on. An agent that has to discover those by
+trying commands and reading refusals is an agent that has already
+changed something by accident.
+
+It costs `CAPABILITY` and one `LIST`, selects no mailbox, and changes
+nothing.
+
+- **The hierarchy delimiter is per mailbox on the wire** — every `LIST`
+  response carries its own, and it may be `NIL` — and per *namespace*
+  in practice (RFC 2342). So `info` reports every distinct delimiter
+  the list showed, and names the one INBOX uses as the one to build a
+  path with. More than one means more than one namespace, which is
+  worth saying rather than averaging away.
+- **`delimiter` in the config overrides it, and is advisory only.**
+  Nothing in the tool rewrites a folder name — names go to the server
+  as they are typed — so the field exists to be *reported*, for an
+  account whose `LIST` says `NIL` or lies. When it disagrees with what
+  the server said, `info` prints both: silently preferring one would
+  hide exactly the case the field is for.
+- **Capabilities are reported as the path taken, not as names.**
+  `MOVE`/`UIDPLUS` become `filing mail: UID MOVE | UID COPY + UID
+  EXPUNGE | refused`, `SORT` and `THREAD=REFERENCES` become
+  `server-side`/`client-side`. The raw list is printed too, but the
+  derived line is the one a caller can act on, and it is derived by the
+  same code the operations use.
+- **Two things are deliberately not in it.** `PERMANENTFLAGS` would
+  need a mailbox selected, and `SELECT` is not free of side effects
+  (it clears `\Recent`) — so what a mailbox will keep is still found
+  out by `flag`/`tag`, which refuse rather than lie. `NAMESPACE`
+  (RFC 2342) is not sent either; the delimiters seen in `LIST` are the
+  evidence `info` has, and it says so rather than implying it asked.
 
 ### Sorting (`--sort`/`-S`)
 
@@ -141,8 +183,8 @@ the result may be incomplete but never fatal.
 Some servers emit `FETCH` responses with raw 8-bit bytes inside quoted
 strings (e.g. Latin-1 in `ENVELOPE`). `imap-proto` only accepts 7-bit
 characters there; the `imap` crate turns such a line into a fabricated
-`Error::Bye` *and* leaves the stream desynced — which previously aborted a
-whole search with "Bye Response: no explanation given". `RealClient`
+`Error::Bye` *and* leaves the stream desynced, which aborts a whole search
+with "Bye Response: no explanation given" unless it is caught. `RealClient`
 countermeasures (`src/imap/real.rs`):
 
 - `attempt_fetch` recognizes connection-poisoning errors (`Bye`,
@@ -197,13 +239,50 @@ Two things sit outside the ladder on purpose:
 - **A special-use attribute (RFC 6154) can only be declared at
   creation**, and only when the server advertises `CREATE-SPECIAL-USE`;
   `create_folder` checks the capability and says so rather than sending
-  a command the server will reject. The LIST attributes a server
-  maintains itself — `\Noselect`, `\HasChildren`, `\Marked` — are not
-  settable by any client and are not offered.
+  a command the server will reject. `--use` is spelled the way `flag`
+  spells its names — a bare word (`archive`), with `--wire` for the
+  atom a listing prints (`\Archive`) — and resolved against the seven
+  RFC 6154 attributes before the connection is opened. That the set is
+  closed is also what keeps an arbitrary string out of the
+  `CREATE ... (USE (...))` command line, which is interpolated. The
+  LIST attributes a server maintains itself — `\Noselect`,
+  `\HasChildren`, `\Marked` — are not settable by any client and are
+  not offered.
 
-`organize` is defined to permit filing mail into another folder, but
-there is no `move` command yet; when one lands its gate goes here
-beside the others, and not in its handler.
+### Filing mail (`move`)
+
+`UID MOVE` (RFC 6851) is one command and the server does the rest.
+Without it the sequence is `UID COPY`, then `\Deleted` on the
+originals, then `UID EXPUNGE` (RFC 4315) — **copy first**, so a failure
+part-way leaves the messages in both places rather than in neither.
+
+A server advertising neither `MOVE` nor `UIDPLUS` is refused rather
+than served, because the only route left ends in a plain `EXPUNGE`,
+which removes *every* message marked `\Deleted` in that mailbox — quite
+possibly ones somebody else marked. Losing a stranger's mail to file
+one of yours is not a trade this tool makes.
+
+The fallback sets `\Deleted`, which `organize` refuses to set as a flag
+operation. That is not a loophole: the gate is on the *operation*, and
+`move`'s guarantee — the message still exists, in a different place —
+holds because the copy is made first. What `organize` forbids is
+marking a message for removal with nothing else to show for it.
+
+The folder is the **last argument**, as `mv` has it: `move 1-5 Archive`.
+clap cannot split a greedy variadic from a trailing required positional,
+so the command takes one variadic and splits it itself.
+
+That shape carries `mv`'s own hazard — `move 1 2` meaning two UIDs and
+a forgotten folder — and needs no guard against it, because both ways
+of forgetting already fail loudly: `move 1-5` leaves nothing to select,
+and `move 1 2` is refused by the backend unless a mailbox really is
+called `2`. A second spelling of the target (`--to`) would buy nothing
+and cost a second way to write one thing.
+
+The target mailbox must already exist: creating one is `restructure`'s
+business, and doing it implicitly would let `organize` change the
+folder tree by a side door. Moving to the folder the messages are
+already in is refused as a no-op.
 
 ### Passive read-only behaviour
 
@@ -219,18 +298,34 @@ must be invoked explicitly.
 Both share one backend operation (`store_flags`) and one handler
 (`change_flags` in `src/cli/mod.rs`); they differ only in validation:
 
-- `flag add|remove <SELECTION...> -- <FLAG...>` accepts only the
-  IMAP-defined system flags `\Seen`, `\Answered`, `\Flagged`,
-  `\Deleted` and `\Draft` (matched case-insensitively and normalized by
-  `parse_flag_names`). `\Recent` is rejected: it is maintained by the
-  server and cannot be set by clients. A user-defined keyword is refused
-  with a pointer to `tag`: the two commands own one kind of name each,
-  which is what keeps a stray word after `--` — `flag add 5 --
-  '\Deleted' Trash` — from being stored as the keyword `Trash`.
-- `tag add|remove <SELECTION...> -- <TAG...>` accepts only plain
-  keywords — any `\`-prefixed name is refused with a hint to use `flag`.
+- `flag add|remove <SELECTION...> <FLAG...>` accepts only the five
+  IMAP-defined system flags, written as bare words — `seen`,
+  `answered`, `flagged`, `deleted`, `draft`, case-free. The command owns
+  exactly those five, so they need no sigil to be unambiguous, and a
+  bare word needs none of the shell quoting `'\Seen'` does. `--wire`
+  takes the form a listing prints (`\Seen`), for a name copied back out
+  of one — the same bargain `tag --wire` makes. `recent` is rejected: it
+  is maintained by the server and cannot be set by clients. A
+  user-defined keyword is refused with a pointer to `tag`: the two
+  commands own one kind of name each, which is what keeps a stray word —
+  `flag add 5 deleted Trash` — from being stored as the keyword
+  `Trash`.
+- `tag add|remove <SELECTION...> <TAG...>` accepts only plain
+  keywords. A `\`-prefixed name is refused with a hint to use `flag`,
+  and so is a keyword spelled like a system flag with the backslash
+  dropped (`Deleted`): stored as a keyword it is inert, reads like the
+  flag in a listing, and slips past the access level that governs the
+  real one.
 - Keyword names are matched against the IANA *IMAP/JMAP Keywords*
   registry, transcribed into `src/cli/keywords.rs` (fetched 2026-09-22).
+  The registry carries no description of its own — its columns are
+  Keyword, Type, Usage, Scope, Comments (empty throughout) and
+  Reference — so the one-line meaning beside each entry comes from the
+  RFC that registers it (RFC 9979 defines seventeen of the twenty-five),
+  quoted or trimmed to fit. The three whose reference is a person rather
+  than an RFC have no normative text at all; theirs say what clients use
+  them for. The registry's *Scope* column is why the five RFC 8621
+  entries are excluded: it marks them JMAP-only.
   It is advisory, never a whitelist: an unregistered keyword is legal
   and passes through as typed. What it buys is the spelling — a
   registered keyword typed in another case is sent in its registered
@@ -272,7 +367,7 @@ Both share one backend operation (`store_flags`) and one handler
   since storing `$seen` as a keyword sets something no IMAP client reads.
 - Keyword names are IMAP atoms, which are ASCII, so anything else
   travels as modified UTF-7 (RFC 3501 §5.1.3, `src/cli/modutf7.rs`).
-  `tag add 5 -- régie` sends `r&AOk-gie`; sending the raw bytes would be
+  `tag add 5 régie` sends `r&AOk-gie`; sending the raw bytes would be
   a malformed command, not a nicety. Names are NFC-composed first
   (`unicode-normalization`): "régie" typed on a system that hands over
   `e` + U+0301 would otherwise encode to a different atom that looks
@@ -280,19 +375,20 @@ Both share one backend operation (`store_flags`) and one handler
   way would silently miss it. `--wire` composes nothing, being verbatim
   by definition. **Input is literal text and every
   `&` is escaped to `&-`**; `--wire` sends the names verbatim, which is
-  how a key copied out of a listing goes back. An earlier rule passed a
-  name through whenever it happened to decode, which is undecidable from
-  the name alone — `pen&ink-notes` decodes (to "pen詹notes") and
-  `fish&chips-2024` does not, and no user can tell which without doing
-  base64 by hand. A name that would have decoded gets a note on stderr
-  naming `--wire`. Listing decodes the other way:
+  how a key copied out of a listing goes back. Taking a name for a wire
+  key whenever it happens to decode is undecidable from the name alone —
+  `pen&ink-notes` decodes (to "pen詹notes") and `fish&chips-2024` does
+  not, and no user can tell which without doing base64 by hand — so a
+  name that *would* have decoded gets a note on stderr naming `--wire`
+  rather than being taken for one. Listing decodes the other way:
   `r&AOk-gie ("régie", modified UTF-7)` in text output, raw in JSON.
 - **Comparison is on the decoded text, folding ASCII case only.**
   `r&AOk-gie` ("régie") and `r&aok-gie` ("r檉gie") stay apart, because
   base64 is case-sensitive and those are two words. `R&-D` and `r&-d`
-  fold, because they are two spellings of one ASCII word — keying the
-  rule on "contains `&`" got that wrong. `é`/`É` stay apart: IMAP asks
-  for no Unicode case folding, so neither does this.
+  fold, because they are two spellings of one ASCII word — which is why
+  the rule keys on the decoded text and not on "contains `&`". `é`/`É`
+  stay apart: IMAP asks for no Unicode case folding, so neither does
+  this.
 - A keyword carrying an invisible character — NBSP, BOM, zero-width
   space, soft hyphen — is refused. They pass the atom check, being
   neither control nor ASCII space, and would make a keyword no listing
@@ -356,25 +452,39 @@ the per-folder UID groups every command operates on:
 ```
 
 A selection is `[FOLDER::]UIDSPEC`: `5`, `1,4,7` (a list; separate CLI
-arguments work the same way — `read 1 4 7`), `1-9` or `1:9` (a UID
-range), `*` (every message), `9-*` or `9-` (from 9 to the end, the
-second form needing no shell quoting), `Archive::1-5`
-(folder-qualified). `parse_selection` (`src/cli/select.rs`) first tries
-the whole token as a UID spec, which is what settles the IMAP forms
-carrying a `:` of their own (`1:5`, `9:`); only a token that fails that
-is split at its *last* `:` into folder and spec, so a folder name that
-is itself a UID spec cannot be written this way. A range with no lower
-end (`-20`) is refused: clap reads it as an option before the parser
-sees it, and `*-20` already means 20 to the end.
+arguments work the same way — `read 1 4 7`), `1-9` (a UID
+range), `9-` (from 9 to the end of the mailbox), `*` (every message,
+and never a range endpoint), `last:20` / `first:5` (a count),
+`Archive::1-5`
+(folder-qualified). `parse_selection` (`src/cli/select.rs`) splits a
+token at its last `::`; a token without one is wholly a UID spec, so a
+folder whose name is itself a UID spec cannot be written this way and
+needs `-f`.
 
-`--last N` / `--first N` (`UidItem::Last`/`First`) are a count rather
-than an interval, and are a flag rather than a selection token on
-purpose: `last:20` would be split by the `FOLDER:UIDS` rule into a
-folder called `last`. Because they name no UID they are unambiguous
-across folders — `selection_groups` expands them into one selection per
-selected folder — and they are refused alongside an explicit selection.
-They count by UID, which ascends with arrival; ordering by `Date:` is
-`-S`'s job.
+Three forms IMAP itself allows are deliberately refused, each because
+one concept with two spellings is what makes a grammar ambiguous:
+
+- **`4:7`** — IMAP's range operator. Here `:` belongs to `last:` and
+  `first:` alone; a range is `4-7`. Accepting both would put `:` back
+  to doing two jobs, which is the problem `::` was introduced to solve.
+- **`9-*` and `*-9`** — `*` means every message and is only ever that,
+  never a range endpoint. "From 9 to the end of the mailbox" is `9-`.
+  A `*` that is not alone in its item reads as a folder wildcard to
+  anyone skimming, and IMAP's `*:9` reads as "up to 9" to half its
+  readers when it means the opposite.
+- **`-20`** — a range with no lower end. clap reads it as an option
+  before the parser sees it, and `first:20` says it properly.
+
+`last:N` / `first:N` (`UidItem::Last`/`First`) are a count rather than
+an interval. They are spellable as tokens precisely because `::` binds
+the folder: that frees the single `:` for a `key:value` item, which is
+what a flag would otherwise have had to work around. Because a count
+names no UID it is unambiguous across folders, so an *unqualified*
+count is expanded by `selection_groups` into one selection per selected
+folder, while `Archive::last:5` asks a count of one named folder — and
+a single run can ask different counts of different folders, which the
+flag never could. Counting is by UID, which ascends with arrival;
+ordering by `Date:` is `-S`'s job.
 
 A range or `*` is symbolic (`UidItem::Range`/`From`/`All`) until
 `Selection::resolve` matches it against the folder's real UID list, and
@@ -399,17 +509,53 @@ folder is selected, naming them in the error instead.
 present in the fetched list, so a range past the end resolves to nothing
 and `resolve_groups` errors rather than silently operating on zero
 messages picked by the server's own fold. This matters most for a
-mutation: `flag add 9999-* -- '\Deleted'` must not fall through to the
+mutation: `flag add 9999- deleted` must not fall through to the
 newest message just because 9999 does not exist.
 
 Folder wildcards (`*`, `%`) are refused inside a selection's folder part
-(`Arch*:5` is an error) — `-f` is how several folders are reached.
-`flag`/`tag` `add`/`remove` still take the flag/tag names as a trailing
-list after `--` (clap allows only one variadic positional), so the
-shape is `flag add 1 4 -- '\Seen'`; a name starting with `-` is rejected
-with a hint, since it is usually a global option swallowed after `--`.
+(`Arch*::5` is an error) — `-f` is how several folders are reached.
 `part save` resolves its selection like any other command but then
 requires exactly one `(folder, uid)` pair, erroring otherwise.
+
+### Junk, and PERMANENTFLAGS
+
+Five keyword spellings carry two meanings (`keywords::JUNK`,
+`NOT_JUNK`): the registry has `$Junk`/`$NotJunk`, Thunderbird writes
+`Junk`/`NonJunk`, and Apple Mail writes both its own `Junk`/`NotJunk`
+and the registry's. No standard says which wins, and the documented
+result is a message carrying `\Seen Junk $NotJunk NotJunk` — junk and
+not junk at once — because each client sets its own spelling and leaves
+the rest alone.
+
+`set_junk` does the opposite. Every spelling of the opposite meaning is
+cleared unconditionally: clearing what is not set costs nothing, and
+leaving it set is precisely what creates the contradiction. What is
+*written* is decided by the server, through `PERMANENTFLAGS` (RFC 3501
+§7.1): every spelling it will keep, which on a mailbox advertising `\*`
+is all of them, and on one naming a closed list is only what it names.
+Yahoo and AOL list `$Junk $NotJunk` without `\*`, which is why
+Thunderbird's hardcoded `Junk` silently fails to stick there.
+
+`Permanent` (`src/imap/mod.rs`) carries that reply: the names, whether
+`\*` was among them, and whether the server said anything at all — RFC
+3501 has a client assume every flag is permanent when it did not.
+`change_flags` consults it for *any* keyword, not just these, and
+refuses a name the mailbox will not keep rather than storing something
+the server may drop at the end of the session. `flag list`/`tag list`
+read the family back with `junk_state` and report `contradictory` when
+both sides are present. Setting one spelling by hand (`tag add 5 Junk`)
+is allowed but noted on stderr, since that is the move that creates the
+contradiction in the first place.
+
+### Telling selections from names
+
+`flag`/`tag` `add`/`remove` take selections and names in one list, with
+no separator and in any order — `flag add 1 4 seen`. `split_args`
+(`src/main.rs`) partitions the list on "does this parse as a
+selection?", which is a *total* test because `parse_flag_names` refuses
+a name that would: neither can be mistaken for the other, so nothing
+has to mark where one list ends. An empty half on either side is an
+error naming which one is missing.
 
 `-f`/`--folder` is repeatable and comma-separated, and accepts IMAP
 `LIST` patterns (`*` crosses the hierarchy delimiter, `%` does not);
@@ -436,6 +582,56 @@ ENVELOPE subjects may be encoded-words (e.g. `=?utf-8?Q?Votre=20facture?=`).
 it (UTF-8, ISO-8859-1/Latin-1, `B` and `Q` encodings, padding restored for
 base64). Plain text is left untouched.
 
+## Configuration (`config/mod.rs`)
+
+The config file is **UCL**, not JSON. The file is hand-edited, lives
+next to a FreeBSD userland whose own configuration is UCL, and wants
+the things JSON refuses to give it: comments, bare keys, no commas, no
+outer braces. A config nobody can annotate is a config whose fields
+get re-derived from the README every time somebody opens it.
+
+UCL being a **superset of JSON** is what made the switch cheap: every
+config written before it, and every JSON example in the documents,
+parses unchanged. There was no migration and there is no second
+format to support — there is one parser, and JSON is a dialect it
+already accepts.
+
+**The parsed object is emitted back as JSON and handed to serde**
+rather than being walked key by key:
+
+```text
+  file ──▶ libucl parse ──▶ emit JSON ──▶ serde_json ──▶ Config
+                                             │
+                  the serde attributes on Config are still the
+                  single definition of every field name, alias
+                  and default
+```
+
+Walking the UCL object by hand would mean a second description of the
+same schema — field names, the `access-level`/`access_level` aliases,
+the defaults, the level spellings — sitting beside the `#[serde(...)]`
+attributes and drifting from them. The round trip costs one
+serialisation of a file that is a few hundred bytes, and buys the
+guarantee that there is nothing to keep in step.
+
+Two narrowings are deliberate:
+
+- **`NO_TIME`.** UCL reads a bare `30s` as a duration and would hand
+  serde a number. Nothing in `Config` is a duration, so a value that
+  merely looks like one — a password, a folder name — is kept as the
+  text it was written as.
+- **A NUL byte is refused before the parser sees it.** `libucl`'s
+  Rust wrapper builds a `CString` and unwraps, so a file containing a
+  NUL would abort the process rather than fail. The guard turns it
+  into an ordinary error, and a test feeds it a NUL to prove so.
+
+**An unparseable config is fatal, never a default.** Falling back to
+`Config::default()` would widen what a config meant to narrow: a typo
+in `readonly` would silently become `organize`, which may change mail.
+The one exception is `--mock`, where no server is reached and the
+whole config is optional — and there `info` reports which file it
+actually read, or that it read none.
+
 ## Mock backend (`mock.rs`)
 
 The original mockup, preserved. Returns a fixed set of folders and five sample
@@ -451,23 +647,65 @@ mock `search` results.
 ## Testing
 
 `make tests` (or plain `cargo test`) runs the suite entirely against the
-mock backend (no network). Coverage:
-- backend selection (`mock` vs `real`)
-- list / search / read / count / uid / unread / part happy + error paths
+mock backend (no network). What it proves, and where:
+
+- **the access-level ladder refuses what it says it refuses** —
+  `readonly` changes nothing, `organize` sets anything but `\Deleted`
+  and clears even that, `organize` leaves the folder tree alone,
+  `restructure` changes the tree and still loses no message, renaming
+  INBOX is refused at every level. Each refusal has a test that feeds it
+  the forbidden operation and asserts the error — `src/lib.rs`, with the
+  ladder's own ordering and both config spellings in `src/config/mod.rs`
+- **what `info` reports**, including a config `delimiter` disagreeing
+  with the server's and a run narrowed by `--access-level` showing both
+  levels — `src/cli/mod.rs`
+- backend selection (`mock` vs `real`), and that the real backend
+  returns an error rather than fabricating data when unreachable
+- list / search / read / count / uid / unread / part happy + error
+  paths, and that a multi-folder search aggregates and caps the *total*
+- thread reconstruction from Message-ID / References: a reply chain
+  forms one thread, separate threads stay separate, `References` merges
+  two, duplicate Message-IDs are merged, a message with no IDs is its
+  own thread — `src/imap/mod.rs`
+- what a mailbox will keep, read off `PERMANENTFLAGS`: a silent server
+  and one advertising `\*` keep everything, a closed list keeps only
+  what it names — `src/imap/mod.rs`
 - sort spec parsing (keys, `-` reverse, invalid input) and client-side
   result sorting (single/multi key, descending, capped selection)
-- flag/tag name validation (system flags normalized, `\Recent` rejected,
-  tag mode refuses `\` flags, keyword charset) and mock store/retrieve
-  (incl. `flag list` via `message_flags`)
+- flag/tag name validation (system flags normalized, `\Recent`
+  rejected, tag mode refuses `\` flags, keyword charset, invisible
+  characters, `--wire` refusing what cannot be an atom) and mock
+  store/retrieve, including `flag list` via `message_flags`
+- the keyword layer: the IANA registry transcribed once and
+  consistently, the two tables not overlapping, JMAP spellings of system
+  flags refused, the junk family read across every spelling, and a
+  listing that prints what can be typed straight back — glossing what
+  could not — `src/cli/keywords.rs`, `src/cli/mod.rs`
+- modified UTF-7 (RFC 3501 §5.1.3) round trips, NFC composition before
+  encoding, malformed sequences erroring rather than guessing, and
+  Thunderbird's `=xx` tag keys read back as text — `src/cli/modutf7.rs`,
+  `src/cli/tbkey.rs`
 - message-selection grammar (lists, ranges in both notations, `*`/`n-*`,
-  folder-qualified tokens, the last-`:` split rule, UID 0 and wildcard
-  rejection, resolution against a folder's UID list) and folder-pattern
-  matching/expansion (`*`/`%`, INBOX case-insensitivity, dedup, a
-  pattern matching nothing) — `src/cli/select.rs`
-- MIME parser (plain, multipart, nested multipart, base64 / quoted-printable /
-  binary decoding, missing boundary)
+  recency counts, folder-qualified tokens, the last-`:` split rule, UID
+  0 and wildcard rejection, resolution against a folder's UID list) and
+  folder-pattern matching/expansion (`*`/`%`, INBOX case-insensitivity,
+  dedup, a pattern matching nothing) — `src/cli/select.rs`
+- the JSON shape of `search` (one folder and several), `count`,
+  `thread`, `part list`, `info`, `flag add`/`remove`, `flag list` and
+  the junk family, asserted by serialising the output struct. The
+  shapes not covered there — `read`, `uid`, `move`, `part save`,
+  `folder` and its subcommands, `tag known` — are checked by reading
+  the README table against the structs, which is not a gate
+- MIME parser (plain, multipart, nested multipart, base64 /
+  quoted-printable / binary decoding, missing boundary)
 - RFC 2047 decoder (plain, Q, Q-with-underscore, B, Latin-1, mixed text)
-- the real backend returns an error (no fabricated data) when unreachable
+  and header-value reading (case-insensitivity, folded continuations,
+  raw 8-bit bytes kept)
+
+Two things the suite does **not** prove, and they are the two that
+break in practice: nothing in it fails because `src/imap/real.rs` sent
+the wrong thing to a server, and nothing in it drives `src/main.rs`, so
+a broken argument shape passes it. Both gates are in `CHECKLIST.md`.
 
 To exercise the real backend manually:
 
@@ -478,27 +716,48 @@ cargo run --release -- -c incal.conf -f INBOX search "SINCE 01-Jan-2026"
 
 ## Output
 
-Commands print human-readable text by default. With `-j`/`--json` each command
-prints a single compact JSON object to stdout instead; errors become
-`{"error": "..."}` on stderr (exit code unchanged). JSON shapes:
+Commands print human-readable text by default. With `-j`/`--json` each
+command prints a single compact JSON object to stdout instead; errors
+become `{"error": "..."}` on stderr (the exit code is unchanged either
+way). The per-command shapes are the reference material, and they live
+in one place: [JSON output (`-j`) in README.md](README.md#json-output--j).
+What is decided here is how they are shaped.
 
-| Command                                               | Shape                                                                                                |
-| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `folder`                                              | `{"count", "folders": [FolderInfo]}`                                                                 |
-| `search`                                              | `{"folder", "query", "count", "results": [SearchResult]}`                                            |
-| `read`                                                | one `{"folder", "uid", "content"}` per selected UID                                                  |
-| `count` / `status`                                    | `{"all", "counts": [Mailbox]}`                                                                       |
-| `uid`                                                 | one `{"folder", "count", "uids": [u32]}` per selected folder                                         |
-| `thread`                                              | one `{"folder", "uid", "count", "uids": [u32]}` per selected message                                 |
-| `unread`                                              | same as `search` (query `UNSEEN`)                                                                    |
-| `part list`                                           | one `{"folder", "uid", "count", "parts": [PartInfo]}` per selected UID                               |
-| `part save`                                           | `{"folder", "uid", "part", "file", "size"}`                                                          |
-| `flag list` / `tag list`                              | one `{"folder", "uid", "count", "flags": [String]}` per selected UID                                 |
-| `flag add` / `flag remove` / `tag add` / `tag remove` | one `{"folder", "count", "uids": [u32], "added": [String], "removed": [String]}` per selected folder |
-
-`FolderInfo`, `SearchResult`, `Mailbox` and `PartInfo` derive
-`serde::Serialize`; the other shapes are small output structs in
-`src/cli/mod.rs`.
+- **A stream of objects, not one wrapping array**, for everything that
+  can produce more than one. `emit_json` is `println!` of
+  `serde_json::to_string`, so each object is exactly one line and a
+  caller reads the output line by line. Each is printed as it is
+  finished, so the first folder's results arrive before the last folder
+  has been touched, and a run that dies half-way has still delivered
+  what it completed. The unit differs by command, and follows what the
+  command is *about*: one object per selected **message** for `read`,
+  `thread`, `part list` and `flag list`/`tag list`, and one per
+  **folder group** for `uid`, `move` and `flag`/`tag` add and remove,
+  which act on a whole group in one `UID STORE` or `UID MOVE`.
+- **`search`/`unread` are the exception, and emit one object** covering
+  every folder, because their `count` is a total: `--max` is a budget
+  spent across the folders in order, each one taking what the previous
+  ones left (`search_folders`, `src/imap/real.rs`), so how many results
+  there are is not known until the last folder has been searched.
+  Ordering stays per folder — `-S` sorts within a folder, and the
+  folders keep the order `-f` gave them. `info`, `count`, `folder`,
+  `part save` and `tag known` emit one object because there is only
+  ever one.
+- **`"folder"` for a single folder, `"folders"` for several** — the same
+  rule the text output follows, stated once above under the search
+  iteration.
+- **The wire form is what JSON carries**, everywhere the two differ:
+  `tag list` prints `régie` as text but writes `r&AOk-gie` in JSON, and
+  the keyword names in `added`/`removed` are the atoms that went to the
+  server. Text output is for a reader, who benefits from decoding; JSON
+  is for a caller, who has to be able to send back what it was given.
+- **The shapes are types, not `serde_json::json!` literals.** Every
+  object above is a `#[derive(Serialize)]` struct in `src/cli/mod.rs`
+  (or, for `FolderInfo`, `SearchResult`, `Mailbox` and `PartInfo`, the
+  shared types in `src/imap/mod.rs` that the backends already fill in).
+  A field renamed in the struct is a field renamed in the output, which
+  is what keeps the README table checkable against the code rather than
+  against a format string.
 
 ## Error handling
 

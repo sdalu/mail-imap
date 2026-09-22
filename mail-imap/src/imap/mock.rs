@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::imap::{
+    Permanent,
     sort_results, thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, SearchResult,
     SortCriteria, ThreadRefs,
 };
@@ -20,6 +21,9 @@ pub struct MockClient {
     message_flags: BTreeMap<u32, BTreeSet<String>>,
     /// Mailboxes `set_subscribed` has been told about.
     subscribed: BTreeSet<String>,
+    /// (folder, uid) pairs `move_messages` has filed elsewhere; they
+    /// stop being listed by `folder_uids` for that folder.
+    moved: BTreeSet<(String, u32)>,
 }
 
 impl MockClient {
@@ -51,6 +55,7 @@ impl MockClient {
             ],
             message_flags: BTreeMap::new(),
             subscribed: BTreeSet::new(),
+            moved: BTreeSet::new(),
         })
     }
 
@@ -135,6 +140,13 @@ impl MockClient {
 }
 
 impl ImapBackend for MockClient {
+    /// The mock advertises nothing, which is the point: it stands in
+    /// for the barest server there is, so every degradation ladder is
+    /// exercised offline.
+    fn capabilities(&mut self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     fn list_folders(&mut self) -> Result<Vec<FolderInfo>> {
         Ok(self
             .folders
@@ -143,7 +155,15 @@ impl ImapBackend for MockClient {
                 name: name.clone(),
                 delimiter: Some("/".to_string()),
                 no_inferiors: name == "INBOX",
-                attrs: Vec::new(),
+                // RFC 6154 special uses, as an account that has them
+                // would report them.
+                attrs: match name.as_str() {
+                    "Sent Items" => vec!["\\Sent".to_string()],
+                    "Drafts" => vec!["\\Drafts".to_string()],
+                    "Trash" => vec!["\\Trash".to_string()],
+                    "Spam" => vec!["\\Junk".to_string()],
+                    _ => Vec::new(),
+                },
             })
             .collect())
     }
@@ -209,8 +229,13 @@ impl ImapBackend for MockClient {
         }
     }
 
-    fn folder_uids(&mut self, _folder: &str) -> Result<Vec<u32>> {
-        Ok(self.messages.iter().map(|(u, _, _, _)| *u).collect())
+    fn folder_uids(&mut self, folder: &str) -> Result<Vec<u32>> {
+        Ok(self
+            .messages
+            .iter()
+            .map(|(u, _, _, _)| *u)
+            .filter(|u| !self.moved.contains(&(folder.to_string(), *u)))
+            .collect())
     }
 
     fn thread_uids(&mut self, folder: &str, uid: u32) -> Result<Vec<u32>> {
@@ -297,6 +322,27 @@ impl ImapBackend for MockClient {
             for a in add {
                 set.insert(a.clone());
             }
+        }
+        Ok(())
+    }
+
+    fn permanent_flags(&mut self, _folder: &str) -> Result<Permanent> {
+        // The mock keeps whatever it is told, and says so.
+        Ok(Permanent {
+            any_keyword: true,
+            ..Permanent::default()
+        })
+    }
+
+    fn move_messages(&mut self, folder: &str, uids: &[u32], to: &str) -> Result<()> {
+        if !self.folders.iter().any(|f| f == to) {
+            bail!("no mailbox '{}' to file into", to);
+        }
+        for uid in uids {
+            if !self.messages.iter().any(|(u, _, _, _)| u == uid) {
+                bail!("no message with UID {} in '{}'", uid, folder);
+            }
+            self.moved.insert((folder.to_string(), *uid));
         }
         Ok(())
     }

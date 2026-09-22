@@ -60,6 +60,39 @@ mod tests {
     }
 
     #[test]
+    fn organize_files_mail_and_the_source_stops_listing_it() {
+        let mut client = client_at(AccessLevel::Organize);
+        let before = client.folder_uids("INBOX").expect("uids");
+        assert!(before.contains(&1));
+        client.move_messages("INBOX", &[1], "Trash").expect("file it");
+        let after = client.folder_uids("INBOX").expect("uids");
+        assert!(!after.contains(&1), "the source no longer lists it");
+        assert_eq!(after.len(), before.len() - 1);
+    }
+
+    #[test]
+    fn a_move_needs_somewhere_to_go() {
+        let mut client = client_at(AccessLevel::Organize);
+        // The target has to exist: making one is restructure's business.
+        assert!(client.move_messages("INBOX", &[1], "Nope").is_err());
+        // And a move to where they already are is not a move.
+        let err = client
+            .move_messages("INBOX", &[1], "inbox")
+            .expect_err("same mailbox, case-insensitively");
+        assert!(err.to_string().contains("already are"), "{}", err);
+    }
+
+    #[test]
+    fn readonly_files_nothing() {
+        let mut client = client_at(AccessLevel::ReadOnly);
+        let err = client
+            .move_messages("INBOX", &[1], "Trash")
+            .expect_err("readonly changes nothing");
+        assert!(err.to_string().contains("readonly"), "{}", err);
+        assert!(client.folder_uids("INBOX").unwrap().contains(&1));
+    }
+
+    #[test]
     fn organize_leaves_the_folder_tree_alone() {
         let mut client = client_at(AccessLevel::Organize);
         for err in [

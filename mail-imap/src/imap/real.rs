@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::imap::mime;
 use crate::imap::{
+    Permanent,
     sort_results, thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, SearchResult,
     SortCriteria, SortKey, ThreadRefs,
 };
@@ -561,7 +562,30 @@ impl RealClient {
     }
 }
 
+/// The RFC 6154 special use a `LIST` attribute names, if it is one.
+fn special_use_attr(attr: &NameAttribute<'_>) -> Option<&'static str> {
+    match attr {
+        NameAttribute::All => Some("\\All"),
+        NameAttribute::Archive => Some("\\Archive"),
+        NameAttribute::Drafts => Some("\\Drafts"),
+        NameAttribute::Flagged => Some("\\Flagged"),
+        NameAttribute::Junk => Some("\\Junk"),
+        NameAttribute::Sent => Some("\\Sent"),
+        NameAttribute::Trash => Some("\\Trash"),
+        _ => None,
+    }
+}
+
 impl ImapBackend for RealClient {
+    fn capabilities(&mut self) -> Result<Vec<String>> {
+        self.ensure_capabilities();
+        Ok(self
+            .capabilities
+            .as_ref()
+            .map(|caps| caps.iter().cloned().collect())
+            .unwrap_or_default())
+    }
+
     fn list_folders(&mut self) -> Result<Vec<FolderInfo>> {
         let names = self.session
             .list(None, Some("*"))?
@@ -571,6 +595,14 @@ impl ImapBackend for RealClient {
                 let mut attrs = Vec::new();
                 if n.attributes().contains(&NameAttribute::Marked) {
                     attrs.push("\\Marked".to_string());
+                }
+                // RFC 6154: the special uses are what says which
+                // mailbox is the Trash on an account that does not
+                // call it "Trash".
+                for attr in n.attributes() {
+                    if let Some(name) = special_use_attr(attr) {
+                        attrs.push(name.to_string());
+                    }
                 }
                 FolderInfo {
                     name: n.name().to_string(),
@@ -862,6 +894,94 @@ impl ImapBackend for RealClient {
             if !add.is_empty() {
                 self.store_one(folder, &list, '+', add)?;
             }
+        }
+        Ok(())
+    }
+
+    fn permanent_flags(&mut self, folder: &str) -> Result<Permanent> {
+        let mailbox = self
+            .session
+            .select(folder)
+            .with_context(|| format!("could not select '{}'", folder))?;
+        let mut out = Permanent {
+            unstated: mailbox.permanent_flags.is_empty(),
+            ..Permanent::default()
+        };
+        for flag in &mailbox.permanent_flags {
+            match flag {
+                Flag::MayCreate => out.any_keyword = true,
+                other => out.flags.push(other.to_string()),
+            }
+        }
+        if self.debug {
+            eprintln!(
+                "PERMANENTFLAGS of '{}': {} {}",
+                folder,
+                if out.unstated {
+                    "(none stated; every flag is permanent)".to_string()
+                } else {
+                    out.flags.join(" ")
+                },
+                if out.any_keyword { "\\* (new keywords allowed)" } else { "" }
+            );
+        }
+        Ok(out)
+    }
+
+    fn move_messages(&mut self, folder: &str, uids: &[u32], to: &str) -> Result<()> {
+        self.session
+            .select(folder)
+            .with_context(|| format!("could not select '{}'", folder))?;
+        let native = self.has_capability("MOVE");
+        let uidplus = self.has_capability("UIDPLUS");
+        if !native && !uidplus {
+            // The only remaining route is COPY + \Deleted + EXPUNGE, and
+            // a plain EXPUNGE removes every \Deleted message in the
+            // mailbox, not just these -- including ones somebody else
+            // marked. Refusing beats quietly deleting a stranger's mail.
+            bail!(
+                "the server advertises neither MOVE (RFC 6851) nor UIDPLUS (RFC 4315), \
+                 so filing mail would have to end in a plain EXPUNGE -- which removes \
+                 every message marked \\Deleted in '{}', not only these. Refusing",
+                folder
+            );
+        }
+        if self.debug {
+            eprintln!(
+                "Moving {} message(s) to '{}' via {}",
+                uids.len(),
+                to,
+                if native { "UID MOVE" } else { "UID COPY + UID EXPUNGE" }
+            );
+        }
+        const BATCH: usize = 50;
+        for chunk in uids.chunks(BATCH) {
+            let list = chunk
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            if native {
+                self.session
+                    .uid_mv(&list, to)
+                    .with_context(|| format!("UID MOVE {} to '{}'", list, to))?;
+                continue;
+            }
+            // Copy first: if this fails nothing has been marked, and if
+            // a later step fails the messages exist in both places.
+            self.session
+                .uid_copy(&list, to)
+                .with_context(|| format!("UID COPY {} to '{}'", list, to))?;
+            self.store_one(folder, &list, '+', &["\\Deleted".to_string()])?;
+            self.session
+                .uid_expunge(&list)
+                .with_context(|| {
+                    format!(
+                        "UID EXPUNGE {} in '{}' (the copies in '{}' are safe; the \
+                         originals are still there, marked \\Deleted)",
+                        list, folder, to
+                    )
+                })?;
         }
         Ok(())
     }
@@ -1228,7 +1348,7 @@ mod tests {
     #[test]
     fn header_value_keeps_raw_8bit_bytes() {
         // Exactly the kind of bytes that break imap-proto's ENVELOPE
-        // parser and used to abort the whole search with a fake "Bye".
+        // parser and would abort the whole search with a fake "Bye".
         let raw = b"Subject: Votre facture \xe9!\r\nFrom: a@b.c\r\n";
         assert_eq!(
             header_value(raw, b"Subject").unwrap(),

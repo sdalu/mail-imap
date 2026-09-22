@@ -5,18 +5,19 @@ mod cli;
 mod config;
 mod imap;
 
-use cli::select::{parse_selections, Selection, UidItem};
+use cli::select::{parse_selections, Selection};
 use cli::FolderSpec;
 
 /// Text shown under every command that takes a message selection.
 const SELECTION_HELP: &str = "\
 A message selection is [FOLDER::]UIDS — 5, 1,4,7, 1-9 (a UID range), '*' \
-(every message), 9- or 9-* (from 9 to the end), Archive::1-5. '::' binds \
-the folder, so a single ':' is free to be IMAP's own range operator \
-(INBOX::1:5 works). A range is an \
-interval of the UID space, so it may match fewer messages than its span; \
-for a COUNT of messages use --last N / --first N instead, which no range \
-can express. Without a folder the selection means the -f folder (or \
+(every message, and '*' is only ever that), 9- (from 9 to the end of the \
+mailbox), last:20 / first:5 (a count of messages, which no range can \
+express), Archive::1-5. '::' binds the folder; a single ':' introduces a \
+count and nothing else, so IMAP's own range operator is not taken — write \
+1-5, not 1:5. A range is an \
+interval of the UID space, so it may match fewer messages than its span. \
+Without a folder a selection means the -f folder (or \
 \"folder\" from the config).";
 
 #[derive(Parser)]
@@ -75,7 +76,8 @@ struct Args {
     )]
     sort: Option<String>,
 
-    /// Narrow what this run may change: readonly, organize or full.
+    /// Narrow what this run may change: readonly, organize,
+    /// restructure or full.
     /// The config's "access-level" sets the ceiling; this can only lower
     /// it, never raise it
     #[clap(long = "access-level", global = true, value_name = "LEVEL")]
@@ -105,63 +107,69 @@ fn folder_spec(args: &Args) -> FolderSpec {
     FolderSpec::new(patterns)
 }
 
-/// The messages a command works on: explicit selections, or a count of
-/// the newest / oldest messages of each selected folder. A count is a
-/// flag rather than a selection token because `last:20` would collide
-/// with the `FOLDER:UIDS` split.
-#[derive(clap::Args)]
+/// The messages a command works on.
+#[derive(clap::Args, Clone)]
 struct Sel {
-    /// Message selection(s): 5, 1,4,7, 1-9, 9-, '*', Archive::1-5
+    /// Message selection(s): 5, 1,4,7, 1-9, 9-, '*', last:20, Archive::1-5
     #[clap(value_name = "SELECTION")]
     selection: Vec<String>,
+}
 
-    /// The N newest messages (the N highest UIDs) of each selected
-    /// folder, instead of a selection
-    #[clap(
-        short = 'L',
-        long = "last",
-        value_name = "N",
-        conflicts_with = "first",
-        value_parser = clap::value_parser!(u32).range(1..)
-    )]
-    last: Option<u32>,
-
-    /// The N oldest messages (the N lowest UIDs) of each selected folder
-    #[clap(
-        long = "first",
-        value_name = "N",
-        value_parser = clap::value_parser!(u32).range(1..)
-    )]
-    first: Option<u32>,
+/// Split the arguments of `flag`/`tag` add|remove into selections and
+/// names.
+///
+/// No separator is needed: the two cannot be confused, since a name
+/// that would read as a selection is refused by `parse_flag_names`.
+/// Selections come first and names follow — the shapes would allow any
+/// order, but one order reads the same way every time, and a selection
+/// after a name is far likelier to be a mistake than an intention.
+fn split_args(args: &[String], json: bool) -> (Vec<Selection>, Vec<String>) {
+    let split = args
+        .iter()
+        .position(|a| cli::select::parse_selection(a).is_err())
+        .unwrap_or(args.len());
+    let (sel_args, names) = args.split_at(split);
+    let (sel_args, names): (Vec<String>, Vec<String>) = (sel_args.to_vec(), names.to_vec());
+    if let Some(stray) = names
+        .iter()
+        .find(|a| cli::select::parse_selection(a).is_ok())
+    {
+        fail(
+            json,
+            &format!(
+                "'{}' is a message selection, and selections come before names: \
+                 write them all first",
+                stray
+            ),
+        );
+    }
+    if sel_args.is_empty() {
+        fail(
+            json,
+            "no message selection given: name messages (5, 1-9, Archive::3) \
+             or a count of them (last:20, first:5)",
+        );
+    }
+    if names.is_empty() {
+        fail(json, "no flag or tag name given");
+    }
+    match parse_selections(&sel_args) {
+        Ok(s) => (s, names),
+        Err(e) => fail(json, &format!("{:#}", e)),
+    }
 }
 
 impl Sel {
-    /// The parsed selections and the recency count; exactly one of the
-    /// two is ever populated.
-    fn resolve(&self, json: bool) -> (Vec<Selection>, Option<UidItem>) {
-        let count = self.last.map(UidItem::Last).or(self.first.map(UidItem::First));
-        if let Some(item) = count {
-            if !self.selection.is_empty() {
-                fail(
-                    json,
-                    &format!(
-                        "--last/--first name a count of messages, so they cannot be \
-                         combined with the message selection(s) '{}'",
-                        self.selection.join(" ")
-                    ),
-                );
-            }
-            return (Vec::new(), Some(item));
-        }
+    fn resolve(&self, json: bool) -> Vec<Selection> {
         if self.selection.is_empty() {
             fail(
                 json,
                 "no message selection given: name messages (5, 1-9, Archive::3) \
-                 or ask for a count with --last N / --first N",
+                 or a count of them (last:20, first:5)",
             );
         }
         match parse_selections(&self.selection) {
-            Ok(s) => (s, None),
+            Ok(s) => s,
             Err(e) => fail(json, &format!("{:#}", e)),
         }
     }
@@ -170,11 +178,16 @@ impl Sel {
 #[derive(clap::Subcommand)]
 enum Command {
     /// List folders, or change the folder tree (create / rename /
-    /// subscribe — each needs access-level 'restructure')
+    /// subscribe / unsubscribe — each needs access-level 'restructure')
     Folder {
         #[clap(subcommand)]
         action: Option<FolderAction>,
     },
+    /// What this run can do and what the server is: the access level
+    /// in force, the hierarchy delimiter to build folder paths with,
+    /// the special-use mailboxes, and which wire path each operation
+    /// takes here
+    Info,
     /// Search emails in the selected folders (IMAP SEARCH query: "ALL"
     /// for every message, "UNSEEN", 'HEADER FROM "foo"')
     Search {
@@ -202,6 +215,14 @@ enum Command {
     },
     /// List unread emails of the selected folder(s)
     Unread,
+    /// File email(s) into another folder, named last, as `mv` does:
+    /// `move 1-5 Archive` (needs access-level 'organize'; the folder
+    /// must already exist)
+    #[clap(after_help = SELECTION_HELP)]
+    Move {
+        #[clap(flatten)]
+        sel: Sel,
+    },
     /// List or save MIME parts of an email
     Part {
         /// What to do with the parts
@@ -233,10 +254,14 @@ enum FolderAction {
         /// (Archive/2026)
         name: String,
         /// Declare an RFC 6154 special use at creation — the only
-        /// moment IMAP allows it: \Archive, \Drafts, \Junk, \Sent,
-        /// \Trash, \All, \Flagged. Needs CREATE-SPECIAL-USE
+        /// moment IMAP allows it: archive, drafts, junk, sent, trash,
+        /// all, flagged. Needs CREATE-SPECIAL-USE
         #[clap(long = "use", value_name = "ATTR")]
         use_attr: Option<String>,
+        /// Take the --use attribute in the form a `folder` listing
+        /// prints it (`\Archive`) rather than as a bare word
+        #[clap(long = "wire")]
+        wire: bool,
     },
     /// Rename a mailbox (INBOX is refused: renaming it empties it)
     Rename {
@@ -263,27 +288,34 @@ enum FlagAction {
     /// email(s)
     #[clap(after_help = SELECTION_HELP)]
     List {
+        /// Print the atoms as the server sent them (`\Seen`), rather
+        /// than in the form `flag add` takes back
+        #[clap(long = "wire")]
+        wire: bool,
         #[clap(flatten)]
         sel: Sel,
     },
     /// Enable the given flags on the selected email(s)
     #[clap(after_help = SELECTION_HELP)]
     Add {
-        #[clap(flatten)]
-        sel: Sel,
-        /// Flags to add (after `--`): `\Seen`, `\Answered`, `\Flagged`,
-        /// `\Deleted` or `\Draft`
-        #[clap(value_name = "FLAG", required = true, last = true)]
-        flags: Vec<String>,
+        /// Take the flag names in the form a listing prints them
+        /// (`\Seen`) rather than as bare words
+        #[clap(long = "wire")]
+        wire: bool,
+        /// Message selection(s) and the flags to add, in any order:
+        /// seen, answered, flagged, deleted, draft
+        #[clap(value_name = "SELECTION|FLAG", required = true)]
+        args: Vec<String>,
     },
     /// Disable the given flags on the selected email(s)
     #[clap(after_help = SELECTION_HELP)]
     Remove {
-        #[clap(flatten)]
-        sel: Sel,
-        /// Flags to remove (after `--`, same forms as `flag add`)
-        #[clap(value_name = "FLAG", required = true, last = true)]
-        flags: Vec<String>,
+        /// Take the flag names in the form a listing prints them
+        #[clap(long = "wire")]
+        wire: bool,
+        /// Message selection(s) and the flags to remove
+        #[clap(value_name = "SELECTION|FLAG", required = true)]
+        args: Vec<String>,
     },
 }
 
@@ -292,38 +324,51 @@ enum TagAction {
     /// List the keywords with an agreed meaning: the IANA registry,
     /// and the conventions no registry covers (no server needed)
     Known,
+    /// Mark the selected email(s) junk: set every spelling of it the
+    /// mailbox keeps, and clear every spelling of the opposite
+    #[clap(after_help = SELECTION_HELP)]
+    Junk {
+        #[clap(flatten)]
+        sel: Sel,
+    },
+    /// Mark the selected email(s) not junk (the same, the other way)
+    #[clap(name = "notjunk", after_help = SELECTION_HELP)]
+    NotJunk {
+        #[clap(flatten)]
+        sel: Sel,
+    },
     /// List the custom keyword tags of the selected email(s)
     #[clap(after_help = SELECTION_HELP)]
     List {
+        /// Print the atoms as the server sent them, rather than in the
+        /// form `tag add` takes back
+        #[clap(long = "wire")]
+        wire: bool,
         #[clap(flatten)]
         sel: Sel,
     },
     /// Add the given tags to the selected email(s)
     #[clap(after_help = SELECTION_HELP)]
     Add {
-        #[clap(flatten)]
-        sel: Sel,
         /// Send the tag names verbatim, as the atoms they already are —
         /// for a key copied out of a listing
         #[clap(long = "wire")]
         wire: bool,
-        /// Tags (after `--`): custom IMAP keywords, e.g. `invoice`,
-        /// `$Important`. A non-ASCII tag is encoded to modified UTF-7
-        /// (régie becomes r&AOk-gie)
-        #[clap(value_name = "TAG", required = true, last = true)]
-        tags: Vec<String>,
+        /// Message selection(s) and the keywords to add, in any order
+        /// (`invoice`, `$Important`; a non-ASCII tag is encoded to
+        /// modified UTF-7, so régie becomes r&AOk-gie)
+        #[clap(value_name = "SELECTION|TAG", required = true)]
+        args: Vec<String>,
     },
     /// Remove the given tags from the selected email(s)
     #[clap(after_help = SELECTION_HELP)]
     Remove {
-        #[clap(flatten)]
-        sel: Sel,
         /// Send the tag names verbatim (see `tag add --wire`)
         #[clap(long = "wire")]
         wire: bool,
-        /// Tags to remove (after `--`, same forms as `tag add`)
-        #[clap(value_name = "TAG", required = true, last = true)]
-        tags: Vec<String>,
+        /// Message selection(s) and the keywords to remove
+        #[clap(value_name = "SELECTION|TAG", required = true)]
+        args: Vec<String>,
     },
 }
 
@@ -352,13 +397,26 @@ enum PartsAction {
 fn main() {
     let args = Args::parse();
 
+    // `info` reports which file the rest of the run read; under --mock
+    // there may well be none, and saying so beats naming a path that
+    // was never opened.
+    let mut config_file: Option<String> = None;
     let mut config = if args.mock {
         // Mock mode needs no server, so a missing config is fine.
-        config::load_config(args.config_file.as_deref()).unwrap_or_default()
+        match config::load_config(args.config_file.as_deref()) {
+            Ok(cfg) => {
+                config_file = Some(config::config_path(args.config_file.as_deref()));
+                cfg
+            }
+            Err(_) => config::Config::default(),
+        }
     } else {
         match config::load_config(args.config_file.as_deref()) {
             Ok(cfg) => cfg,
-            Err(e) => fail(args.json, &format!("Configuration error: {}", e)),
+            // {:#} so the cause travels with the context: the outer
+            // frame names the file, the inner one says what is wrong
+            // with it, and only the pair is actionable.
+            Err(e) => fail(args.json, &format!("Configuration error: {:#}", e)),
         }
     };
     if args.mock {
@@ -375,6 +433,7 @@ fn main() {
     }
 
     let json = args.json;
+    let configured_access = config.access;
     if let Some(name) = &args.access_level {
         match config::AccessLevel::parse(name) {
             Ok(level) if level <= config.access => config.access = level,
@@ -395,9 +454,11 @@ fn main() {
     let result = match &args.command {
         Command::Folder { action } => match action {
             None => cli::list_folders(&config, json, debug),
-            Some(FolderAction::Create { name, use_attr }) => {
-                cli::folder_create(&config, name, use_attr.as_deref(), json, debug)
-            }
+            Some(FolderAction::Create {
+                name,
+                use_attr,
+                wire,
+            }) => cli::folder_create(&config, name, use_attr.as_deref(), *wire, json, debug),
             Some(FolderAction::Rename { from, to }) => {
                 cli::folder_rename(&config, from, to, json, debug)
             }
@@ -408,16 +469,22 @@ fn main() {
                 cli::folder_subscribe(&config, name, false, json, debug)
             }
         },
+        Command::Info => cli::info(
+            &config,
+            config_file.as_deref(),
+            configured_access,
+            json,
+            debug,
+        ),
         Command::Search { query } => {
             cli::search_emails(&config, query, &folder_spec(&args), json, debug)
         }
         Command::Read { sel } => {
-            let (selections, recency) = sel.resolve(json);
+            let selections = sel.resolve(json);
             cli::read_emails(
                 &config,
                 &folder_spec(&args),
                 &selections,
-                recency,
                 json,
                 debug,
             )
@@ -425,25 +492,48 @@ fn main() {
         Command::Count => cli::mailbox_counts(&config, &folder_spec(&args), json, debug),
         Command::Uid => cli::folder_uids(&config, &folder_spec(&args), json, debug),
         Command::Thread { sel } => {
-            let (selections, recency) = sel.resolve(json);
+            let selections = sel.resolve(json);
             cli::thread_uids(
                 &config,
                 &folder_spec(&args),
                 &selections,
-                recency,
                 json,
                 debug,
             )
         }
         Command::Unread => cli::unread(&config, &folder_spec(&args), json, debug),
+        Command::Move { sel } => {
+            // The last argument is the folder, as `mv` has it. A
+            // forgotten one needs no guard: `move 1-5` leaves nothing
+            // to select and says so, and `move 1 2` is refused by the
+            // backend unless a mailbox really is called 2.
+            let Some((to, rest)) = sel.selection.split_last() else {
+                fail(
+                    json,
+                    "move needs the folder to file into as its last argument \
+                     (move 1-5 Archive)",
+                )
+            };
+            let selections = Sel {
+                selection: rest.to_vec(),
+            }
+            .resolve(json);
+            cli::move_messages(
+                &config,
+                &folder_spec(&args),
+                &selections,
+                to,
+                json,
+                debug,
+            )
+        }
         Command::Part { action } => match action {
             PartsAction::List { sel } => {
-                let (selections, recency) = sel.resolve(json);
+                let selections = sel.resolve(json);
                 cli::parts_list(
                     &config,
                     &folder_spec(&args),
                     &selections,
-                    recency,
                     json,
                     debug,
                 )
@@ -469,43 +559,41 @@ fn main() {
             }
         },
         Command::Flag { action } => match action {
-            FlagAction::List { sel } => {
-                let (selections, recency) = sel.resolve(json);
+            FlagAction::List { sel, wire } => {
+                let selections = sel.resolve(json);
                 cli::flag_list(
                     &config,
                     &folder_spec(&args),
                     &selections,
-                    recency,
                     false,
+                    *wire,
                     json,
                     debug,
                 )
             }
-            FlagAction::Add { sel, flags } => {
-                let (selections, recency) = sel.resolve(json);
+            FlagAction::Add { args: argv, wire } => {
+                let (selections, names) = split_args(argv, json);
                 cli::change_flags(
                     &config,
                     &folder_spec(&args),
                     &selections,
-                    recency,
-                    flags,
+                    &names,
                     true,
-                    false,
+                    *wire,
                     true,
                     json,
                     debug,
                 )
             }
-            FlagAction::Remove { sel, flags } => {
-                let (selections, recency) = sel.resolve(json);
+            FlagAction::Remove { args: argv, wire } => {
+                let (selections, names) = split_args(argv, json);
                 cli::change_flags(
                     &config,
                     &folder_spec(&args),
                     &selections,
-                    recency,
-                    flags,
+                    &names,
                     true,
-                    false,
+                    *wire,
                     false,
                     json,
                     debug,
@@ -514,26 +602,33 @@ fn main() {
         },
         Command::Tag { action } => match action {
             TagAction::Known => cli::tags_known(json),
-            TagAction::List { sel } => {
-                let (selections, recency) = sel.resolve(json);
+            TagAction::Junk { sel } => {
+                let selections = sel.resolve(json);
+                cli::set_junk(&config, &folder_spec(&args), &selections, true, json, debug)
+            }
+            TagAction::NotJunk { sel } => {
+                let selections = sel.resolve(json);
+                cli::set_junk(&config, &folder_spec(&args), &selections, false, json, debug)
+            }
+            TagAction::List { sel, wire } => {
+                let selections = sel.resolve(json);
                 cli::flag_list(
                     &config,
                     &folder_spec(&args),
                     &selections,
-                    recency,
                     true,
+                    *wire,
                     json,
                     debug,
                 )
             }
-            TagAction::Add { sel, tags, wire } => {
-                let (selections, recency) = sel.resolve(json);
+            TagAction::Add { args: argv, wire } => {
+                let (selections, names) = split_args(argv, json);
                 cli::change_flags(
                     &config,
                     &folder_spec(&args),
                     &selections,
-                    recency,
-                    tags,
+                    &names,
                     false,
                     *wire,
                     true,
@@ -541,14 +636,13 @@ fn main() {
                     debug,
                 )
             }
-            TagAction::Remove { sel, tags, wire } => {
-                let (selections, recency) = sel.resolve(json);
+            TagAction::Remove { args: argv, wire } => {
+                let (selections, names) = split_args(argv, json);
                 cli::change_flags(
                     &config,
                     &folder_spec(&args),
                     &selections,
-                    recency,
-                    tags,
+                    &names,
                     false,
                     *wire,
                     false,

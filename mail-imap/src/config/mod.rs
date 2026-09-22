@@ -1,4 +1,6 @@
 use anyhow::{bail, Context, Result};
+use libucl::parser::Flags as ParserFlags;
+use libucl::{Emitter, Parser};
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -36,6 +38,12 @@ pub enum AccessLevel {
 impl AccessLevel {
     /// May flags or keywords be changed at all?
     pub fn may_store_flags(self) -> bool {
+        self >= AccessLevel::Organize
+    }
+
+    /// May a message be filed into another folder? This is `organize`'s
+    /// own operation: the message keeps existing, in a different place.
+    pub fn may_move(self) -> bool {
         self >= AccessLevel::Organize
     }
 
@@ -113,6 +121,13 @@ pub struct Config {
     /// Intended for testing/demos; the released binary talks to a real server.
     #[serde(default)]
     pub mock: bool,
+    /// The hierarchy delimiter to build folder paths with, when the
+    /// server's own answer is not to be trusted or not given (a `LIST`
+    /// reporting NIL). Purely advisory: `info` reports it, and nothing
+    /// in the tool rewrites a folder name — names go to the server as
+    /// they are typed.
+    #[serde(default)]
+    pub delimiter: Option<String>,
     /// How much this tool may change on the server. The command line
     /// may narrow it further, never widen it.
     #[serde(default, rename = "access-level", alias = "access_level")]
@@ -149,19 +164,27 @@ impl Default for Config {
             max: default_max(),
             sort: None,
             mock: false,
+            delimiter: None,
             access: AccessLevel::default(),
         }
     }
 }
 
-pub fn load_config(path: Option<&str>) -> Result<Config> {
-    let path = match path {
+/// The config file this run reads: `--config`, else
+/// `$MAIL_IMAP_CONFIG`, else the system-wide default. Resolved in one
+/// place so `info` can report the file the rest of the run used.
+pub fn config_path(path: Option<&str>) -> String {
+    match path {
         Some(p) => p.to_string(),
         None => match std::env::var("MAIL_IMAP_CONFIG") {
             Ok(p) => p,
             Err(_) => "/etc/mail-imap.conf".to_string(),
         },
-    };
+    }
+}
+
+pub fn load_config(path: Option<&str>) -> Result<Config> {
+    let path = config_path(path);
 
     if !Path::new(&path).exists() {
         anyhow::bail!(
@@ -172,8 +195,40 @@ pub fn load_config(path: Option<&str>) -> Result<Config> {
 
     let content = fs::read_to_string(&path)
         .with_context(|| format!("could not read config file: {}", path))?;
-    serde_json::from_str::<Config>(&content)
-        .with_context(|| format!("could not parse config file as JSON: {}", path))
+    parse_config(&content).with_context(|| format!("in config file: {}", path))
+}
+
+/// Parse config text, which is UCL.
+///
+/// UCL is a superset of JSON, so a config written as a JSON object
+/// parses unchanged and every example that predates UCL still works.
+/// The parsed object is emitted back as JSON and handed to serde
+/// rather than being walked key by key: that keeps one definition of
+/// the field names, their aliases and their defaults -- the serde
+/// attributes on `Config` -- instead of a second one that would drift
+/// from it.
+pub fn parse_config(content: &str) -> Result<Config> {
+    // `libucl::Parser::parse` builds a CString and unwraps, so a NUL
+    // byte in the file would abort the process rather than fail.
+    if content.as_bytes().contains(&0) {
+        bail!("config is not text: it contains a NUL byte");
+    }
+
+    // NO_TIME: UCL reads a bare `30s` as a duration. Nothing here is a
+    // duration, so a value that merely looks like one -- a password, a
+    // folder name -- is better kept as the text it was written as.
+    let parsed = Parser::with_flags(ParserFlags::NO_TIME)
+        .parse(content)
+        .map_err(|e| anyhow::anyhow!("could not parse config as UCL: {}", e))?;
+
+    let json = Emitter::JSONCompact
+        .emit(&parsed)
+        .context("could not re-encode the parsed config")?;
+
+    serde_json::from_str::<Config>(&json).context(
+        "config parsed as UCL but is not valid for this tool \
+         (unknown access level, or a field of the wrong type)",
+    )
 }
 
 #[cfg(test)]
@@ -263,5 +318,98 @@ mod tests {
             r#"{"server":"s","username":"u","password":"p","access-level":"nope"}"#
         )
         .is_err());
+    }
+
+    // --------------------------------------------------- UCL parsing
+
+    #[test]
+    fn the_config_is_ucl_not_json() {
+        // The shape the file actually takes: bare keys, no braces, no
+        // commas, unquoted enum value.
+        let cfg = parse_config(
+            "server = \"imap.example.com\"\n\
+             username = \"user@example.com\"\n\
+             password = \"secret\"\n\
+             access-level = full\n\
+             max = 200\n",
+        )
+        .expect("UCL config should parse");
+        assert_eq!(cfg.server, "imap.example.com");
+        assert_eq!(cfg.username, "user@example.com");
+        assert_eq!(cfg.access, AccessLevel::Full);
+        assert_eq!(cfg.max, 200);
+        assert_eq!(cfg.port, default_port(), "untouched field keeps its default");
+    }
+
+    #[test]
+    fn json_is_still_a_valid_config_because_ucl_is_a_superset() {
+        // Every config written before the switch, and every JSON
+        // example in the documents, has to keep working.
+        let cfg = parse_config(
+            r#"{"server":"s","username":"u","password":"p","access-level":"readonly","max":7}"#,
+        )
+        .expect("JSON config should parse as UCL");
+        assert_eq!(cfg.server, "s");
+        assert_eq!(cfg.access, AccessLevel::ReadOnly);
+        assert_eq!(cfg.max, 7);
+    }
+
+    #[test]
+    fn ucl_underscore_alias_and_older_level_spellings_still_read() {
+        let cfg = parse_config(
+            "server = \"s\"\nusername = \"u\"\npassword = \"p\"\n\
+             access_level = non-destructive\n",
+        )
+        .expect("parse");
+        assert_eq!(cfg.access, AccessLevel::Organize);
+    }
+
+    #[test]
+    fn a_config_that_is_not_ucl_is_refused() {
+        let err = parse_config("server = \"unterminated\nusername\n")
+            .expect_err("broken UCL must not parse");
+        let text = format!("{:#}", err);
+        assert!(
+            text.contains("UCL"),
+            "the error should say the file is not UCL, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn an_unknown_access_level_fails_the_whole_file_rather_than_defaulting() {
+        // Silently falling back to `organize` would widen what a
+        // config meant to narrow: a typo in `readonly` must not become
+        // permission to change mail.
+        let err = parse_config(
+            "server = \"s\"\nusername = \"u\"\npassword = \"p\"\naccess-level = readonlyy\n",
+        )
+        .expect_err("an unknown level must be refused");
+        assert!(format!("{:#}", err).contains("readonlyy"));
+    }
+
+    #[test]
+    fn a_field_of_the_wrong_type_is_refused() {
+        assert!(parse_config(
+            "server = \"s\"\nusername = \"u\"\npassword = \"p\"\nport = \"nope\"\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_config_with_a_nul_byte_is_refused_rather_than_aborting() {
+        // libucl builds a CString and unwraps; without the guard this
+        // is a panic, not an error.
+        let err = parse_config("server = \"s\"\0\n").expect_err("NUL must be refused");
+        assert!(format!("{:#}", err).contains("NUL"));
+    }
+
+    #[test]
+    fn a_value_that_looks_like_a_duration_stays_text() {
+        // UCL reads a bare 30s as a duration; NO_TIME keeps it the
+        // text it was written as, which is what a password needs.
+        let cfg = parse_config("server = \"s\"\nusername = \"u\"\npassword = 30s\n")
+            .expect("parse");
+        assert_eq!(cfg.password, "30s");
     }
 }

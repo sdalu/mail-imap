@@ -63,6 +63,37 @@ pub struct Mailbox {
     pub uid_validity: u32,
 }
 
+/// What a server says it will keep in a mailbox, from the
+/// `PERMANENTFLAGS` of `SELECT` (RFC 3501 §7.1).
+///
+/// A keyword stored outside this set is, in the spec's words, either
+/// ignored or kept for the session only — so writing one and reporting
+/// success would be a lie waiting to be found out at the next refresh.
+#[derive(Debug, Clone, Default)]
+pub struct Permanent {
+    /// The names the server listed, as written.
+    pub flags: Vec<String>,
+    /// `\*` was among them: new keywords may be created.
+    pub any_keyword: bool,
+    /// The server said nothing at all, in which case RFC 3501 has the
+    /// client assume every flag is permanent.
+    pub unstated: bool,
+}
+
+impl Permanent {
+    /// Will this mailbox keep a keyword of this name?
+    pub fn keeps(&self, name: &str) -> bool {
+        self.unstated
+            || self.any_keyword
+            || self.flags.iter().any(|f| f.eq_ignore_ascii_case(name))
+    }
+
+    /// Of `wanted`, the spellings this mailbox will actually keep.
+    pub fn keepable<'a>(&self, wanted: &[&'a str]) -> Vec<&'a str> {
+        wanted.iter().copied().filter(|n| self.keeps(n)).collect()
+    }
+}
+
 /// A single MIME part of a message, numbered in document order (1-based)
 /// across all leaf parts of the message.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -79,6 +110,10 @@ pub struct PartInfo {
 /// `flag` / `tag` commands use (nothing ever moves or deletes mail).
 pub trait ImapBackend {
     fn list_folders(&mut self) -> Result<Vec<FolderInfo>>;
+    /// Everything the server advertises, upper-cased. Empty when the
+    /// server was not asked or said nothing — the mock advertises
+    /// none, which is what makes it stand in for a bare server.
+    fn capabilities(&mut self) -> Result<Vec<String>>;
     /// Run `query` against each of `folders` in order (IMAP can only search
     /// one selected mailbox at a time, so this is iteration + aggregation).
     /// Results are grouped per folder and the total result count is capped
@@ -119,6 +154,13 @@ pub trait ImapBackend {
         add: &[String],
         remove: &[String],
     ) -> Result<()>;
+    /// What the server will keep in this mailbox (`PERMANENTFLAGS`).
+    fn permanent_flags(&mut self, folder: &str) -> Result<Permanent>;
+    /// File messages into another mailbox: `UID MOVE` (RFC 6851) when
+    /// the server has it, else `UID COPY` + `\Deleted` + `UID EXPUNGE`
+    /// (RFC 4315). The copy always happens first, so a failure part-way
+    /// leaves a duplicate rather than a hole.
+    fn move_messages(&mut self, folder: &str, uids: &[u32], to: &str) -> Result<()>;
     /// Create a mailbox. `use_attr` is an RFC 6154 special-use
     /// attribute (`\Archive`, `\Sent`, ...) to declare at creation —
     /// the only moment IMAP lets a client set one — and needs the
@@ -142,6 +184,50 @@ pub trait ImapBackend {
         dest: &Path,
     ) -> Result<u64>;
     fn close(&mut self);
+}
+
+#[cfg(test)]
+mod permanent_tests {
+    use super::Permanent;
+
+    fn stated(flags: &[&str], any: bool) -> Permanent {
+        Permanent {
+            flags: flags.iter().map(|s| s.to_string()).collect(),
+            any_keyword: any,
+            unstated: false,
+        }
+    }
+
+    #[test]
+    fn a_silent_server_keeps_everything() {
+        // RFC 3501: if PERMANENTFLAGS is absent the client assumes
+        // every flag is permanent.
+        let p = Permanent {
+            unstated: true,
+            ..Permanent::default()
+        };
+        assert!(p.keeps("anything"));
+        assert_eq!(p.keepable(&["$Junk", "Junk"]), vec!["$Junk", "Junk"]);
+    }
+
+    #[test]
+    fn a_server_that_takes_new_keywords_keeps_everything() {
+        let p = stated(&["\\Seen", "NonJunk"], true);
+        assert!(p.keeps("Junk") && p.keeps("$Junk"));
+    }
+
+    #[test]
+    fn a_closed_list_keeps_only_what_it_names() {
+        // Yahoo and AOL: $Junk/$NotJunk listed, no \*, which is why a
+        // hardcoded `Junk` silently fails to stick there.
+        let p = stated(&["\\Seen", "$Junk", "$NotJunk"], false);
+        assert!(p.keeps("$Junk"));
+        assert!(p.keeps("$junk"), "flag names are case-insensitive");
+        assert!(!p.keeps("Junk"));
+        assert!(!p.keeps("NonJunk"));
+        assert_eq!(p.keepable(&["$Junk", "Junk"]), vec!["$Junk"]);
+        assert!(p.keepable(&["NonJunk", "NotJunk"]).is_empty());
+    }
 }
 
 /// Concrete backend selected at connect time.
@@ -243,6 +329,12 @@ impl ImapBackend for ImapClient {
             Backend::Mock(c) => c.list_folders(),
         }
     }
+    fn capabilities(&mut self) -> Result<Vec<String>> {
+        match &mut self.backend {
+            Backend::Real(c) => c.capabilities(),
+            Backend::Mock(c) => c.capabilities(),
+        }
+    }
     fn search_folders(
         &mut self,
         folders: &[String],
@@ -296,6 +388,29 @@ impl ImapBackend for ImapClient {
         match &mut self.backend {
             Backend::Real(c) => c.store_flags(folder, uids, add, remove),
             Backend::Mock(c) => c.store_flags(folder, uids, add, remove),
+        }
+    }
+    fn permanent_flags(&mut self, folder: &str) -> Result<Permanent> {
+        match &mut self.backend {
+            Backend::Real(c) => c.permanent_flags(folder),
+            Backend::Mock(c) => c.permanent_flags(folder),
+        }
+    }
+    fn move_messages(&mut self, folder: &str, uids: &[u32], to: &str) -> Result<()> {
+        if !self.access.may_move() {
+            bail!(
+                "access level '{}' allows no changes, and filing mail into '{}' is one: \
+                 raise \"access-level\" to 'organize' in the config",
+                self.access.as_str(),
+                to
+            );
+        }
+        if folder.eq_ignore_ascii_case(to) {
+            bail!("'{}' is where those messages already are", to);
+        }
+        match &mut self.backend {
+            Backend::Real(c) => c.move_messages(folder, uids, to),
+            Backend::Mock(c) => c.move_messages(folder, uids, to),
         }
     }
     fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {

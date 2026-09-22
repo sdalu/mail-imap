@@ -9,6 +9,7 @@ use anyhow::{bail, Result};
 use serde::Serialize;
 use select::Selection;
 use unicode_normalization::UnicodeNormalization;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// The folders a command works on, as given on the command line:
@@ -219,6 +220,10 @@ struct FlagListOutput<'a> {
     uid: u32,
     count: usize,
     flags: &'a [String],
+    /// What the junk family says, across all five spellings, when it
+    /// says anything: "junk", "not-junk" or "contradictory".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    junk: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -235,6 +240,14 @@ struct KnownOutput<'a> {
     registered: &'a [KnownKeyword<'a>],
     /// Keywords no registry defines, that clients write anyway.
     well_known: &'a [KnownKeyword<'a>],
+}
+
+#[derive(Serialize)]
+struct MoveOutput<'a> {
+    folder: &'a str,
+    to: &'a str,
+    count: usize,
+    uids: &'a [u32],
 }
 
 #[derive(Serialize)]
@@ -258,19 +271,33 @@ struct PartsSaveOutput<'a> {
     size: u64,
 }
 
-/// Annotate the keywords a convention explains. A `$label1` says
-/// nothing by itself — it is unreadable unless you happen to run the
-/// client that wrote it. JSON keeps the raw names; a person gets the
-/// gloss.
-fn gloss(flags: &[String]) -> Vec<String> {
+/// Render flag names for a reader.
+///
+/// `wire` prints the atoms exactly as the server sent them, which is
+/// what `--wire` on `add`/`remove` takes back. Otherwise each name is
+/// shown in the form you would type it without `--wire`: a system flag
+/// as the bare word `flag add` wants, a modified UTF-7 keyword as the
+/// text it encodes — both of which re-encode to the same atom. What
+/// cannot round-trip is glossed instead of rewritten: a convention
+/// keyword gets its meaning, and a Thunderbird key its text, because
+/// typing either back would produce a different atom.
+///
+/// JSON always carries the wire form; a machine wants the atom.
+fn render_names(flags: &[String], wire: bool) -> Vec<String> {
+    if wire {
+        return flags.to_vec();
+    }
     flags
         .iter()
         .map(|f| {
-            if let Some(means) = keywords::meaning(f) {
+            if let Some(bare) = bare_system_flag(f) {
+                return bare.to_string();
+            }
+            if let Some(means) = keywords::listing_meaning(f) {
                 return format!("{} ({})", f, means);
             }
             if let Some(text) = modutf7::decoded_display(f) {
-                return format!("{} (\"{}\", modified UTF-7)", f, text);
+                return text;
             }
             if let Some(text) = tbkey::decode(f) {
                 return format!("{} (\"{}\", Thunderbird tag key)", f, text);
@@ -280,14 +307,25 @@ fn gloss(flags: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The bare word `flag` takes for a system flag the server sent.
+fn bare_system_flag(name: &str) -> Option<String> {
+    let rest = name.strip_prefix('\\')?;
+    let lower = rest.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "seen" | "answered" | "flagged" | "deleted" | "draft" | "recent"
+    )
+    .then_some(lower)
+}
+
 /// Print the keywords the tool knows about. Needs no server: both
 /// tables live in the binary (`src/cli/keywords.rs`).
 pub fn tags_known(json: bool) -> Result<()> {
     let registered: Vec<KnownKeyword> = keywords::registered()
         .iter()
-        .map(|k| KnownKeyword {
+        .map(|(k, m)| KnownKeyword {
             keyword: k,
-            means: None,
+            means: Some(m),
         })
         .collect();
     let well_known: Vec<KnownKeyword> = keywords::well_known()
@@ -306,7 +344,7 @@ pub fn tags_known(json: bool) -> Result<()> {
     }
     println!("IANA-registered keywords ({}):", registered.len());
     for k in &registered {
-        println!("  {}", k.keyword);
+        println!("  {:<17} {}", k.keyword, k.means.unwrap_or(""));
     }
     println!();
     println!(
@@ -314,7 +352,7 @@ pub fn tags_known(json: bool) -> Result<()> {
         well_known.len()
     );
     for k in &well_known {
-        println!("  {:<10} {}", k.keyword, k.means.unwrap_or(""));
+        println!("  {:<17} {}", k.keyword, k.means.unwrap_or(""));
     }
     println!();
     println!("Any other atom is a valid keyword too; these are the ones with an agreed meaning.");
@@ -369,6 +407,367 @@ pub fn list_folders(config: &Config, json: bool, debug: bool) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------- info
+
+/// What `info` reports about the tool and the account, in the order a
+/// caller needs it: what this build is, what it is allowed to change,
+/// how to spell a folder path, and which wire path each operation will
+/// take on this server.
+#[derive(Serialize)]
+struct InfoOutput<'a> {
+    tool: ToolInfo<'a>,
+    config: ConfigInfo<'a>,
+    access: AccessInfo<'a>,
+    folders: FoldersInfo<'a>,
+    defaults: DefaultsInfo<'a>,
+    server: ServerInfo,
+}
+
+#[derive(Serialize)]
+struct ToolInfo<'a> {
+    name: &'a str,
+    version: &'a str,
+    /// `real` or `mock`.
+    backend: &'a str,
+}
+
+#[derive(Serialize)]
+struct ConfigInfo<'a> {
+    /// The file the settings came from, or `null` when none was read
+    /// (`--mock` without a config).
+    path: Option<&'a str>,
+    server: &'a str,
+    port: u16,
+    /// `implicit`, `starttls` or `none`.
+    tls: &'a str,
+    insecure: bool,
+    username: &'a str,
+}
+
+#[derive(Serialize)]
+struct AccessInfo<'a> {
+    /// What this run may do: the config's level, narrowed by
+    /// `--access-level`.
+    effective: &'a str,
+    /// The ceiling the config sets.
+    configured: &'a str,
+    may: AccessMay,
+}
+
+#[derive(Serialize)]
+struct AccessMay {
+    store_flags: bool,
+    move_messages: bool,
+    change_folders: bool,
+    set_deleted: bool,
+}
+
+#[derive(Serialize)]
+struct FoldersInfo<'a> {
+    /// The delimiter to build a path with, or `null` where there is
+    /// none to be had.
+    delimiter: Option<String>,
+    /// `config`, `server` or `none`.
+    delimiter_source: &'a str,
+    /// What the mailbox list itself reported, kept even when a config
+    /// entry overrides it: the two disagreeing is worth seeing.
+    server_delimiter: Option<String>,
+    /// Every distinct delimiter the mailbox list reported: more than
+    /// one means more than one namespace.
+    delimiters_seen: Vec<String>,
+    /// The folder a command uses when `-f` names none.
+    default: &'a str,
+    default_exists: bool,
+    count: usize,
+    /// RFC 6154 special use -> the mailbox that carries it.
+    special_use: BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct DefaultsInfo<'a> {
+    max: usize,
+    sort: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct ServerInfo {
+    capabilities: Vec<String>,
+    /// The path `move` will take: `UID MOVE`, `UID COPY + UID EXPUNGE`,
+    /// or `refused`.
+    filing: &'static str,
+    /// `server` or `client`, for `-S` and for `thread`.
+    sorting: &'static str,
+    threading: &'static str,
+    /// Whether `folder create --use` can be honoured.
+    create_special_use: bool,
+}
+
+/// `info`: everything a caller would otherwise have to guess — the
+/// access level in force, the hierarchy delimiter, and which wire path
+/// each operation takes on this server.
+pub fn info(
+    config: &Config,
+    config_path: Option<&str>,
+    configured: crate::config::AccessLevel,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    let mut client = ImapClient::connect(config, debug)?;
+    let out = build_info(&mut client, config, config_path, configured)?;
+    if json {
+        return emit_json(&out);
+    }
+    print_info(&out);
+    Ok(())
+}
+
+/// The payload, built from an open connection — separate from `info`
+/// so the suite can read it rather than the printed page.
+fn build_info<'a>(
+    client: &mut ImapClient,
+    config: &'a Config,
+    config_path: Option<&'a str>,
+    configured: crate::config::AccessLevel,
+) -> Result<InfoOutput<'a>> {
+    let caps = client.capabilities()?;
+    let has = |c: &str| caps.iter().any(|x| x.eq_ignore_ascii_case(c));
+    let folders = client.list_folders()?;
+
+    // The delimiter is per mailbox on the wire and per namespace in
+    // practice, so report every one seen and name the one INBOX uses
+    // as the one to build a path with. A config entry overrides it:
+    // the operator saying so beats a server that says NIL.
+    let mut delimiters_seen: Vec<String> = Vec::new();
+    for f in &folders {
+        if let Some(d) = &f.delimiter {
+            if !d.is_empty() && !delimiters_seen.contains(d) {
+                delimiters_seen.push(d.clone());
+            }
+        }
+    }
+    let from_server = folders
+        .iter()
+        .find(|f| f.name.eq_ignore_ascii_case("INBOX"))
+        .and_then(|f| f.delimiter.clone())
+        .filter(|d| !d.is_empty())
+        .or_else(|| delimiters_seen.first().cloned());
+    let (delimiter, delimiter_source) = match (&config.delimiter, &from_server) {
+        (Some(d), _) => (Some(d.clone()), "config"),
+        (None, Some(d)) => (Some(d.clone()), "server"),
+        (None, None) => (None, "none"),
+    };
+
+    let mut special_use: BTreeMap<String, String> = BTreeMap::new();
+    for f in &folders {
+        for attr in &f.attrs {
+            if special_use_name(attr).is_some() {
+                special_use.insert(attr.clone(), f.name.clone());
+            }
+        }
+    }
+
+    let level = config.access;
+    Ok(InfoOutput {
+        tool: ToolInfo {
+            name: env!("CARGO_PKG_NAME"),
+            version: env!("CARGO_PKG_VERSION"),
+            backend: if client.is_mock() { "mock" } else { "real" },
+        },
+        config: ConfigInfo {
+            path: config_path,
+            server: &config.server,
+            port: config.port,
+            tls: if config.ssl {
+                "implicit"
+            } else if config.starttls {
+                "starttls"
+            } else {
+                "none"
+            },
+            insecure: config.insecure,
+            username: &config.username,
+        },
+        access: AccessInfo {
+            effective: level.as_str(),
+            configured: configured.as_str(),
+            may: AccessMay {
+                store_flags: level.may_store_flags(),
+                move_messages: level.may_move(),
+                change_folders: level.may_change_folders(),
+                set_deleted: level.may_set("\\Deleted"),
+            },
+        },
+        folders: FoldersInfo {
+            delimiter,
+            delimiter_source,
+            server_delimiter: from_server,
+            delimiters_seen,
+            default: &config.folder,
+            default_exists: folders
+                .iter()
+                .any(|f| same_folder(&f.name, &config.folder)),
+            count: folders.len(),
+            special_use,
+        },
+        defaults: DefaultsInfo {
+            max: config.max,
+            sort: config.sort.as_deref(),
+        },
+        server: ServerInfo {
+            filing: if has("MOVE") {
+                "UID MOVE"
+            } else if has("UIDPLUS") {
+                "UID COPY + UID EXPUNGE"
+            } else {
+                "refused"
+            },
+            sorting: if has("SORT") { "server" } else { "client" },
+            threading: if has("THREAD=REFERENCES") {
+                "server"
+            } else {
+                "client"
+            },
+            create_special_use: has("CREATE-SPECIAL-USE"),
+            capabilities: caps,
+        },
+    })
+}
+
+/// Is this the same mailbox name? INBOX is the one name IMAP defines
+/// as case-insensitive.
+fn same_folder(a: &str, b: &str) -> bool {
+    a == b || (a.eq_ignore_ascii_case("INBOX") && b.eq_ignore_ascii_case("INBOX"))
+}
+
+/// Whether an attribute is one of the seven RFC 6154 special uses.
+fn special_use_name(attr: &str) -> Option<&'static str> {
+    special_use(attr.trim_start_matches('\\'))
+}
+
+fn yes_no(b: bool) -> &'static str {
+    if b {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn print_info(i: &InfoOutput) {
+    println!("{} {} ({} backend)", i.tool.name, i.tool.version, i.tool.backend);
+    println!(
+        "  config      {}",
+        i.config.path.unwrap_or("(none read: built-in defaults)")
+    );
+    println!(
+        "  account     {}@{}:{} ({}{})",
+        i.config.username,
+        i.config.server,
+        i.config.port,
+        match i.config.tls {
+            "implicit" => "implicit TLS",
+            "starttls" => "STARTTLS",
+            _ => "no TLS",
+        },
+        if i.config.insecure {
+            ", certificate checks off"
+        } else {
+            ""
+        }
+    );
+
+    println!();
+    println!("Access level: {}", i.access.effective);
+    if i.access.effective != i.access.configured {
+        println!("  (narrowed for this run; the config allows {})", i.access.configured);
+    }
+    println!("  set and clear flags and keywords   {}", yes_no(i.access.may.store_flags));
+    println!("  file mail into another folder      {}", yes_no(i.access.may.move_messages));
+    println!("  create / rename / subscribe        {}", yes_no(i.access.may.change_folders));
+    println!("  set \\Deleted                       {}", yes_no(i.access.may.set_deleted));
+
+    println!();
+    println!("Folders");
+    match &i.folders.delimiter {
+        Some(d) => println!(
+            "  delimiter   '{}' (from the {}){}{}",
+            d,
+            i.folders.delimiter_source,
+            match &i.folders.server_delimiter {
+                Some(s) if s != d => format!("; the server reports '{}'", s),
+                None if i.folders.delimiter_source == "config" =>
+                    "; the server reports none".to_string(),
+                _ => String::new(),
+            },
+            if i.folders.delimiters_seen.len() > 1 {
+                format!(
+                    " -- the list also reports {}, so this account has more than one namespace",
+                    i.folders
+                        .delimiters_seen
+                        .iter()
+                        .map(|d| format!("'{}'", d))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                String::new()
+            }
+        ),
+        None => println!("  delimiter   none reported: this account has no hierarchy"),
+    }
+    println!(
+        "  default     {}{}",
+        i.folders.default,
+        if i.folders.default_exists {
+            ""
+        } else {
+            "  -- NOT in the mailbox list"
+        }
+    );
+    println!("  mailboxes   {}", i.folders.count);
+    for (attr, name) in &i.folders.special_use {
+        println!("  {:<11} {}", attr, name);
+    }
+
+    println!();
+    println!("Search defaults");
+    println!(
+        "  max         {}",
+        if i.defaults.max == 0 {
+            "unlimited".to_string()
+        } else {
+            i.defaults.max.to_string()
+        }
+    );
+    println!(
+        "  sort        {}",
+        i.defaults.sort.unwrap_or("(none: most recent first)")
+    );
+
+    println!();
+    println!("This server");
+    println!("  {:<19} {}", "filing mail", i.server.filing);
+    println!("  {:<19} {}-side", "sorting (-S)", i.server.sorting);
+    println!("  {:<19} {}-side", "threading", i.server.threading);
+    println!(
+        "  {:<19} {}",
+        "folder create --use",
+        if i.server.create_special_use {
+            "available"
+        } else {
+            "refused (no CREATE-SPECIAL-USE)"
+        }
+    );
+    println!(
+        "  {:<19} {}",
+        "advertises",
+        if i.server.capabilities.is_empty() {
+            "(nothing)".to_string()
+        } else {
+            i.server.capabilities.join(" ")
+        }
+    );
+}
+
 /// `folder create|rename|subscribe|unsubscribe`. Every one of these is
 /// gated in `ImapClient` on the `restructure` access level; the handler
 /// only reports what happened.
@@ -376,9 +775,14 @@ pub fn folder_create(
     config: &Config,
     name: &str,
     use_attr: Option<&str>,
+    wire_form: bool,
     json: bool,
     debug: bool,
 ) -> Result<()> {
+    // Normalized before the connection is opened: a name the tool will
+    // refuse is worth refusing without a login first.
+    let use_attr = parse_use_attr(use_attr, wire_form)?;
+    let use_attr = use_attr.as_deref();
     let mut client = ImapClient::connect(config, debug)?;
     client.create_folder(name, use_attr)?;
     if json {
@@ -540,50 +944,83 @@ fn selection_groups(
     spec: &FolderSpec,
     config: &Config,
     selections: &[Selection],
-    recency: Option<select::UidItem>,
 ) -> Result<Vec<Group>> {
-    // `--last N` / `--first N` name a count rather than UIDs, so they
-    // are not ambiguous across folders the way a bare UID is: they mean
-    // N per selected folder.
-    if let Some(item) = recency {
-        if !selections.is_empty() {
-            bail!(
-                "--last/--first name a count of messages, so they cannot be combined \
-                 with an explicit message selection"
-            );
+    // An unqualified selection that is only counts (`last:20`) names no
+    // UID, so it is not ambiguous across folders the way a bare UID is:
+    // it means N *per folder*, and applies to each folder -f/-A chose.
+    let mut expanded: Vec<Selection> = Vec::new();
+    let mut needs_default = false;
+    for selection in selections {
+        if selection.folder.is_none() && selection.is_count_only() {
+            for folder in folders(client, spec, config)? {
+                expanded.push(Selection {
+                    folder: Some(folder),
+                    ..selection.clone()
+                });
+            }
+        } else {
+            needs_default |= selection.folder.is_none();
+            expanded.push(selection.clone());
         }
-        let per_folder: Vec<Selection> = folders(client, spec, config)?
-            .into_iter()
-            .map(|folder| Selection {
-                folder: Some(folder),
-                items: vec![item],
-                source: match item {
-                    select::UidItem::Last(n) => format!("--last {}", n),
-                    select::UidItem::First(n) => format!("--first {}", n),
-                    _ => "count".to_string(),
-                },
-            })
-            .collect();
-        return resolve_groups(client, &per_folder, "");
     }
-    let default = if selections.iter().any(|s| s.folder.is_none()) {
+    let default = if needs_default {
         default_folder(client, spec, config)?
     } else {
         String::new()
     };
-    resolve_groups(client, selections, &default)
+    resolve_groups(client, &expanded, &default)
+}
+
+/// `move <SELECTION...> <FOLDER>`: file messages into the mailbox
+/// named last. Gated in `ImapClient` on `organize`; the target folder
+/// has to exist already, since making one is `restructure`'s business.
+pub fn move_messages(
+    config: &Config,
+    spec: &FolderSpec,
+    selections: &[Selection],
+    to: &str,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    let mut client = ImapClient::connect(config, debug)?;
+    let groups = selection_groups(&mut client, spec, config, selections)?;
+
+    for group in &groups {
+        client.move_messages(&group.folder, &group.uids, to)?;
+        if json {
+            emit_json(&MoveOutput {
+                folder: &group.folder,
+                to,
+                count: group.uids.len(),
+                uids: &group.uids,
+            })?;
+            continue;
+        }
+        println!(
+            "Filed {} message(s) from '{}' into '{}': UIDs {}",
+            group.uids.len(),
+            group.folder,
+            to,
+            group
+                .uids
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
 }
 
 pub fn read_emails(
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
-    recency: Option<select::UidItem>,
     json: bool,
     debug: bool,
 ) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
-    let groups = selection_groups(&mut client, spec, config, selections, recency)?;
+    let groups = selection_groups(&mut client, spec, config, selections)?;
     let messages = flatten(&groups);
     if debug {
         eprintln!("Reading {} email(s): {:?}", messages.len(), messages);
@@ -689,12 +1126,11 @@ pub fn thread_uids(
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
-    recency: Option<select::UidItem>,
     json: bool,
     debug: bool,
 ) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
-    let groups = selection_groups(&mut client, spec, config, selections, recency)?;
+    let groups = selection_groups(&mut client, spec, config, selections)?;
 
     for (folder, uid) in flatten(&groups) {
         if debug {
@@ -729,6 +1165,80 @@ pub fn thread_uids(
 
 pub fn unread(config: &Config, spec: &FolderSpec, json: bool, debug: bool) -> Result<()> {
     search_emails(config, "UNSEEN", spec, json, debug)
+}
+
+/// The IMAP-defined flag a bare word names, if it names one. The five
+/// `flag` accepts; `\Recent` is not among them, being the server's.
+fn system_flag(bare: &str) -> Option<&'static str> {
+    match bare.to_ascii_lowercase().as_str() {
+        "seen" => Some("\\Seen"),
+        "answered" => Some("\\Answered"),
+        "flagged" => Some("\\Flagged"),
+        "deleted" => Some("\\Deleted"),
+        "draft" => Some("\\Draft"),
+        _ => None,
+    }
+}
+
+/// The RFC 6154 special-use attribute a bare word names.
+///
+/// The set is closed — a server takes these seven and no others — so
+/// `--use archive` is unambiguous without a sigil, and a bare word
+/// needs no shell quoting where `'\Archive'` does.
+fn special_use(bare: &str) -> Option<&'static str> {
+    match bare.to_ascii_lowercase().as_str() {
+        "all" => Some("\\All"),
+        "archive" => Some("\\Archive"),
+        "drafts" => Some("\\Drafts"),
+        "flagged" => Some("\\Flagged"),
+        "junk" => Some("\\Junk"),
+        "sent" => Some("\\Sent"),
+        "trash" => Some("\\Trash"),
+        _ => None,
+    }
+}
+
+/// Validate `folder create --use` and return the atom to send.
+///
+/// The rule `flag` and `tag` follow, applied to the one other place a
+/// backslashed atom reaches the command line: without `--wire` a bare
+/// word is taken and the wire form refused, with `--wire` the atom a
+/// `folder` listing prints is taken and a bare word refused. Settling
+/// on a closed set here is also what keeps an arbitrary string out of
+/// the `CREATE ... (USE (...))` command line.
+pub fn parse_use_attr(name: Option<&str>, wire_form: bool) -> Result<Option<String>> {
+    let Some(name) = name else {
+        if wire_form {
+            bail!("--wire says how to read --use, and no --use was given");
+        }
+        return Ok(None);
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        bail!("empty --use attribute");
+    }
+    let bare = match name.strip_prefix('\\') {
+        Some(rest) if wire_form => rest,
+        Some(_) => bail!(
+            "'{}' is the wire form: write it as {} here, or pass --wire",
+            name,
+            name.trim_start_matches('\\').to_ascii_lowercase()
+        ),
+        None if wire_form => bail!(
+            "--wire takes the form a listing prints: write '\\{}{}' or drop --wire",
+            name.chars().next().unwrap_or('x').to_ascii_uppercase(),
+            name.get(1..).unwrap_or("").to_ascii_lowercase()
+        ),
+        None => name,
+    };
+    match special_use(bare) {
+        Some(attr) => Ok(Some(attr.to_string())),
+        None => bail!(
+            "'{}' is not an RFC 6154 special use: --use takes all, archive, drafts, \
+             flagged, junk, sent and trash",
+            name
+        ),
+    }
 }
 
 /// Are these two keywords the same name?
@@ -768,8 +1278,9 @@ fn is_invisible(c: char) -> bool {
 /// atom punctuation `$ ! # & ' + - / = ? ^ _ \` { | } ~ .`).
 /// `system` selects which. Deduplicates, preserving order.
 ///
-/// The split is what keeps a mutation honest: `flag add 5 -- '\Deleted'
-/// Trash` used to store a keyword `Trash` on message 5, and now says so.
+/// The split is what keeps a mutation honest: without it,
+/// `flag add 5 -- '\Deleted' Trash` stores a keyword `Trash` on message
+/// 5 and leaves the Trash folder alone.
 pub fn parse_flag_names(names: &[String], system: bool, wire_form: bool) -> Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     for name in names {
@@ -777,39 +1288,63 @@ pub fn parse_flag_names(names: &[String], system: bool, wire_form: bool) -> Resu
         if name.is_empty() {
             bail!("empty flag name");
         }
-        if let Some(rest) = name.strip_prefix('\\') {
-            if !system {
-                bail!(
-                    "'{}' is a system flag; tags must be plain keywords (use the 'flag' command for system flags)",
-                    name
-                );
-            }
-            let normalized = match rest.to_ascii_lowercase().as_str() {
-                "seen" => Some("\\Seen"),
-                "answered" => Some("\\Answered"),
-                "flagged" => Some("\\Flagged"),
-                "deleted" => Some("\\Deleted"),
-                "draft" => Some("\\Draft"),
-                "recent" => bail!("\\Recent is managed by the server and cannot be set"),
-                _ => None,
+        if system {
+            // `flag` owns exactly five names, so they need no sigil to
+            // be unambiguous — and a bare word needs no shell quoting,
+            // which '\Seen' does. --wire takes the form a listing
+            // prints, for a name copied straight back out of one.
+            let bare = match name.strip_prefix('\\') {
+                Some(rest) if wire_form => rest,
+                Some(_) => bail!(
+                    "'{}' is the wire form: write it as {} here, or pass --wire",
+                    name,
+                    name.trim_start_matches('\\').to_ascii_lowercase()
+                ),
+                None if wire_form => bail!(
+                    "--wire takes the form a listing prints: write '\\{}{}' or drop --wire",
+                    name.chars().next().unwrap_or('x').to_ascii_uppercase(),
+                    name.get(1..).unwrap_or("").to_ascii_lowercase()
+                ),
+                None => name,
             };
-            let flag = match normalized {
-                Some(f) => f.to_string(),
+            let flag = match system_flag(bare) {
+                Some(f) => f,
+                None if bare.eq_ignore_ascii_case("recent") => {
+                    bail!("\\Recent is managed by the server and cannot be set")
+                }
                 None => bail!(
-                    "unknown system flag '{}' (valid: \\Seen, \\Answered, \\Flagged, \\Deleted, \\Draft)",
+                    "'{}' is not an IMAP-defined flag: 'flag' takes seen, answered, \
+                     flagged, deleted and draft; user-defined keywords are the 'tag' \
+                     command's",
                     name
                 ),
             };
-            if !out.iter().any(|f| f.eq_ignore_ascii_case(&flag)) {
-                out.push(flag);
+            if !out.iter().any(|f| f.eq_ignore_ascii_case(flag)) {
+                out.push(flag.to_string());
             }
             continue;
         }
-        if system {
+        if let Some(rest) = name.strip_prefix('\\') {
             bail!(
-                "'{}' is not an IMAP-defined flag: 'flag' takes \\Seen, \\Answered, \\Flagged, \\Deleted \
-                 and \\Draft; user-defined keywords are the 'tag' command's",
-                name
+                "'{}' is a system flag; tags are user-defined keywords (use \
+                 'flag add ... {}')",
+                name,
+                rest.to_ascii_lowercase()
+            );
+        }
+        // A keyword spelled like a system flag with the backslash
+        // dropped is almost always that flag, meant for `flag`. Stored
+        // as a keyword it is inert, reads like the flag in a listing,
+        // and slips past the access level that governs the real one.
+        if let Some(flag) = system_flag(name).or_else(|| {
+            name.eq_ignore_ascii_case("recent").then_some("\\Recent")
+        }) {
+            bail!(
+                "'{}' is how {} is written without its backslash; as a keyword it \
+                 would mean nothing to any client. Use 'flag add ... {}'",
+                name,
+                flag,
+                name.to_ascii_lowercase()
             );
         }
         if crate::cli::select::parse_selection(name)
@@ -817,8 +1352,7 @@ pub fn parse_flag_names(names: &[String], system: bool, wire_form: bool) -> Resu
             .unwrap_or(false)
         {
             bail!(
-                "'{}' reads as a message selection, not a flag name: UIDs go before \
-                 the '--' separator, tag names after it",
+                "'{}' reads as a message selection, not a tag name",
                 name
             );
         }
@@ -853,8 +1387,8 @@ pub fn parse_flag_names(names: &[String], system: bool, wire_form: bool) -> Resu
             );
         }
         // Atoms are ASCII, so a name is encoded to modified UTF-7 on the
-        // way out. The old rule — pass a name through when it happens to
-        // decode — was undecidable from the name alone: 'pen&ink-notes'
+        // way out. Taking a name for a wire key whenever it happens to
+        // decode is undecidable from the name alone: 'pen&ink-notes'
         // decodes (to "pen詹notes") and 'fish&chips-2024' does not, and
         // no user can tell which without doing base64 by hand. So the
         // default is literal, and `--wire` is how a key copied out of a
@@ -890,6 +1424,19 @@ pub fn parse_flag_names(names: &[String], system: bool, wire_form: bool) -> Resu
             }
             encoded
         };
+        if keywords::JUNK
+            .iter()
+            .chain(keywords::NOT_JUNK)
+            .any(|k| k.eq_ignore_ascii_case(name))
+        {
+            eprintln!(
+                "Note: '{}' is one of five spellings of junk / not junk. Setting it \
+                 alone leaves the others as they were, which is how a message ends up \
+                 both; 'tag junk' and 'tag notjunk' set what this mailbox keeps and \
+                 clear the opposite.",
+                name
+            );
+        }
         // A registered keyword goes out in its registered spelling, the
         // same normalization the system flags get.
         let wire = keywords::canonical(&wire)
@@ -913,7 +1460,6 @@ pub fn change_flags(
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
-    recency: Option<select::UidItem>,
     names: &[String],
     system: bool,
     wire_form: bool,
@@ -923,11 +1469,30 @@ pub fn change_flags(
 ) -> Result<()> {
     let flags = parse_flag_names(names, system, wire_form)?;
     let mut client = ImapClient::connect(config, debug)?;
-    let groups = selection_groups(&mut client, spec, config, selections, recency)?;
+    let groups = selection_groups(&mut client, spec, config, selections)?;
     let (added, removed): (&[String], &[String]) =
         if add { (&flags, &[]) } else { (&[], &flags) };
 
     for group in &groups {
+        // RFC 3501 §7.1: a flag outside PERMANENTFLAGS is either
+        // ignored or kept for this session only. Storing one and
+        // reporting success would be a lie found out at the next
+        // refresh -- which is exactly how a Thunderbird `Junk` vanishes
+        // on a server that keeps only `$Junk`.
+        let permanent = client.permanent_flags(&group.folder)?;
+        if let Some(lost) = added.iter().find(|f| !permanent.keeps(f)) {
+            bail!(
+                "'{}' is not in the PERMANENTFLAGS of '{}', so the server would keep it \
+                 for this session at best. It keeps: {}",
+                lost,
+                group.folder,
+                if permanent.flags.is_empty() {
+                    "nothing it named".to_string()
+                } else {
+                    permanent.flags.join(", ")
+                }
+            );
+        }
         // RFC 3501: `UID STORE` ignores a UID that does not exist,
         // without an error. Reporting "Added \Deleted on 1 message(s)"
         // for a typo'd UID would be a lie the server never told, so the
@@ -986,17 +1551,91 @@ pub fn change_flags(
     Ok(())
 }
 
-pub fn flag_list(
+/// `tag junk` / `tag notjunk`: say one thing about a message in every
+/// spelling the mailbox will keep, and take back every spelling of the
+/// opposite.
+///
+/// Five names carry two meanings (`keywords::JUNK`, `NOT_JUNK`), and
+/// no standard says which wins when both are present. Clients create
+/// that contradiction by setting their own spelling and leaving the
+/// others alone; this does the opposite — every opposite spelling is
+/// cleared, unconditionally, because clearing what is not there costs
+/// nothing and leaving it there costs correctness. What is *written*
+/// is filtered by `PERMANENTFLAGS`: all the spellings on a server that
+/// takes new keywords, only the listed ones on a server that does not.
+pub fn set_junk(
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
-    recency: Option<select::UidItem>,
-    tags_only: bool,
+    junk: bool,
     json: bool,
     debug: bool,
 ) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
-    let groups = selection_groups(&mut client, spec, config, selections, recency)?;
+    let groups = selection_groups(&mut client, spec, config, selections)?;
+    let (want, other) = if junk {
+        (keywords::JUNK, keywords::NOT_JUNK)
+    } else {
+        (keywords::NOT_JUNK, keywords::JUNK)
+    };
+
+    for group in &groups {
+        let permanent = client.permanent_flags(&group.folder)?;
+        let add: Vec<String> = permanent
+            .keepable(want)
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if add.is_empty() {
+            bail!(
+                "'{}' keeps none of {} and will not take new keywords, so there is no \
+                 way to mark a message {}",
+                group.folder,
+                want.join(", "),
+                if junk { "junk" } else { "not junk" }
+            );
+        }
+        let remove: Vec<String> = other.iter().map(|s| s.to_string()).collect();
+        if debug {
+            eprintln!(
+                "junk: setting {:?}, clearing {:?} in '{}'",
+                add, remove, group.folder
+            );
+        }
+        client.store_flags(&group.folder, &group.uids, &add, &remove)?;
+        if json {
+            emit_json(&FlagChangeOutput {
+                folder: &group.folder,
+                count: group.uids.len(),
+                uids: &group.uids,
+                added: &add,
+                removed: &remove,
+            })?;
+            continue;
+        }
+        println!(
+            "Marked {} message(s) in '{}' {}: set {}, cleared {}",
+            group.uids.len(),
+            group.folder,
+            if junk { "junk" } else { "not junk" },
+            add.join(", "),
+            remove.join(", ")
+        );
+    }
+    Ok(())
+}
+
+pub fn flag_list(
+    config: &Config,
+    spec: &FolderSpec,
+    selections: &[Selection],
+    tags_only: bool,
+    wire: bool,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    let mut client = ImapClient::connect(config, debug)?;
+    let groups = selection_groups(&mut client, spec, config, selections)?;
 
     for (folder, uid) in flatten(&groups) {
         if debug {
@@ -1011,14 +1650,28 @@ pub fn flag_list(
         if tags_only {
             flags.retain(|f| !f.starts_with('\\'));
         }
+        let junk = match keywords::junk_state(&flags) {
+            keywords::JunkState::Junk => Some("junk"),
+            keywords::JunkState::NotJunk => Some("not-junk"),
+            keywords::JunkState::Contradictory => Some("contradictory"),
+            keywords::JunkState::Unsaid => None,
+        };
         if json {
             emit_json(&FlagListOutput {
                 folder,
                 uid,
                 count: flags.len(),
                 flags: &flags,
+                junk,
             })?;
             continue;
+        }
+        if junk == Some("contradictory") {
+            println!(
+                "{}::{}: both a junk and a not-junk keyword are set; no rule says \
+                 which wins. 'tag junk' or 'tag notjunk' settles it",
+                folder, uid
+            );
         }
         if flags.is_empty() {
             println!(
@@ -1029,7 +1682,7 @@ pub fn flag_list(
             );
             continue;
         }
-        let shown = gloss(&flags);
+        let shown = render_names(&flags, wire);
         println!(
             "{}::{}: {} {}: {}",
             folder,
@@ -1046,12 +1699,11 @@ pub fn parts_list(
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
-    recency: Option<select::UidItem>,
     json: bool,
     debug: bool,
 ) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
-    let groups = selection_groups(&mut client, spec, config, selections, recency)?;
+    let groups = selection_groups(&mut client, spec, config, selections)?;
 
     for (folder, uid) in flatten(&groups) {
         if debug {
@@ -1093,7 +1745,7 @@ pub fn parts_save(
     debug: bool,
 ) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
-    let groups = selection_groups(&mut client, spec, config, std::slice::from_ref(selection), None)?;
+    let groups = selection_groups(&mut client, spec, config, std::slice::from_ref(selection))?;
     let messages = flatten(&groups);
     if messages.len() != 1 {
         bail!(
@@ -1208,7 +1860,7 @@ mod tests {
         assert!(err.to_string().contains("ambiguous"), "{}", err);
         // Qualified selections need no default folder, so they still work.
         let groups =
-            selection_groups(&mut client, &spec, &mock_config(), &sels(&["Trash::2"]), None).unwrap();
+            selection_groups(&mut client, &spec, &mock_config(), &sels(&["Trash::2"])).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].folder, "Trash");
     }
@@ -1217,7 +1869,7 @@ mod tests {
     fn selections_group_by_folder_in_first_named_order() {
         let mut client = mock_client();
         let spec = FolderSpec::default();
-        let groups = selection_groups(&mut client, &spec, &mock_config(), &sels(&["Archive::2", "5", "Archive::3,2", "1"]), None)
+        let groups = selection_groups(&mut client, &spec, &mock_config(), &sels(&["Archive::2", "5", "Archive::3,2", "1"]))
         .unwrap();
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].folder, "Archive");
@@ -1236,27 +1888,21 @@ mod tests {
         let spec = FolderSpec::default();
         // The mock holds UIDs 1..=5.
         let groups =
-            selection_groups(&mut client, &spec, &mock_config(), &sels(&["2-4"]), None).unwrap();
+            selection_groups(&mut client, &spec, &mock_config(), &sels(&["2-4"])).unwrap();
         assert_eq!(groups[0].uids, vec![2, 3, 4]);
-        let groups = selection_groups(&mut client, &spec, &mock_config(), &sels(&["*"]), None).unwrap();
+        let groups = selection_groups(&mut client, &spec, &mock_config(), &sels(&["*"])).unwrap();
         assert_eq!(groups[0].uids, vec![1, 2, 3, 4, 5]);
         let groups =
-            selection_groups(&mut client, &spec, &mock_config(), &sels(&["4-*"]), None).unwrap();
+            selection_groups(&mut client, &spec, &mock_config(), &sels(&["4-"])).unwrap();
         assert_eq!(groups[0].uids, vec![4, 5]);
     }
 
     #[test]
-    fn a_recency_count_applies_to_every_selected_folder() {
+    fn an_unqualified_count_applies_to_every_selected_folder() {
         let mut client = mock_client();
         let spec = FolderSpec::new(vec!["INBOX".to_string(), "Trash".to_string()]);
-        let groups = selection_groups(
-            &mut client,
-            &spec,
-            &mock_config(),
-            &[],
-            Some(select::UidItem::Last(2)),
-        )
-        .unwrap();
+        let groups =
+            selection_groups(&mut client, &spec, &mock_config(), &sels(&["last:2"])).unwrap();
         // Two folders, the two newest of each — and no ambiguity error,
         // because a count names no UID.
         assert_eq!(groups.len(), 2);
@@ -1267,24 +1913,42 @@ mod tests {
     }
 
     #[test]
-    fn a_recency_count_refuses_to_share_with_an_explicit_selection() {
+    fn a_bare_uid_beside_a_count_is_still_ambiguous() {
+        // The count is fine across folders; the UID is not, and the
+        // selection as a whole is judged on what it names.
         let mut client = mock_client();
-        let err = selection_groups(
+        let spec = FolderSpec::new(vec!["INBOX".to_string(), "Trash".to_string()]);
+        assert!(
+            selection_groups(&mut client, &spec, &mock_config(), &sels(&["last:2"])).is_ok()
+        );
+        let err = selection_groups(&mut client, &spec, &mock_config(), &sels(&["1,last:2"]))
+            .expect_err("a UID with two folders selected is ambiguous");
+        assert!(err.to_string().contains("ambiguous"), "{}", err);
+    }
+
+    #[test]
+    fn a_qualified_count_names_its_own_folder() {
+        let mut client = mock_client();
+        let spec = FolderSpec::new(vec!["INBOX".to_string(), "Trash".to_string()]);
+        let groups = selection_groups(
             &mut client,
-            &FolderSpec::default(),
+            &spec,
             &mock_config(),
-            &sels(&["3"]),
-            Some(select::UidItem::Last(2)),
+            &sels(&["Archive::last:1", "Trash::first:2"]),
         )
-        .expect_err("a count and a selection are exclusive");
-        assert!(err.to_string().contains("cannot be combined"), "{}", err);
+        .unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].folder, "Archive");
+        assert_eq!(groups[0].uids, vec![5]);
+        assert_eq!(groups[1].folder, "Trash");
+        assert_eq!(groups[1].uids, vec![1, 2]);
     }
 
     #[test]
     fn a_range_past_the_end_of_the_mailbox_matches_nothing() {
         let mut client = mock_client();
         let spec = FolderSpec::default();
-        let err = selection_groups(&mut client, &spec, &mock_config(), &sels(&["99-*"]), None)
+        let err = selection_groups(&mut client, &spec, &mock_config(), &sels(&["99-"]))
             .expect_err("must not fall back to the last message");
         assert!(err.to_string().contains("matched no message"), "{}", err);
     }
@@ -1438,40 +2102,186 @@ mod tests {
     }
 
     #[test]
-    fn parse_flag_names_normalizes_and_dedups() {
+    fn flag_names_are_bare_words_and_normalize() {
         let v = parse_flag_names(
-            &["\\seen".into(), "\\FLAGGED".into(), "\\seen".into()],
+            &["seen".into(), "FLAGGED".into(), "Seen".into()],
             true,
             false,
         )
         .unwrap();
-        assert_eq!(v, vec!["\\Seen", "\\Flagged"]);
+        assert_eq!(v, vec!["\\Seen", "\\Flagged"], "case-free, deduplicated");
     }
 
     #[test]
-    fn a_convention_keyword_is_glossed_for_a_reader() {
-        let flags = vec![
-            "\\Seen".to_string(),
-            "$label1".to_string(),
-            "invoice".to_string(),
-            "r&AOk-gie".to_string(),
-        ];
-        let shown = gloss(&flags);
-        assert_eq!(shown[0], "\\Seen", "a system flag needs no gloss");
-        assert!(shown[1].starts_with("$label1 (Thunderbird tag 1"), "{}", shown[1]);
-        assert_eq!(shown[2], "invoice", "an unknown keyword is left alone");
+    fn the_wire_form_of_a_flag_needs_wire() {
+        // A bare word needs no shell quoting, which is the point; the
+        // backslash form is what a listing prints, so --wire takes it.
+        let err = parse_flag_names(&["\\Seen".into()], true, false)
+            .expect_err("the wire form is --wire's");
+        assert!(err.to_string().contains("write it as seen"), "{}", err);
         assert_eq!(
-            shown[3], "r&AOk-gie (\"régie\", modified UTF-7)",
-            "an encoded keyword is unreadable until it is decoded"
+            parse_flag_names(&["\\Seen".into()], true, true).unwrap(),
+            vec!["\\Seen"]
+        );
+        let err = parse_flag_names(&["seen".into()], true, true)
+            .expect_err("--wire means the wire form");
+        assert!(err.to_string().contains("\\Seen"), "{}", err);
+    }
+
+    #[test]
+    fn info_reports_the_account_as_the_caller_would_have_to_guess_it() {
+        let mut client = mock_client();
+        let config = mock_config();
+        let out = build_info(&mut client, &config, Some("/tmp/x.conf"), config.access)
+            .expect("info");
+        // The delimiter comes off the mailbox list, and the special
+        // uses say which mailbox is the Trash on an account that does
+        // not call it "Trash".
+        assert_eq!(out.folders.delimiter.as_deref(), Some("/"));
+        assert_eq!(out.folders.delimiter_source, "server");
+        assert_eq!(
+            out.folders.special_use.get("\\Trash").map(String::as_str),
+            Some("Trash")
+        );
+        assert_eq!(
+            out.folders.special_use.get("\\Junk").map(String::as_str),
+            Some("Spam")
+        );
+        assert!(out.folders.default_exists, "INBOX is in the list");
+        // The mock advertises nothing, so every degraded path is the
+        // one reported -- and filing, which needs MOVE or UIDPLUS, is
+        // reported as refused rather than as a fallback.
+        assert_eq!(out.server.filing, "refused");
+        assert_eq!(out.server.sorting, "client");
+        assert_eq!(out.server.threading, "client");
+        assert!(!out.server.create_special_use);
+        // organize: flags and filing yes, the tree and \Deleted no.
+        assert_eq!(out.access.effective, "organize");
+        assert!(out.access.may.store_flags && out.access.may.move_messages);
+        assert!(!out.access.may.change_folders && !out.access.may.set_deleted);
+    }
+
+    #[test]
+    fn a_config_delimiter_overrides_the_server_and_says_so() {
+        let mut client = mock_client();
+        let config = Config {
+            delimiter: Some(".".to_string()),
+            ..mock_config()
+        };
+        let out = build_info(&mut client, &config, None, config.access).expect("info");
+        assert_eq!(out.folders.delimiter.as_deref(), Some("."));
+        assert_eq!(out.folders.delimiter_source, "config");
+        // What the server said is kept: the two disagreeing is the
+        // thing worth seeing.
+        assert_eq!(out.folders.server_delimiter.as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn info_narrowed_for_a_run_reports_both_levels() {
+        let mut client = mock_client();
+        let config = Config {
+            access: crate::config::AccessLevel::ReadOnly,
+            ..mock_config()
+        };
+        let out = build_info(&mut client, &config, None, crate::config::AccessLevel::Full)
+            .expect("info");
+        assert_eq!(out.access.effective, "readonly");
+        assert_eq!(out.access.configured, "full");
+    }
+
+    #[test]
+    fn a_special_use_is_a_bare_word_and_normalizes() {
+        // The same two-way rule as `flag`: a bare word without --wire,
+        // the atom a listing prints with it, and neither the other way
+        // round.
+        for (given, want) in [("archive", "\\Archive"), ("TRASH", "\\Trash"), ("junk", "\\Junk")] {
+            assert_eq!(
+                parse_use_attr(Some(given), false).unwrap(),
+                Some(want.to_string()),
+                "{}",
+                given
+            );
+        }
+        assert_eq!(
+            parse_use_attr(Some("\\Archive"), true).unwrap(),
+            Some("\\Archive".to_string())
+        );
+        let err = parse_use_attr(Some("\\Archive"), false)
+            .expect_err("the wire form is --wire's");
+        assert!(err.to_string().contains("write it as archive"), "{}", err);
+        let err =
+            parse_use_attr(Some("archive"), true).expect_err("--wire means the wire form");
+        assert!(err.to_string().contains("\\Archive"), "{}", err);
+    }
+
+    #[test]
+    fn a_use_attribute_outside_rfc_6154_is_refused() {
+        // A closed set is also what keeps an arbitrary string out of
+        // the CREATE ... (USE (...)) command line.
+        for bad in ["bogus", "seen", "x) (y", "\\All ("] {
+            let err = parse_use_attr(Some(bad), false).expect_err(bad);
+            assert!(
+                err.to_string().contains("RFC 6154") || err.to_string().contains("wire form"),
+                "{}: {}",
+                bad,
+                err
+            );
+        }
+        // No --use at all is the ordinary case; --wire alone says
+        // nothing about anything.
+        assert_eq!(parse_use_attr(None, false).unwrap(), None);
+        let err = parse_use_attr(None, true).expect_err("--wire without --use");
+        assert!(err.to_string().contains("no --use was given"), "{}", err);
+    }
+
+    #[test]
+    fn a_keyword_spelled_like_a_system_flag_is_refused() {
+        // Stored as a keyword it is inert, reads like the flag in a
+        // listing, and slips past the access level governing the real
+        // one -- `flag add 5 deleted` is gated, `tag add 5 Deleted` was
+        // not.
+        for bad in ["Deleted", "seen", "FLAGGED", "draft", "answered", "Recent"] {
+            let err = parse_flag_names(&[bad.to_string()], false, false)
+                .expect_err(bad);
+            assert!(err.to_string().contains("backslash"), "{}: {}", bad, err);
+        }
+        // An ordinary keyword is untouched.
+        assert_eq!(
+            parse_flag_names(&["invoice".into()], false, false).unwrap(),
+            vec!["invoice"]
         );
     }
 
     #[test]
-    fn a_thunderbird_key_is_read_back() {
-        let flags = vec!["r=c3=a9gie".to_string(), "my=20tag".to_string()];
-        let shown = gloss(&flags);
-        assert_eq!(shown[0], "r=c3=a9gie (\"régie\", Thunderbird tag key)");
-        assert_eq!(shown[1], "my=20tag (\"my tag\", Thunderbird tag key)");
+    fn a_listing_prints_what_can_be_typed_back() {
+        let flags = vec![
+            "\\Seen".to_string(),
+            "invoice".to_string(),
+            "r&AOk-gie".to_string(),
+        ];
+        let shown = render_names(&flags, false);
+        assert_eq!(shown[0], "seen", "the bare word `flag add` takes");
+        assert_eq!(shown[1], "invoice");
+        assert_eq!(shown[2], "régie", "and `tag add régie` encodes back to it");
+        // --wire prints the atoms, which `add --wire` takes back.
+        assert_eq!(render_names(&flags, true), flags);
+    }
+
+    #[test]
+    fn what_cannot_round_trip_is_glossed_rather_than_rewritten() {
+        // Typing either of these back would produce a different atom,
+        // so the listing shows the atom and explains it.
+        let flags = vec!["$label1".to_string(), "r=c3=a9gie".to_string()];
+        let shown = render_names(&flags, false);
+        assert!(shown[0].starts_with("$label1 (Thunderbird tag 1"), "{}", shown[0]);
+        assert_eq!(shown[1], "r=c3=a9gie (\"régie\", Thunderbird tag key)");
+        // ... while a name that says what it is gets no paraphrase.
+        assert_eq!(render_names(&["NonJunk".to_string()], false), vec!["NonJunk"]);
+        assert_eq!(
+            render_names(&["$hasattachment".to_string()], false),
+            vec!["$hasattachment"]
+        );
+        assert_eq!(render_names(&flags, true), flags);
     }
 
     #[test]
@@ -1611,7 +2421,7 @@ mod tests {
             vec!["Invoice"]
         );
         assert_eq!(
-            parse_flag_names(&["\\seen".into(), "\\SEEN".into()], true, false).unwrap(),
+            parse_flag_names(&["seen".into(), "SEEN".into()], true, false).unwrap(),
             vec!["\\Seen"]
         );
     }
@@ -1649,7 +2459,7 @@ mod tests {
         assert!(parse_flag_names(&["Trash".into()], true, false).is_err());
         assert!(parse_flag_names(&["\\Seen".into()], false, false).is_err());
         assert_eq!(
-            parse_flag_names(&["\\Deleted".into()], true, false).unwrap(),
+            parse_flag_names(&["deleted".into()], true, false).unwrap(),
             vec!["\\Deleted"]
         );
         assert_eq!(
@@ -1660,9 +2470,9 @@ mod tests {
 
     #[test]
     fn parse_flag_names_rejects_recent_and_unknown_system_flags() {
-        assert!(parse_flag_names(&["\\Recent".into()], true, false).is_err());
-        assert!(parse_flag_names(&["\\Bogus".into()], true, false).is_err());
-        assert!(parse_flag_names(&["\\".into()], true, false).is_err());
+        assert!(parse_flag_names(&["recent".into()], true, false).is_err());
+        assert!(parse_flag_names(&["bogus".into()], true, false).is_err());
+        assert!(parse_flag_names(&["".into()], true, false).is_err());
     }
 
     #[test]
@@ -1714,6 +2524,7 @@ mod tests {
             uid: 5,
             count: 2,
             flags: &flags,
+            junk: None,
         };
         let value: serde_json::Value = serde_json::from_str(&serde_json::to_string(&out).unwrap())
             .expect("parse");
@@ -1722,5 +2533,21 @@ mod tests {
         assert_eq!(value["count"], 2);
         assert_eq!(value["flags"][0], "\\Seen");
         assert_eq!(value["flags"][1], "invoice");
+        assert!(value.get("junk").is_none(), "silent unless the family says something");
+    }
+
+    #[test]
+    fn the_junk_family_reaches_the_json() {
+        let flags = vec!["Junk".to_string(), "$NotJunk".to_string()];
+        let out = FlagListOutput {
+            folder: "INBOX",
+            uid: 5,
+            count: 2,
+            flags: &flags,
+            junk: Some("contradictory"),
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&out).unwrap()).expect("parse");
+        assert_eq!(value["junk"], "contradictory");
     }
 }
