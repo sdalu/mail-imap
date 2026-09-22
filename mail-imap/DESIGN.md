@@ -627,6 +627,19 @@ objects is something `serde_json::Value` already does, where doing it
 after deserialisation would mean a `Config` with every field optional
 and a second pass to fill the gaps.
 
+**A shared setting is a default, not a ceiling — including
+`access-level`.** A profile may raise it above the shared value, which
+looks wrong beside `--access-level`, that may only narrow. The two are
+different in the way that matters: the command line is typed by
+whoever runs the tool, which may be an agent working from a prompt,
+while the config file is written deliberately and already holds the
+password. Anyone who can edit it can reach the account with any client
+at all, so treating a line in it as a boundary to be enforced against
+a line three below it protects nothing and costs a special case in the
+merge. The guard is against the *tool* exceeding its instructions, and
+the profile is where the instruction is written. A test pins this so
+it is not read later as a bug.
+
 **Nothing is selected for the caller.** A config with profiles and no
 `-p` and no `default` is an error naming what it has. Guessing — the
 first block, or the only one that looks complete — means guessing

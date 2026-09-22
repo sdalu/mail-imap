@@ -673,6 +673,44 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_setting_is_a_default_and_not_a_ceiling() {
+        // Deliberate, and the reason is that the config file is
+        // trusted: it already holds the password, so whoever can edit
+        // it can reach the account by any means. access-level guards
+        // against *this tool* doing more than was meant, and the
+        // profile is where that intent is written -- so a profile
+        // raising a shared level is the author saying so, not a leak.
+        //
+        // The command line is the other way round on purpose: it may
+        // only narrow. That asymmetry is the point, not an oversight,
+        // and this test exists so it is not "fixed".
+        let cfg = "access-level = readonly\n\
+                   server = \"h\"\nusername = \"u\"\npassword = \"p\"\n\
+                   risky { access-level = full }\n";
+        let (c, _) = parse_config(cfg, Some("risky")).expect("parse");
+        assert_eq!(c.access, AccessLevel::Full);
+    }
+
+    #[test]
+    fn every_setting_can_be_shared_not_a_chosen_few() {
+        // The rule is structural -- any top-level scalar but `default`
+        // -- so there is no list of shareable fields to keep in step
+        // with `Config`.
+        let cfg = "server = \"h\"\nport = 143\npassword = \"p\"\n\
+                   ssl = false\nstarttls = true\ninsecure = true\n\
+                   folder = \"Archive\"\nmax = 5\nsort = \"-date\"\n\
+                   delimiter = \".\"\naccess-level = restructure\n\
+                   me { username = \"me@h\" }\n";
+        let (c, _) = parse_config(cfg, Some("me")).expect("parse");
+        assert_eq!(c.username, "me@h");
+        assert_eq!((c.port, c.ssl, c.starttls, c.insecure), (143, false, true, true));
+        assert_eq!((c.folder.as_str(), c.max), ("Archive", 5));
+        assert_eq!(c.sort.as_deref(), Some("-date"));
+        assert_eq!(c.delimiter.as_deref(), Some("."));
+        assert_eq!(c.access, AccessLevel::Restructure);
+    }
+
+    #[test]
     fn the_default_key_is_not_mistaken_for_a_setting() {
         let with_default = format!("default = \"home\"\n{}", TWO);
         let (cfg, _) = parse_config(&with_default, None).expect("parse");

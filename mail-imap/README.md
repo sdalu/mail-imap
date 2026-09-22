@@ -904,6 +904,29 @@ mail-imap -p personal search UNSEEN
 mail-imap --profile personal folder list
 ```
 
+**Every setting can be shared**, not a chosen few: the rule is
+structural — any top-level value that is not a block, except
+`default` — so there is no list to consult. In practice `port`, `ssl`,
+`starttls`, `insecure`, `folder`, `max`, `sort` and `delimiter` are
+written once for the file; `server` and `password` too when the
+accounts share a host or a password; `username` almost never.
+
+**A shared setting is a default, not a ceiling.** A profile may raise
+`access-level` above the shared one, not only lower it:
+
+```nginx
+access-level = readonly        # the default for every profile...
+risky { username = "u"
+        access-level = full }  # ...and this one is full
+```
+
+That is deliberate. `access-level` guards against *this tool* doing
+more than you meant, and the config file is where you say what you
+meant — it already holds the password, so anyone who can edit it can
+reach the account by any means at all. The command line is the other
+way round and may only narrow, because that is not a file you control
+in the same way.
+
 `info` names the profile in force. No block means no profiles, which
 is every config written before they existed and every config for a
 single account — `-p` is then neither needed nor accepted.

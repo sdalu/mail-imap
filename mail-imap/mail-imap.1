@@ -522,8 +522,14 @@ Default
 .Ss Several accounts in one file
 A top-level block is a
 .Em profile .
-Settings written beside the blocks are shared by every profile, and a
-profile overrides what it names.
+Any setting written beside the blocks is shared by every profile, and
+a profile overrides what it names.
+A shared setting is a default and not a ceiling: a profile may raise
+.Ic access-level
+above the shared one as well as lower it, the config file being where
+the account holder states what the tool may do.
+.Fl -access-level
+on the command line may only narrow, and is not the same thing.
 .Bd -literal -offset indent
 max          = 25
 access-level = readonly
