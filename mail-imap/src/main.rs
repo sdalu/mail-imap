@@ -5,16 +5,43 @@ mod cli;
 mod config;
 mod imap;
 
+use cli::select::{parse_selections, Selection, UidItem};
+use cli::FolderSpec;
+
+/// Text shown under every command that takes a message selection.
+const SELECTION_HELP: &str = "\
+A message selection is [FOLDER::]UIDS — 5, 1,4,7, 1-9 (a UID range), '*' \
+(every message), 9- or 9-* (from 9 to the end), Archive::1-5. '::' binds \
+the folder, so a single ':' is free to be IMAP's own range operator \
+(INBOX::1:5 works). A range is an \
+interval of the UID space, so it may match fewer messages than its span; \
+for a COUNT of messages use --last N / --first N instead, which no range \
+can express. Without a folder the selection means the -f folder (or \
+\"folder\" from the config).";
+
 #[derive(Parser)]
-#[clap(name = "mail-imap", version = "0.1.0", author = "AI Assistant")]
+#[clap(name = "mail-imap", version = env!("CARGO_PKG_VERSION"), author = "AI Assistant")]
 struct Args {
     /// Configuration file path (or set MAIL_IMAP_CONFIG)
     #[clap(short = 'c', long = "config")]
     config_file: Option<String>,
 
-    /// Folder to operate on (default: from config or INBOX)
-    #[clap(short = 'f', long = "folder", global = true)]
-    default_folder: Option<String>,
+    /// Folder(s) to operate on: a name, or an IMAP LIST pattern
+    /// ('Archive/*' crosses the hierarchy, 'Archive/%' does not).
+    /// Repeatable and comma-separated. Default: "folder" from the config
+    /// (INBOX), except for `count`, which defaults to every mailbox.
+    #[clap(
+        short = 'f',
+        long = "folder",
+        global = true,
+        value_name = "NAME",
+        value_delimiter = ','
+    )]
+    folder: Vec<String>,
+
+    /// Every selectable mailbox of the account (shorthand for -f '*')
+    #[clap(short = 'A', long = "all-folders", global = true)]
+    all_folders: bool,
 
     /// Use the in-memory mock backend (no real server; for testing/demos)
     #[clap(long = "mock", global = true)]
@@ -63,78 +90,117 @@ fn fail(json: bool, message: &str) -> ! {
     process::exit(1);
 }
 
-/// Join CLI UID arguments (separate arguments, comma-separated tokens, or
-/// a mix) back into a single spec for `parse_uids`. Ranges are not
-/// supported.
-fn uid_spec(uids: &[String]) -> String {
-    uids.join(",")
+/// The folders this run works on: the `-f` values, plus `-A`.
+fn folder_spec(args: &Args) -> FolderSpec {
+    let mut patterns = args.folder.clone();
+    if args.all_folders {
+        patterns.push("*".to_string());
+    }
+    FolderSpec::new(patterns)
 }
 
-/// Use the explicitly requested folders (deduplicated, order preserved),
-/// falling back to the single configured folder.
-fn resolve_folders(explicit: &[String], config: &config::Config) -> Vec<String> {
-    if explicit.is_empty() {
-        return vec![config.folder.clone()];
-    }
-    let mut out = Vec::new();
-    for folder in explicit {
-        if !out.contains(folder) {
-            out.push(folder.clone());
+/// The messages a command works on: explicit selections, or a count of
+/// the newest / oldest messages of each selected folder. A count is a
+/// flag rather than a selection token because `last:20` would collide
+/// with the `FOLDER:UIDS` split.
+#[derive(clap::Args)]
+struct Sel {
+    /// Message selection(s): 5, 1,4,7, 1-9, 9-, '*', Archive::1-5
+    #[clap(value_name = "SELECTION")]
+    selection: Vec<String>,
+
+    /// The N newest messages (the N highest UIDs) of each selected
+    /// folder, instead of a selection
+    #[clap(
+        short = 'L',
+        long = "last",
+        value_name = "N",
+        conflicts_with = "first",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    last: Option<u32>,
+
+    /// The N oldest messages (the N lowest UIDs) of each selected folder
+    #[clap(
+        long = "first",
+        value_name = "N",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    first: Option<u32>,
+}
+
+impl Sel {
+    /// The parsed selections and the recency count; exactly one of the
+    /// two is ever populated.
+    fn resolve(&self, json: bool) -> (Vec<Selection>, Option<UidItem>) {
+        let count = self.last.map(UidItem::Last).or(self.first.map(UidItem::First));
+        if let Some(item) = count {
+            if !self.selection.is_empty() {
+                fail(
+                    json,
+                    &format!(
+                        "--last/--first name a count of messages, so they cannot be \
+                         combined with the message selection(s) '{}'",
+                        self.selection.join(" ")
+                    ),
+                );
+            }
+            return (Vec::new(), Some(item));
+        }
+        if self.selection.is_empty() {
+            fail(
+                json,
+                "no message selection given: name messages (5, 1-9, Archive::3) \
+                 or ask for a count with --last N / --first N",
+            );
+        }
+        match parse_selections(&self.selection) {
+            Ok(s) => (s, None),
+            Err(e) => fail(json, &format!("{:#}", e)),
         }
     }
-    out
 }
 
 #[derive(clap::Subcommand)]
 enum Command {
     /// List folders
     Folder,
-    /// Search emails in one or more folders (IMAP SEARCH query: "ALL" for
-    /// every message, "UNSEEN", 'HEADER FROM "foo"')
+    /// Search emails in the selected folders (IMAP SEARCH query: "ALL"
+    /// for every message, "UNSEEN", 'HEADER FROM "foo"')
     Search {
         /// IMAP search query
         query: String,
-        /// Folder(s) to search, comma-separated or repeated
-        /// (default: the -f/config folder)
-        #[clap(value_name = "FOLDER", value_delimiter = ',')]
-        folders: Vec<String>,
     },
-    /// Read email(s) by UID
+    /// Read email(s) by message selection
+    #[clap(after_help = SELECTION_HELP)]
     Read {
-        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
-        #[clap(value_name = "UID")]
-        uids: Vec<String>,
+        #[clap(flatten)]
+        sel: Sel,
     },
     /// Show message counts / status of mailboxes (IMAP STATUS)
     #[clap(alias = "status")]
-    Count {
-        /// Mailbox to show (default: all selectable mailboxes)
-        folder: Option<String>,
-    },
-    /// List the message UIDs of the folder
+    Count,
+    /// List the message UIDs of the selected folder(s)
     Uid,
-    /// List the UIDs of every message in the thread containing the given
-    /// message (server-side RFC 5256 THREAD when advertised, else
-    /// client-side reconstruction from Message-ID / References)
+    /// List the UIDs of every message in the thread containing the
+    /// selected message(s) (server-side RFC 5256 THREAD when advertised,
+    /// else client-side reconstruction from Message-ID / References)
+    #[clap(after_help = SELECTION_HELP)]
     Thread {
-        /// Email UID (as shown by `search` / `unread`)
-        uid: u32,
+        #[clap(flatten)]
+        sel: Sel,
     },
-    /// List unread emails of one or more folders
-    Unread {
-        /// Folder(s) to check, comma-separated or repeated
-        /// (default: the -f/config folder)
-        #[clap(value_name = "FOLDER", value_delimiter = ',')]
-        folders: Vec<String>,
-    },
+    /// List unread emails of the selected folder(s)
+    Unread,
     /// List or save MIME parts of an email
     Part {
         /// What to do with the parts
         #[clap(subcommand)]
         action: PartsAction,
     },
-    /// Enable/disable message flags (\Seen, \Answered, \Flagged,
-    /// \Deleted, \Draft, or keywords such as junk) via UID STORE
+    /// Enable/disable the IMAP-defined message flags (\Seen,
+    /// \Answered, \Flagged, \Deleted, \Draft) via UID STORE.
+    /// User-defined keywords are the `tag` command's
     Flag {
         /// What to do with the flags
         #[clap(subcommand)]
@@ -151,28 +217,28 @@ enum Command {
 
 #[derive(clap::Subcommand)]
 enum FlagAction {
-    /// List the flags (system flags and keyword tags) of the given
+    /// List the flags (system flags and keyword tags) of the selected
     /// email(s)
+    #[clap(after_help = SELECTION_HELP)]
     List {
-        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
-        #[clap(value_name = "UID")]
-        uids: Vec<String>,
+        #[clap(flatten)]
+        sel: Sel,
     },
-    /// Enable the given flags on the given email(s)
+    /// Enable the given flags on the selected email(s)
+    #[clap(after_help = SELECTION_HELP)]
     Add {
-        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
-        #[clap(value_name = "UID")]
-        uids: Vec<String>,
+        #[clap(flatten)]
+        sel: Sel,
         /// Flags to add (after `--`): `\Seen`, `\Answered`, `\Flagged`,
-        /// `\Deleted`, `\Draft` or custom keywords (e.g. junk)
+        /// `\Deleted` or `\Draft`
         #[clap(value_name = "FLAG", required = true, last = true)]
         flags: Vec<String>,
     },
-    /// Disable the given flags on the given email(s)
+    /// Disable the given flags on the selected email(s)
+    #[clap(after_help = SELECTION_HELP)]
     Remove {
-        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
-        #[clap(value_name = "UID")]
-        uids: Vec<String>,
+        #[clap(flatten)]
+        sel: Sel,
         /// Flags to remove (after `--`, same forms as `flag add`)
         #[clap(value_name = "FLAG", required = true, last = true)]
         flags: Vec<String>,
@@ -181,26 +247,38 @@ enum FlagAction {
 
 #[derive(clap::Subcommand)]
 enum TagAction {
-    /// List the custom keyword tags of the given email(s)
+    /// List the keywords with an agreed meaning: the IANA registry,
+    /// and the conventions no registry covers (no server needed)
+    Known,
+    /// List the custom keyword tags of the selected email(s)
+    #[clap(after_help = SELECTION_HELP)]
     List {
-        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
-        #[clap(value_name = "UID")]
-        uids: Vec<String>,
+        #[clap(flatten)]
+        sel: Sel,
     },
-    /// Add the given tags to the given email(s)
+    /// Add the given tags to the selected email(s)
+    #[clap(after_help = SELECTION_HELP)]
     Add {
-        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
-        #[clap(value_name = "UID")]
-        uids: Vec<String>,
-        /// Tags (after `--`): custom IMAP keywords, e.g. `invoice`, `$Important`
+        #[clap(flatten)]
+        sel: Sel,
+        /// Send the tag names verbatim, as the atoms they already are —
+        /// for a key copied out of a listing
+        #[clap(long = "wire")]
+        wire: bool,
+        /// Tags (after `--`): custom IMAP keywords, e.g. `invoice`,
+        /// `$Important`. A non-ASCII tag is encoded to modified UTF-7
+        /// (régie becomes r&AOk-gie)
         #[clap(value_name = "TAG", required = true, last = true)]
         tags: Vec<String>,
     },
-    /// Remove the given tags from the given email(s)
+    /// Remove the given tags from the selected email(s)
+    #[clap(after_help = SELECTION_HELP)]
     Remove {
-        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
-        #[clap(value_name = "UID")]
-        uids: Vec<String>,
+        #[clap(flatten)]
+        sel: Sel,
+        /// Send the tag names verbatim (see `tag add --wire`)
+        #[clap(long = "wire")]
+        wire: bool,
         /// Tags to remove (after `--`, same forms as `tag add`)
         #[clap(value_name = "TAG", required = true, last = true)]
         tags: Vec<String>,
@@ -209,16 +287,18 @@ enum TagAction {
 
 #[derive(clap::Subcommand)]
 enum PartsAction {
-    /// List the MIME parts of the given email(s)
+    /// List the MIME parts of the selected email(s)
+    #[clap(after_help = SELECTION_HELP)]
     List {
-        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
-        #[clap(value_name = "UID")]
-        uids: Vec<String>,
+        #[clap(flatten)]
+        sel: Sel,
     },
-    /// Save one part to a file
+    /// Save one part of one message to a file
+    #[clap(after_help = SELECTION_HELP)]
     Save {
-        /// Email UID
-        uid: u32,
+        /// Message selection naming exactly one message (5, Archive::5)
+        #[clap(value_name = "SELECTION")]
+        selection: String,
         /// Part number (as listed by `part list`)
         part: u32,
         /// Destination file (default: the part's filename in the current directory)
@@ -232,10 +312,7 @@ fn main() {
 
     let mut config = if args.mock {
         // Mock mode needs no server, so a missing config is fine.
-        match config::load_config(args.config_file.as_deref()) {
-            Ok(cfg) => cfg,
-            Err(_) => config::Config::default(),
-        }
+        config::load_config(args.config_file.as_deref()).unwrap_or_default()
     } else {
         match config::load_config(args.config_file.as_deref()) {
             Ok(cfg) => cfg,
@@ -244,9 +321,6 @@ fn main() {
     };
     if args.mock {
         config.mock = true;
-    }
-    if let Some(folder) = &args.default_folder {
-        config.folder = folder.clone();
     }
     if let Some(max) = args.max {
         config.max = max;
@@ -260,49 +334,161 @@ fn main() {
 
     let json = args.json;
     let debug = args.debug;
+
     let result = match &args.command {
         Command::Folder => cli::list_folders(&config, json, debug),
-        Command::Search { query, folders } => cli::search_emails(
-            &config,
-            query,
-            resolve_folders(folders, &config),
-            json,
-            debug,
-        ),
-        Command::Read { uids } => cli::read_emails(&config, &uid_spec(uids), json, debug),
-        Command::Count { folder } => cli::mailbox_counts(&config, folder.as_deref(), json, debug),
-        Command::Uid => cli::folder_uids(&config, json, debug),
-        Command::Thread { uid } => cli::thread_uids(&config, *uid, json, debug),
-        Command::Unread { folders } => {
-            cli::unread(&config, resolve_folders(folders, &config), json, debug)
+        Command::Search { query } => {
+            cli::search_emails(&config, query, &folder_spec(&args), json, debug)
         }
+        Command::Read { sel } => {
+            let (selections, recency) = sel.resolve(json);
+            cli::read_emails(
+                &config,
+                &folder_spec(&args),
+                &selections,
+                recency,
+                json,
+                debug,
+            )
+        }
+        Command::Count => cli::mailbox_counts(&config, &folder_spec(&args), json, debug),
+        Command::Uid => cli::folder_uids(&config, &folder_spec(&args), json, debug),
+        Command::Thread { sel } => {
+            let (selections, recency) = sel.resolve(json);
+            cli::thread_uids(
+                &config,
+                &folder_spec(&args),
+                &selections,
+                recency,
+                json,
+                debug,
+            )
+        }
+        Command::Unread => cli::unread(&config, &folder_spec(&args), json, debug),
         Command::Part { action } => match action {
-            PartsAction::List { uids } => cli::parts_list(&config, &uid_spec(uids), json, debug),
-            PartsAction::Save { uid, part, out } => {
-                cli::parts_save(&config, *uid, *part, out.clone(), json, debug)
+            PartsAction::List { sel } => {
+                let (selections, recency) = sel.resolve(json);
+                cli::parts_list(
+                    &config,
+                    &folder_spec(&args),
+                    &selections,
+                    recency,
+                    json,
+                    debug,
+                )
+            }
+            PartsAction::Save {
+                selection,
+                part,
+                out,
+            } => {
+                let one = match parse_selections(std::slice::from_ref(selection)) {
+                    Ok(s) => s,
+                    Err(e) => fail(json, &format!("{:#}", e)),
+                };
+                cli::parts_save(
+                    &config,
+                    &folder_spec(&args),
+                    &one[0],
+                    *part,
+                    out.clone(),
+                    json,
+                    debug,
+                )
             }
         },
         Command::Flag { action } => match action {
-            FlagAction::List { uids } => cli::flag_list(&config, &uid_spec(uids), false, json, debug),
-            FlagAction::Add { uids, flags } => {
-                cli::change_flags(&config, &uid_spec(uids), flags, true, true, json, debug)
+            FlagAction::List { sel } => {
+                let (selections, recency) = sel.resolve(json);
+                cli::flag_list(
+                    &config,
+                    &folder_spec(&args),
+                    &selections,
+                    recency,
+                    false,
+                    json,
+                    debug,
+                )
             }
-            FlagAction::Remove { uids, flags } => {
-                cli::change_flags(&config, &uid_spec(uids), flags, true, false, json, debug)
+            FlagAction::Add { sel, flags } => {
+                let (selections, recency) = sel.resolve(json);
+                cli::change_flags(
+                    &config,
+                    &folder_spec(&args),
+                    &selections,
+                    recency,
+                    flags,
+                    true,
+                    false,
+                    true,
+                    json,
+                    debug,
+                )
+            }
+            FlagAction::Remove { sel, flags } => {
+                let (selections, recency) = sel.resolve(json);
+                cli::change_flags(
+                    &config,
+                    &folder_spec(&args),
+                    &selections,
+                    recency,
+                    flags,
+                    true,
+                    false,
+                    false,
+                    json,
+                    debug,
+                )
             }
         },
         Command::Tag { action } => match action {
-            TagAction::List { uids } => cli::flag_list(&config, &uid_spec(uids), true, json, debug),
-            TagAction::Add { uids, tags } => {
-                cli::change_flags(&config, &uid_spec(uids), tags, false, true, json, debug)
+            TagAction::Known => cli::tags_known(json),
+            TagAction::List { sel } => {
+                let (selections, recency) = sel.resolve(json);
+                cli::flag_list(
+                    &config,
+                    &folder_spec(&args),
+                    &selections,
+                    recency,
+                    true,
+                    json,
+                    debug,
+                )
             }
-            TagAction::Remove { uids, tags } => {
-                cli::change_flags(&config, &uid_spec(uids), tags, false, false, json, debug)
+            TagAction::Add { sel, tags, wire } => {
+                let (selections, recency) = sel.resolve(json);
+                cli::change_flags(
+                    &config,
+                    &folder_spec(&args),
+                    &selections,
+                    recency,
+                    tags,
+                    false,
+                    *wire,
+                    true,
+                    json,
+                    debug,
+                )
+            }
+            TagAction::Remove { sel, tags, wire } => {
+                let (selections, recency) = sel.resolve(json);
+                cli::change_flags(
+                    &config,
+                    &folder_spec(&args),
+                    &selections,
+                    recency,
+                    tags,
+                    false,
+                    *wire,
+                    false,
+                    json,
+                    debug,
+                )
             }
         },
     };
 
     if let Err(e) = result {
-        fail(json, &e.to_string());
+        fail(json, &format!("{:#}", e));
     }
 }

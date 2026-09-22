@@ -135,6 +135,10 @@ pub trait ImapBackend {
 }
 
 /// Concrete backend selected at connect time.
+// The real client carries a whole TLS session, the mock a handful of
+// vectors. Exactly one client exists per run, so the size difference
+// buys nothing worth boxing for.
+#[allow(clippy::large_enum_variant)]
 pub enum ImapClient {
     Real(RealClient),
     Mock(MockClient),

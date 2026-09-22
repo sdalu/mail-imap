@@ -231,7 +231,7 @@ impl RealClient {
     fn fetch_raw(&mut self, folder: &str, uid: u32) -> Result<Vec<u8>> {
         self.session.select(folder)?;
         let fetches = self.session
-            .uid_fetch(uid.to_string(), "(UID BODY.PEEK[RFC822])")
+            .uid_fetch(uid.to_string(), "(UID BODY.PEEK[])")
             .with_context(|| format!("UID FETCH of UID {} in '{}'", uid, folder))?;
         let data = fetches.iter().find_map(|f| f.body().map(|b| b.to_vec()));
         match data {
@@ -611,8 +611,8 @@ impl ImapBackend for RealClient {
         self.session.select(folder)?;
         // BODY.PEEK[] keeps the server from setting \Seen on the message.
         let uid_s = uid.to_string();
-        const READ_ITEMS: &str = "(UID ENVELOPE FLAGS INTERNALDATE BODY.PEEK[RFC822])";
-        const READ_ITEMS_NOENV: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[RFC822])";
+        const READ_ITEMS: &str = "(UID ENVELOPE FLAGS INTERNALDATE BODY.PEEK[])";
+        const READ_ITEMS_NOENV: &str = "(UID FLAGS INTERNALDATE BODY.PEEK[])";
         let fetches = match self.attempt_fetch(folder, &uid_s, READ_ITEMS) {
             Attempt::Success(fs) => fs,
             Attempt::Unparseable => {
@@ -984,7 +984,7 @@ fn address_from_header(raw: &[u8]) -> String {
             return rest[..end].trim().to_string();
         }
     }
-    s.split(|c| c == '(' || c == ',')
+    s.split(['(', ','])
         .next()
         .unwrap_or("")
         .trim()

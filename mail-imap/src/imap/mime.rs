@@ -279,6 +279,44 @@ fn is_ascii_ws(b: &u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\r' | b'\n')
 }
 
+fn decode_quoted_printable(body: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0usize;
+    while i < body.len() {
+        match body[i] {
+            b'=' if i + 1 < body.len() && (body[i + 1] == b'\n' || body[i + 1] == b'\r') => {
+                // Soft line break: drop the "=<newline>" (and a CRLF pair).
+                i += if body[i + 1] == b'\r' && i + 2 < body.len() && body[i + 2] == b'\n' {
+                    3
+                } else {
+                    2
+                };
+            }
+            b'=' if i + 2 < body.len() => {
+                let hi = (body[i + 1] as char).to_digit(16);
+                let lo = (body[i + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi * 16 + lo) as u8);
+                    i += 3;
+                    continue;
+                }
+                out.push(body[i]);
+                i += 1;
+            }
+            b'=' if i + 1 == body.len() => {
+                // Dangling '=' at the very end: nothing to decode.
+                out.push(body[i]);
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,15 +341,14 @@ mod tests {
 
     #[test]
     fn multipart_two_parts() {
-        let msg = format!(
-            "Content-Type: multipart/mixed; boundary=BOUND\r\n\r\n\
+        let msg = "Content-Type: multipart/mixed; boundary=BOUND\r\n\r\n\
              --BOUND\r\n\
              Content-Type: text/plain\r\n\r\nbody text\r\n\
              --BOUND\r\n\
              Content-Type: application/pdf; name=doc.pdf\r\n\
              Content-Transfer-Encoding: base64\r\n\r\nSGVsbG8=\r\n\
              --BOUND--\r\n"
-         )
+         .to_string()
          .into_bytes();
         let root = parse_message(&msg).unwrap();
         let leaves = root.leaves();
@@ -326,8 +363,7 @@ mod tests {
 
     #[test]
     fn nested_multipart_numbers_all_leaves_in_order() {
-        let msg = format!(
-            "Content-Type: multipart/alternative; boundary=A\r\n\r\n\
+        let msg = "Content-Type: multipart/alternative; boundary=A\r\n\r\n\
              --A\r\n\
              Content-Type: text/plain\r\n\r\nplain\r\n\
              --A\r\n\
@@ -339,7 +375,7 @@ mod tests {
              Content-Disposition: attachment; filename=stuff.zip\r\n\r\nzipped\r\n\
              --B--\r\n\
              --A--\r\n"
-        )
+        .to_string()
         .into_bytes();
         let root = parse_message(&msg).unwrap();
         let leaves = root.leaves();
@@ -385,42 +421,4 @@ mod tests {
         let msg = b"Content-Type: multipart/mixed; boundary=X\r\n\r\nno parts here";
         assert!(parse_message(msg).is_err());
     }
-}
-
-fn decode_quoted_printable(body: &[u8]) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(body.len());
-    let mut i = 0usize;
-    while i < body.len() {
-        match body[i] {
-            b'=' if i + 1 < body.len() && (body[i + 1] == b'\n' || body[i + 1] == b'\r') => {
-                // Soft line break: drop the "=<newline>" (and a CRLF pair).
-                i += if body[i + 1] == b'\r' && i + 2 < body.len() && body[i + 2] == b'\n' {
-                    3
-                } else {
-                    2
-                };
-            }
-            b'=' if i + 2 < body.len() => {
-                let hi = (body[i + 1] as char).to_digit(16);
-                let lo = (body[i + 2] as char).to_digit(16);
-                if let (Some(hi), Some(lo)) = (hi, lo) {
-                    out.push((hi * 16 + lo) as u8);
-                    i += 3;
-                    continue;
-                }
-                out.push(body[i]);
-                i += 1;
-            }
-            b'=' if i + 1 == body.len() => {
-                // Dangling '=' at the very end: nothing to decode.
-                out.push(body[i]);
-                i += 1;
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    Ok(out)
 }
