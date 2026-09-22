@@ -50,10 +50,18 @@ the command.
 .Bl -tag -width Ds
 .It Fl c Ar path , Fl -config Ar path
 Config file path.
-Otherwise
-.Ev MAIL_IMAP_CONFIG
-is read, then
-.Pa /etc/mail-imap.conf .
+The file must exist: a path given here is an answer, not a candidate,
+so a missing one is an error rather than a reason to read another
+config.
+Without this option the search is
+.Ev MAIL_IMAP_CONFIG ,
+then
+.Pa ~/.config/mail-imap.conf ,
+then
+.Pa /etc/mail-imap.conf ;
+the first that exists is the one read, and
+.Cm info
+reports which.
 .It Fl f Ar name , Fl -folder Ar name
 Folder(s) to operate on: a literal name, or an IMAP
 .Ic LIST
@@ -512,18 +520,33 @@ Default
 .Sh ENVIRONMENT
 .Bl -tag -width Ds
 .It Ev MAIL_IMAP_CONFIG
-Config file path, read when
+Config file path, used when
 .Fl c Ns / Ns Fl -config
 is not given.
+Like that option it names the file outright: it is not a candidate,
+and a missing one is an error.
+.It Ev XDG_CONFIG_HOME
+Replaces
+.Pa ~/.config
+in the search below when it is set and not empty.
+.It Ev HOME
+Gives
+.Pa ~/.config
+its meaning.
+With neither this nor
+.Ev XDG_CONFIG_HOME
+set, only the machine-wide file is searched.
 .El
 .Sh FILES
 .Bl -tag -width Ds
-.It Pa /etc/mail-imap.conf
-Default config file path, read when neither
+.It Pa ~/.config/mail-imap.conf
+The user\(aqs config, searched first when neither
 .Fl c Ns / Ns Fl -config
 nor
 .Ev MAIL_IMAP_CONFIG
 is given.
+.It Pa /etc/mail-imap.conf
+The machine\(aqs config, searched when the user\(aqs is not there.
 .El
 .Sh EXIT STATUS
 .Ex -std

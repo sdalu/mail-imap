@@ -614,6 +614,18 @@ attributes and drifting from them. The round trip costs one
 serialisation of a file that is a few hundred bytes, and buys the
 guarantee that there is nothing to keep in step.
 
+**Where the file is looked for distinguishes an answer from a
+candidate.** `--config` and `$MAIL_IMAP_CONFIG` name the file
+outright, so a missing one is an error; only `~/.config/mail-imap.conf`
+and `/etc/mail-imap.conf` are searched, user first. Falling back from a
+named path would mean a run whose `--config` pointed at a typo silently
+reaching a different account — the failure that matters here is not a
+missing file but a connection to the wrong mailbox. `config_path`
+resolves it in one place so `info` reports the file the rest of the run
+actually read, and the resolution is a pure function of the
+environment, which is what lets it be tested without mutating the
+process.
+
 Two narrowings are deliberate:
 
 - **`NO_TIME`.** UCL reads a bare `30s` as a duration and would hand

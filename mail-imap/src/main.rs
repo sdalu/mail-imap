@@ -409,7 +409,7 @@ fn main() {
         // Mock mode needs no server, so a missing config is fine.
         match config::load_config(args.config_file.as_deref()) {
             Ok(cfg) => {
-                config_file = Some(config::config_path(args.config_file.as_deref()));
+                config_file = config::config_path(args.config_file.as_deref());
                 cfg
             }
             Err(_) => config::Config::default(),

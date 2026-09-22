@@ -556,8 +556,9 @@ different atom. JSON always carries the wire form.
 ### Examples
 
 Every line below is a complete command. They assume a config at
-`incal.conf`; drop `--config` to use `$MAIL_IMAP_CONFIG` or
-`/etc/mail-imap.conf`, and add `--mock` to run any of them against the
+`incal.conf`; drop `--config` to search `$MAIL_IMAP_CONFIG`,
+`~/.config/mail-imap.conf` and `/etc/mail-imap.conf` in turn, and add
+`--mock` to run any of them against the
 in-memory backend with no server and no config at all.
 
 #### Where am I, and what may this run do?
@@ -765,8 +766,11 @@ Errors are printed as `{"error": "..."}` on stderr with a non-zero exit code.
 Every one of these is global: it may appear before or after the
 command.
 
-- **`-c, --config <PATH>`** — the config file. Without it,
-  `$MAIL_IMAP_CONFIG`, else `/etc/mail-imap.conf`.
+- **`-c, --config <PATH>`** — the config file. Without it, the search
+  order is `$MAIL_IMAP_CONFIG`, then `~/.config/mail-imap.conf`, then
+  `/etc/mail-imap.conf`. A file named by `-c` or by the environment
+  must exist: it is an answer, not a candidate, so a missing one is an
+  error rather than a reason to read another account's config.
 - **`-f, --folder <NAME>`** — folder(s) to operate on: a literal name,
   or an IMAP `LIST` pattern (`*` crosses the hierarchy delimiter, `%`
   does not). Repeatable and comma-separated, both meaning the same
@@ -798,6 +802,19 @@ command.
 - **`-V, --version`** — print the version and exit.
 
 ## Configuration
+
+Where it is looked for, in order — the first that exists is the one
+read, and `info` reports which:
+
+```text
+  -c PATH                     named outright ─┐  must exist; a missing
+  $MAIL_IMAP_CONFIG           from the env   ─┘  one is an error
+
+  ~/.config/mail-imap.conf    yours          ─┐  searched, in this
+  /etc/mail-imap.conf         the machine's  ─┘  order
+```
+
+`$XDG_CONFIG_HOME` replaces `~/.config` where it is set.
 
 The config file is [UCL](https://github.com/vstakhov/libucl) — the
 Universal Configuration Language, the format `pkg.conf` and the rest

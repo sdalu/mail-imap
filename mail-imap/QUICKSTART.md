@@ -52,7 +52,8 @@ see [`info`](README.md#info) for every field.)
 A real account needs four fields: where to connect, who as, and how
 much mail-imap may change. The config is [UCL][ucl] -- comments, bare
 keys, no commas, no outer braces. Save this as `myaccount.conf` (or
-point `-c` / `$MAIL_IMAP_CONFIG` at it from anywhere):
+point `-c` / `$MAIL_IMAP_CONFIG` at it from anywhere, or drop it at
+`~/.config/mail-imap.conf` and pass nothing):
 
 ```nginx
 server   = "imap.example.com"

@@ -170,43 +170,96 @@ impl Default for Config {
     }
 }
 
-/// The config file this run reads: `--config`, else
-/// `$MAIL_IMAP_CONFIG`, else the system-wide default. Resolved in one
-/// place so `info` can report the file the rest of the run used.
-pub fn config_path(path: Option<&str>) -> String {
-    match path {
-        Some(p) => p.to_string(),
-        None => match std::env::var("MAIL_IMAP_CONFIG") {
-            Ok(p) => p,
-            Err(_) => "/etc/mail-imap.conf".to_string(),
-        },
+/// Where a run looks for its config, in order.
+///
+/// `--config` and `$MAIL_IMAP_CONFIG` are answers, not candidates: if
+/// either names a file that is not there, that is an error rather than
+/// a reason to go and read somebody else's config. Only the defaults
+/// are searched, user file first:
+///
+/// ```text
+///   --config PATH            named outright, must exist
+///   $MAIL_IMAP_CONFIG        the same, from the environment
+///   ~/.config/mail-imap.conf the user's own
+///   /etc/mail-imap.conf      the machine's
+/// ```
+pub fn config_candidates(path: Option<&str>) -> Vec<String> {
+    candidates_from(
+        path,
+        std::env::var("MAIL_IMAP_CONFIG").ok().as_deref(),
+        user_config_dir().as_deref(),
+    )
+}
+
+/// The candidate list, with the environment passed in rather than read,
+/// so it can be tested without a process-wide mutation.
+fn candidates_from(
+    explicit: Option<&str>,
+    env: Option<&str>,
+    user_dir: Option<&str>,
+) -> Vec<String> {
+    if let Some(p) = explicit.filter(|p| !p.is_empty()) {
+        return vec![p.to_string()];
     }
+    if let Some(p) = env.filter(|p| !p.is_empty()) {
+        return vec![p.to_string()];
+    }
+    let mut out = Vec::new();
+    if let Some(dir) = user_dir.filter(|d| !d.is_empty()) {
+        out.push(format!("{}/mail-imap.conf", dir.trim_end_matches('/')));
+    }
+    out.push(SYSTEM_CONFIG.to_string());
+    out
+}
+
+const SYSTEM_CONFIG: &str = "/etc/mail-imap.conf";
+
+/// `$XDG_CONFIG_HOME`, else `~/.config` -- which is what `~/.config`
+/// means on a machine that sets it.
+fn user_config_dir() -> Option<String> {
+    user_config_dir_from(
+        std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
+}
+
+fn user_config_dir_from(xdg: Option<&str>, home: Option<&str>) -> Option<String> {
+    if let Some(d) = xdg.filter(|d| !d.is_empty()) {
+        return Some(d.to_string());
+    }
+    home.filter(|h| !h.is_empty())
+        .map(|h| format!("{}/.config", h.trim_end_matches('/')))
+}
+
+/// The config file this run actually reads: the first candidate that is
+/// there, or `None` when none of them is. `info` reports it, so it is
+/// resolved in one place.
+pub fn config_path(path: Option<&str>) -> Option<String> {
+    config_candidates(path)
+        .into_iter()
+        .find(|p| Path::new(p).exists())
 }
 
 pub fn load_config(path: Option<&str>) -> Result<Config> {
-    let path = config_path(path);
+    let candidates = config_candidates(path);
+    let found = match candidates.iter().find(|p| Path::new(p).exists()) {
+        Some(p) => p,
+        // One candidate means it was named outright, so say which file
+        // is missing rather than listing a search that never happened.
+        None if candidates.len() == 1 => {
+            bail!("config file not found: {}", candidates[0])
+        }
+        None => bail!(
+            "no config file found: tried {} (name one with --config, or set MAIL_IMAP_CONFIG)",
+            candidates.join(", ")
+        ),
+    };
 
-    if !Path::new(&path).exists() {
-        anyhow::bail!(
-            "config file not found: {} (pass one with --config or set MAIL_IMAP_CONFIG)",
-            path
-        );
-    }
-
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("could not read config file: {}", path))?;
-    parse_config(&content).with_context(|| format!("in config file: {}", path))
+    let content = fs::read_to_string(found)
+        .with_context(|| format!("could not read config file: {}", found))?;
+    parse_config(&content).with_context(|| format!("in config file: {}", found))
 }
 
-/// Parse config text, which is UCL.
-///
-/// UCL is a superset of JSON, so a config written as a JSON object
-/// parses unchanged and every example that predates UCL still works.
-/// The parsed object is emitted back as JSON and handed to serde
-/// rather than being walked key by key: that keeps one definition of
-/// the field names, their aliases and their defaults -- the serde
-/// attributes on `Config` -- instead of a second one that would drift
-/// from it.
 pub fn parse_config(content: &str) -> Result<Config> {
     // `libucl::Parser::parse` builds a CString and unwraps, so a NUL
     // byte in the file would abort the process rather than fail.
@@ -411,5 +464,70 @@ mod tests {
         let cfg = parse_config("server = \"s\"\nusername = \"u\"\npassword = 30s\n")
             .expect("parse");
         assert_eq!(cfg.password, "30s");
+    }
+
+    // --------------------------------------- where the config lives
+
+    #[test]
+    fn config_is_looked_for_in_the_user_dir_then_the_machine() {
+        assert_eq!(
+            candidates_from(None, None, Some("/home/u/.config")),
+            vec!["/home/u/.config/mail-imap.conf", "/etc/mail-imap.conf"]
+        );
+    }
+
+    #[test]
+    fn a_named_config_is_the_only_candidate() {
+        // --config naming a file that is not there must fail on that
+        // file, not quietly read the user's or the machine's instead.
+        assert_eq!(
+            candidates_from(Some("/tmp/x.conf"), Some("/env.conf"), Some("/home/u/.config")),
+            vec!["/tmp/x.conf"]
+        );
+        assert_eq!(
+            candidates_from(None, Some("/env.conf"), Some("/home/u/.config")),
+            vec!["/env.conf"]
+        );
+    }
+
+    #[test]
+    fn the_machine_config_is_the_last_resort_even_with_no_home() {
+        assert_eq!(candidates_from(None, None, None), vec!["/etc/mail-imap.conf"]);
+    }
+
+    #[test]
+    fn an_empty_setting_is_not_a_setting() {
+        // An unset variable and one set to "" arrive differently but
+        // mean the same thing.
+        assert_eq!(
+            candidates_from(Some(""), Some(""), Some("")),
+            vec!["/etc/mail-imap.conf"]
+        );
+    }
+
+    #[test]
+    fn the_user_dir_is_xdg_when_set_and_dot_config_otherwise() {
+        assert_eq!(
+            user_config_dir_from(None, Some("/home/u")),
+            Some("/home/u/.config".to_string())
+        );
+        assert_eq!(
+            user_config_dir_from(Some("/elsewhere"), Some("/home/u")),
+            Some("/elsewhere".to_string())
+        );
+        assert_eq!(user_config_dir_from(None, None), None);
+        assert_eq!(user_config_dir_from(Some(""), Some("")), None);
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_double_up() {
+        assert_eq!(
+            candidates_from(None, None, Some("/home/u/.config/")),
+            vec!["/home/u/.config/mail-imap.conf", "/etc/mail-imap.conf"]
+        );
+        assert_eq!(
+            user_config_dir_from(None, Some("/home/u/")),
+            Some("/home/u/.config".to_string())
+        );
     }
 }
