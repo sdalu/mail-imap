@@ -367,15 +367,25 @@ pub fn tags_known(json: bool) -> Result<()> {
 /// back into `-f`, and a name buried in parentheses is harder to read
 /// off and harder to copy. JSON ignores `long` and always carries
 /// every field: it is read by a caller, which cannot ask again.
-pub fn list_folders(config: &Config, json: bool, debug: bool, long: bool) -> Result<()> {
+pub fn list_folders(
+    config: &Config,
+    json: bool,
+    debug: bool,
+    long: bool,
+    subscribed: bool,
+) -> Result<()> {
     if debug {
         eprintln!("Connecting to {}:{} as {}", config.server, config.port, config.username);
     }
     let mut client = ImapClient::connect(config, debug)?;
     if debug {
-        eprintln!("Listing folders...");
+        eprintln!("Listing {}folders...", if subscribed { "subscribed " } else { "" });
     }
-    let folders = client.list_folders()?;
+    let folders = if subscribed {
+        client.list_subscribed_folders()?
+    } else {
+        client.list_folders()?
+    };
     if debug {
         eprintln!("Found {} folder(s)", folders.len());
     }
@@ -389,11 +399,11 @@ pub fn list_folders(config: &Config, json: bool, debug: bool, long: bool) -> Res
     }
 
     if folders.is_empty() {
-        println!("No folders found.");
+        println!("{}", if subscribed { "No subscribed folders found." } else { "No folders found." });
         return Ok(());
     }
 
-    println!("Folders ({}):", folders.len());
+    println!("{} ({}):", if subscribed { "Subscribed folders" } else { "Folders" }, folders.len());
     for f in folders {
         println!("{}", folder_line(&f, long));
     }
@@ -484,6 +494,7 @@ struct AccessMay {
     store_flags: bool,
     move_messages: bool,
     change_folders: bool,
+    delete_folders: bool,
     set_deleted: bool,
 }
 
@@ -622,6 +633,7 @@ fn build_info<'a>(
                 store_flags: level.may_store_flags(),
                 move_messages: level.may_move(),
                 change_folders: level.may_change_folders(),
+                delete_folders: level.may_delete_folder(),
                 set_deleted: level.may_set("\\Deleted"),
             },
         },
@@ -719,6 +731,7 @@ fn print_info(i: &InfoOutput) {
     println!("  {:<MAY$} {}", "set and clear flags and tags", yes_no(i.access.may.store_flags));
     println!("  {:<MAY$} {}", "move mail to another folder", yes_no(i.access.may.move_messages));
     println!("  {:<MAY$} {}", "create / rename / subscribe", yes_no(i.access.may.change_folders));
+    println!("  {:<MAY$} {}", "delete a folder", yes_no(i.access.may.delete_folders));
     println!("  {:<MAY$} {}", "set \\Deleted", yes_no(i.access.may.set_deleted));
 
     println!();
@@ -804,9 +817,9 @@ fn print_info(i: &InfoOutput) {
     );
 }
 
-/// `folder create|rename|subscribe|unsubscribe`. Every one of these is
-/// gated in `ImapClient` on the `restructure` access level; the handler
-/// only reports what happened.
+/// `folder create|rename|subscribe|unsubscribe|delete`. Every one of
+/// these is gated in `ImapClient` -- `restructure` for the first four,
+/// `full` for `delete` -- the handler only reports what happened.
 pub fn folder_create(
     config: &Config,
     name: &str,
@@ -873,6 +886,21 @@ pub fn folder_subscribe(
         if subscribed { "Subscribed to" } else { "Unsubscribed from" },
         name
     );
+    Ok(())
+}
+
+pub fn folder_delete(config: &Config, name: &str, force: bool, json: bool, debug: bool) -> Result<()> {
+    let mut client = ImapClient::connect(config, debug)?;
+    client.delete_folder(name, force)?;
+    if json {
+        return emit_json(&FolderChangeOutput {
+            action: "delete",
+            folder: name,
+            to: None,
+            use_attr: None,
+        });
+    }
+    println!("Deleted '{}'", name);
     Ok(())
 }
 

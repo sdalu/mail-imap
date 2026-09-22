@@ -239,6 +239,22 @@ command line may
 only narrow it, never widen it, so a config that says `readonly` cannot
 be argued out of it by an argument list.
 
+Where the line falls between `restructure` and `full` is worth stating,
+because `folder delete` looks like it belongs with the rest of the
+folder tree and does not: creating, renaming and subscribing lose
+nothing, and deleting loses a mailbox and everything in it. So
+`check_folder_delete` is a separate gate from `check_folder_change`,
+and it asks `AccessLevel::may_delete_folder` rather than comparing
+levels itself — which is what keeps the gate and the `delete a folder`
+line `info` prints from drifting into a tool that refuses what it
+advertises.
+
+Deleting also refuses two things no access level can authorise: `INBOX`,
+which every server refuses anyway, and a mailbox that still holds
+messages unless `--force` is given. The second is this tool's, not the
+protocol's — a server deletes a full mailbox without comment, and the
+refusal exists so that destroying mail takes a word that says so.
+
 It is checked in `ImapClient`, the wrapper both backends go through,
 and not in the CLI handlers. A handler can forget; a rule that lives in
 one place cannot be forgotten by nine. `ImapClient::check_flag_change`

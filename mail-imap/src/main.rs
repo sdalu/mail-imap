@@ -220,7 +220,8 @@ impl Sel {
 #[derive(clap::Subcommand)]
 enum Command {
     /// List folders, or change the folder tree (create / rename /
-    /// subscribe / unsubscribe — each needs access-level 'restructure')
+    /// subscribe / unsubscribe need access-level 'restructure'; delete
+    /// needs 'full')
     Folder {
         /// What to do with the folders
         #[clap(subcommand)]
@@ -297,6 +298,10 @@ enum FolderAction {
         /// (\Sent, \Junk, \Noinferiors, ...) beside its name
         #[clap(short = 'l', long = "long")]
         long: bool,
+        /// List only the mailboxes subscribed to (IMAP LSUB), instead
+        /// of every mailbox that exists (IMAP LIST)
+        #[clap(long = "subscribed")]
+        subscribed: bool,
     },
     /// Create a mailbox
     Create {
@@ -329,6 +334,16 @@ enum FolderAction {
     Unsubscribe {
         /// The mailbox to unsubscribe from
         name: String,
+    },
+    /// Delete a mailbox, permanently and with everything it holds
+    /// (INBOX is refused, at every access level; needs access-level
+    /// 'full')
+    Delete {
+        /// The mailbox to delete
+        name: String,
+        /// Delete it even though it holds messages
+        #[clap(long = "force")]
+        force: bool,
     },
 }
 
@@ -533,7 +548,9 @@ fn main() {
 
     let result = match &args.command {
         Command::Folder { action } => match action {
-            FolderAction::List { long } => cli::list_folders(&config, json, debug, *long),
+            FolderAction::List { long, subscribed } => {
+                cli::list_folders(&config, json, debug, *long, *subscribed)
+            }
             FolderAction::Create {
                 name,
                 use_attr,
@@ -547,6 +564,9 @@ fn main() {
             }
             FolderAction::Unsubscribe { name } => {
                 cli::folder_subscribe(&config, name, false, json, debug)
+            }
+            FolderAction::Delete { name, force } => {
+                cli::folder_delete(&config, name, *force, json, debug)
             }
         },
         Command::Info => cli::info(

@@ -53,7 +53,18 @@ impl MockClient {
                 (5, vec!["<m5@mail>".into()], vec!["<m3@mail>".into()]),
             ],
             message_flags: BTreeMap::new(),
-            subscribed: BTreeSet::new(),
+            // Seeded rather than empty, because an account is
+            // subscribed to its own folders and an empty set makes
+            // `folder list --subscribed` structurally incapable of
+            // showing anything here -- a demo of a feature that can
+            // only ever print "none". Spam is left out: a real account
+            // commonly is not subscribed to it, and a set that differs
+            // from the folder list is the only one that proves the
+            // command is filtering rather than listing.
+            subscribed: ["INBOX", "Sent Items", "Drafts", "Trash"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             moved: BTreeSet::new(),
         })
     }
@@ -178,6 +189,14 @@ impl ImapBackend for MockClient {
                     _ => Vec::new(),
                 },
             })
+            .collect())
+    }
+
+    fn list_subscribed_folders(&mut self) -> Result<Vec<FolderInfo>> {
+        Ok(self
+            .list_folders()?
+            .into_iter()
+            .filter(|f| self.subscribed.contains(&f.name))
             .collect())
     }
 
@@ -408,6 +427,23 @@ impl ImapBackend for MockClient {
             self.subscribed.remove(name);
         }
         Ok(())
+    }
+
+    fn delete_folder(&mut self, name: &str, _force: bool) -> Result<()> {
+        // Every check `force` governs has already run in `ImapClient`,
+        // so this only has to find the mailbox and drop it. The
+        // subscription, if any, is left as it is: RFC 3501's own `LSUB`
+        // description says a server "will not unilaterally remove an
+        // existing mailbox name from the subscription list even if a
+        // mailbox by that name no longer exists", so `list_folders` /
+        // `LIST` losing the name is all a real `DELETE` promises.
+        match self.folders.iter().position(|f| f == name) {
+            Some(pos) => {
+                self.folders.remove(pos);
+                Ok(())
+            }
+            None => bail!("no mailbox '{}'", name),
+        }
     }
 
     fn message_flags(&mut self, folder: &str, uid: u32) -> Result<Vec<String>> {

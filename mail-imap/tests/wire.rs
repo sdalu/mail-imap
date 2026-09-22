@@ -544,6 +544,81 @@ fn the_folder_tree_can_be_created_renamed_and_subscribed() {
 
 #[test]
 #[ignore = "needs an IMAP server: make tests-wire"]
+fn folder_list_subscribed_shows_only_what_was_subscribed_to() {
+    let mut c = client();
+    let subscribed = unique("lsub-yes");
+    let not_subscribed = unique("lsub-no");
+    c.create_folder(&subscribed, None).expect("CREATE");
+    c.create_folder(&not_subscribed, None).expect("CREATE");
+    c.set_subscribed(&subscribed, true).expect("SUBSCRIBE");
+
+    let names: Vec<String> = c
+        .list_subscribed_folders()
+        .expect("LSUB")
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    assert!(
+        names.contains(&subscribed),
+        "LSUB missed a mailbox that was subscribed to: {:?}",
+        names
+    );
+    assert!(
+        !names.contains(&not_subscribed),
+        "LSUB listed a mailbox that was never subscribed to: {:?}",
+        names
+    );
+}
+
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn deleting_a_mailbox_removes_it_but_inbox_and_a_non_empty_one_are_refused() {
+    let mut c = client();
+
+    // INBOX: refused outright, --force or not -- the server's own rule
+    // (`Session::delete`'s doc comment: "It is an error to attempt to
+    // delete INBOX"), not something --force is meant to override.
+    let err = c.delete_folder("INBOX", true).expect_err("INBOX must never be deleted");
+    assert!(err.to_string().to_lowercase().contains("inbox"), "wrong reason: {}", err);
+
+    // Empty: no --force needed.
+    let empty = unique("delete-empty");
+    c.create_folder(&empty, None).expect("CREATE");
+    c.delete_folder(&empty, false).expect("an empty mailbox needs no --force");
+    assert!(
+        !c.list_folders().expect("LIST").iter().any(|f| f.name == empty),
+        "deleted folder is still listed"
+    );
+
+    // Holding a message: refused without --force, and the refusal names
+    // the count.
+    let holding = unique("delete-holding");
+    c.create_folder(&holding, None).expect("CREATE");
+    let (_token, uids) = fixture(&mut c, "delete-holding", 1);
+    c.move_messages("INBOX", &uids, &holding).expect("file a message into it");
+    let err = c
+        .delete_folder(&holding, false)
+        .expect_err("a non-empty mailbox must be refused without --force");
+    assert!(
+        err.to_string().contains('1'),
+        "the refusal should name the message count: {}",
+        err
+    );
+    assert!(
+        c.list_folders().expect("LIST").iter().any(|f| f.name == holding),
+        "a refused delete must not have removed the mailbox"
+    );
+
+    // --force deletes it anyway.
+    c.delete_folder(&holding, true).expect("--force deletes it anyway");
+    assert!(
+        !c.list_folders().expect("LIST").iter().any(|f| f.name == holding),
+        "deleted folder is still listed"
+    );
+}
+
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
 fn mime_parts_are_listed_and_saved_from_the_real_message() {
     let mut c = client();
     let token = unique("parts");
@@ -632,6 +707,7 @@ fn a_line_break_in_a_folder_name_never_reaches_the_server() {
         c.rename_folder(evil, "Fine").err(),
         c.set_subscribed(evil, true).err(),
         c.move_messages("INBOX", &[1], evil).err(),
+        c.delete_folder(evil, true).err(),
     ] {
         let err = err.expect("a line break must be refused before the socket");
         assert!(
@@ -687,6 +763,8 @@ struct Ground {
     absent_uid: u32,
     /// A second real folder, to file into.
     move_target: String,
+    /// A third real folder, empty, spent by the `delete_folder` probe.
+    deletable_folder: String,
 }
 
 /// Run every probe against one backend. Kept as a single list so the
@@ -727,6 +805,13 @@ fn probe(c: &mut ImapClient, g: &Ground) -> Vec<Probe> {
         // Moving.
         ("move: absent target", c.move_messages(&g.folder, &[g.uid], &g.absent_folder).is_ok()),
         ("move: absent uid", c.move_messages(&g.folder, &[g.absent_uid], &g.move_target).is_ok()),
+        // Listing only the subscribed mailboxes must not error just
+        // because nothing (or everything) is subscribed.
+        ("list_subscribed_folders: ok", c.list_subscribed_folders().is_ok()),
+        // Deleting.
+        ("delete_folder: absent", c.delete_folder(&g.absent_folder, false).is_ok()),
+        ("delete_folder: INBOX even with force", c.delete_folder("INBOX", true).is_ok()),
+        ("delete_folder: empty folder, no force needed", c.delete_folder(&g.deletable_folder, false).is_ok()),
         // A line break in a name never reaches either backend.
         ("subscribe: name with CRLF", c.set_subscribed("Evil\r\nA1 NOOP", true).is_ok()),
     ]
@@ -747,12 +832,15 @@ fn the_mock_answers_like_a_real_server() {
     let (_token, uids) = fixture(&mut real, "conformance", 1);
     let real_target = unique("conformance-target");
     real.create_folder(&real_target, None).expect("a folder to file into");
+    let real_deletable = unique("conformance-deletable");
+    real.create_folder(&real_deletable, None).expect("a folder to delete");
     let real_ground = Ground {
         folder: "INBOX".to_string(),
         absent_folder: unique("conformance-absent"),
         uid: uids[0],
         absent_uid: 4_000_000_001,
         move_target: real_target,
+        deletable_folder: real_deletable,
     };
 
     let mut mock = ImapClient::connect(
@@ -770,6 +858,9 @@ fn the_mock_answers_like_a_real_server() {
         uid: 1,
         absent_uid: 4_000_000_001,
         move_target: "Trash".to_string(),
+        // Never touched elsewhere in `probe`, so deleting it cannot
+        // break a later probe the way spending `move_target` would.
+        deletable_folder: "Spam".to_string(),
     };
 
     let from_real = probe(&mut real, &real_ground);

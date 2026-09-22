@@ -47,20 +47,6 @@ doing on its own — it is one config field, one `std::process::Command`,
 and it makes `pass`, `gpg` and a keyring all work without this tool
 knowing about any of them.
 
-## 3. The folder tree has no counterparts
-
-- **No `folder delete`.** `restructure` creates mailboxes and renames
-  them but cannot remove one, so the level cannot undo its own work.
-  The gate belongs beside the others in `ImapClient`
-  (`src/imap/mod.rs:363`), and it is the first folder operation that
-  destroys mail rather than rearranging it — so it is an argument for
-  `full`, not for `restructure`.
-- **Subscriptions are write-only.** `set_subscribed`
-  (`src/imap/real.rs:1017`) subscribes and unsubscribes; nothing sends
-  `LSUB` or `LIST (SUBSCRIBED)`, and `folder list -l` shows the LIST
-  attributes only. You can change the subscription state and never see
-  it. `folder list --subscribed` is the missing half.
-
 ## 4. No `expunge`, and no `copy`
 
 `access-level full` exists for one thing — permitting `\Deleted` to be
@@ -230,8 +216,15 @@ attachment to put in Drafts — is §5 and belongs to `append`.
 
 ---
 
-Done and out of this list: the `SEARCH` charset declaration and
-`part save --all` / `-o -`. What they left behind is recorded where it
-belongs rather than here — the untested fallback branch in DESIGN.md
-under *Declaring a charset on `SEARCH`*, and why `fetch_part` is the
-trait's primitive under *MIME parsing*.
+Done and out of this list: the `SEARCH` charset declaration,
+`part save --all` / `-o -`, and §3 — `folder delete` and
+`folder list --subscribed`. What they left behind is recorded where it
+belongs rather than here: the untested charset fallback in DESIGN.md
+under *Declaring a charset on `SEARCH`*, why `fetch_part` is the
+trait's primitive under *MIME parsing*, and where the line falls
+between `restructure` and `full` under *Access level*.
+
+The numbers of what remains do not close up as entries leave. §6 cites
+"§5 (`append`) and the expunge half of §4", and a renumbering that made
+the list tidier would quietly make those citations point at the wrong
+thing.

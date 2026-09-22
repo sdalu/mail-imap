@@ -87,7 +87,11 @@ cargo run -- --help
   `LIST` patterns such as `Archive/*`)
 - Change the folder tree: create a mailbox (declaring an RFC 6154
   special use if the server takes one), rename one, subscribe and
-  unsubscribe (`access-level` `restructure`)
+  unsubscribe (`access-level` `restructure`); delete one, which needs
+  `full` and refuses a mailbox that still holds messages unless
+  `--force`
+- List only the mailboxes you are subscribed to (`folder list
+  --subscribed`, an `LSUB`)
 - Search emails in one or more folders (pass any IMAP `SEARCH` query); a
   query carrying a non-ASCII term is sent as `CHARSET UTF-8`, falling
   back to the bare form on a server that refuses it
@@ -138,11 +142,12 @@ takes the folder flags `-f`/`-A`; see [Folder selection](#folder-selection).
 | Command              | Syntax                                            | Description                                                                                                                                                                     |
 | -------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `info`               | `info`                                            | What this run can do and what the server is: access level, hierarchy delimiter, special-use mailboxes, and the wire path filing / sorting / threading take here                 |
-| `folder list`        | `folder list [-l]`                                | List mailboxes/folders; `-l`/`--long` adds each one's hierarchy delimiter and LIST attributes                                                                                   |
+| `folder list`        | `folder list [-l] [--subscribed]`                 | List mailboxes/folders; `-l`/`--long` adds each one's hierarchy delimiter and LIST attributes; `--subscribed` lists only subscribed mailboxes (`LSUB`)                          |
 | `folder create`      | `folder create <FOLDER> [--use <ATTR>] [--wire]`  | Create a mailbox, optionally declaring an RFC 6154 special use at creation: `archive`, `junk`, `sent`, `trash`, `drafts`, `all`, `flagged` (needs `access-level` `restructure`) |
 | `folder rename`      | `folder rename <FROM> <TO>`                       | Rename a mailbox; INBOX is refused at every level (needs `restructure`)                                                                                                         |
 | `folder subscribe`   | `folder subscribe <FOLDER>`                       | Subscribe to a mailbox (needs `restructure`)                                                                                                                                    |
 | `folder unsubscribe` | `folder unsubscribe <FOLDER>`                     | Unsubscribe from a mailbox (needs `restructure`)                                                                                                                                |
+| `folder delete`      | `folder delete <FOLDER> [--force]`                | Delete a mailbox and everything in it. INBOX is refused at every level; a mailbox holding messages is refused without `--force` (needs `full`)                                  |
 | `search`             | `search <QUERY>`                                  | Search emails with any IMAP `SEARCH` query in the selected folder(s); most recent first unless `-S`                                                                             |
 | `read`               | `read <SELECTION...>`                             | Read the selected email(s)                                                                                                                                                      |
 | `count`              | `count`                                           | Message counts / status of the selected folder(s), or every mailbox if none is given (alias: `status`)                                                                          |
@@ -295,6 +300,7 @@ Access level: organize
   set and clear flags and tags        yes
   move mail to another folder         yes
   create / rename / subscribe         no
+  delete a folder                     no
   set \Deleted                        no
 
 Folders
@@ -349,7 +355,8 @@ What each block is for:
            "tls":"implicit","insecure":false,"username":"user@example.com"},
  "access":{"effective":"organize","configured":"organize",
            "may":{"store_flags":true,"move_messages":true,
-                  "change_folders":false,"set_deleted":false}},
+                  "change_folders":false,"delete_folders":false,
+                  "set_deleted":false}},
  "folders":{"delimiter":"/","delimiter_source":"server","server_delimiter":"/",
             "delimiters_seen":["/"],"default":"INBOX","default_exists":true,
             "count":12,"special_use":{"\\Trash":"Trash","\\Junk":"Spam"}},
@@ -579,6 +586,14 @@ mail-imap --config incal.conf folder create Archive/2026
 mail-imap --config incal.conf folder create Archive --use archive
 mail-imap --config incal.conf folder rename Spam Junk
 mail-imap --config incal.conf folder subscribe Archive/2026
+
+# ... and just the ones you are subscribed to
+mail-imap --config incal.conf folder list --subscribed
+
+# Delete a mailbox (needs "access-level": "full"); --force is what it
+# takes to destroy one that still holds messages
+mail-imap --config incal.conf folder delete Archive/2025
+mail-imap --config incal.conf folder delete Archive/2025 --force
 ```
 
 #### Searching
@@ -966,7 +981,7 @@ change. The levels are a ladder, each permitting everything below it:
 | `readonly`    | Nothing changes. Reads use `BODY.PEEK[]`, so even `\Seen` stays as it was            |
 | `organize`    | *(default)* Read, plus set and clear flags and tags, and move mail to another folder |
 | `restructure` | That, plus the folder tree: `folder create`, `rename`, `subscribe`, `unsubscribe`    |
-| `full`        | Everything the tool can do, including setting `\Deleted`                             |
+| `full`        | Everything the tool can do, including setting `\Deleted` and deleting a mailbox      |
 
 The two lines the ladder draws: `organize` is about **messages** —
 nothing is lost, so `\Deleted` cannot be *set* (it can be cleared,

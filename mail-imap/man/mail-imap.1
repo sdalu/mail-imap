@@ -156,8 +156,12 @@ List mailboxes, or change the folder tree.
 Every use takes a subcommand; the tree-changing ones need access level
 .Ic restructure .
 .Bl -tag -width Ds -compact
-.It Cm folder list Op Fl l
+.It Cm folder list Op Fl l Op Fl -subscribed
 List mailboxes, one name per line.
+.Fl -subscribed
+lists only the mailboxes this account is subscribed to
+.Pq an Ic LSUB ,
+rather than every mailbox that exists.
 .Fl l ,
 .Fl -long
 adds each mailbox\(aqs hierarchy delimiter and its LIST attributes
@@ -184,6 +188,18 @@ is refused at every access level.
 Subscribe to a mailbox.
 .It Cm folder unsubscribe Ar folder
 Unsubscribe from a mailbox.
+.It Cm folder delete Ar folder Op Fl -force
+Delete a mailbox, permanently, with everything it holds.
+Needs
+.Ar access-level
+.Cm full \(em not
+.Cm restructure ,
+which creates and renames but loses nothing.
+.Ic INBOX
+is refused at every level.
+A mailbox that still holds messages is refused unless
+.Fl -force
+is given, and the refusal names how many would be destroyed.
 .El
 .It Cm search Ar query
 Search email in the selected folder(s) with any IMAP

@@ -3,10 +3,11 @@
 //! Reads never change anything: they use `BODY.PEEK[]`, so even
 //! fetching a message does not set `\Seen`. The mutating operations are
 //! [`ImapBackend::store_flags`] (`flag`, `tag`),
-//! [`ImapBackend::move_messages`] (`move`), and the folder-tree three —
-//! [`ImapBackend::create_folder`], [`ImapBackend::rename_folder`] and
-//! [`ImapBackend::set_subscribed`]. Every one of them is gated by
-//! [`ImapClient`] on the configured [`AccessLevel`], never by its caller.
+//! [`ImapBackend::move_messages`] (`move`), and the folder-tree four —
+//! [`ImapBackend::create_folder`], [`ImapBackend::rename_folder`],
+//! [`ImapBackend::set_subscribed`] and [`ImapBackend::delete_folder`].
+//! Every one of them is gated by [`ImapClient`] on the configured
+//! [`AccessLevel`], never by its caller.
 //!
 //! Operations are exposed through the [`ImapBackend`] trait. Two backends exist:
 //!
@@ -113,14 +114,20 @@ pub struct PartInfo {
 ///
 /// Most are reads. The ones that change the server are `store_flags`
 /// (`flag`, `tag`), `move_messages` (`move`), and `create_folder`,
-/// `rename_folder` and `set_subscribed` (`folder`). `save_part` writes
-/// a local file and touches nothing on the server.
+/// `rename_folder`, `set_subscribed` and `delete_folder` (`folder`).
+/// `save_part` writes a local file and touches nothing on the server.
 ///
 /// None of them gates itself. `access-level` is enforced in
 /// [`ImapClient`], the wrapper every command goes through, so a second
 /// backend cannot forget a check by implementing this trait directly.
 pub trait ImapBackend {
     fn list_folders(&mut self) -> Result<Vec<FolderInfo>>;
+    /// Only the mailboxes subscribed to (`LSUB`), in the same shape as
+    /// [`ImapBackend::list_folders`] (`LIST`). A filter, not a separate
+    /// field: every row here is subscribed by construction, so there is
+    /// nothing a `subscribed` flag on [`FolderInfo`] would say that
+    /// calling the right method does not already say.
+    fn list_subscribed_folders(&mut self) -> Result<Vec<FolderInfo>>;
     /// Everything the server advertises, upper-cased. Empty when the
     /// server was not asked or said nothing — the mock advertises
     /// none, which is what makes it stand in for a bare server.
@@ -181,12 +188,16 @@ pub trait ImapBackend {
     fn rename_folder(&mut self, from: &str, to: &str) -> Result<()>;
     /// Subscribe to a mailbox, or unsubscribe from it.
     fn set_subscribed(&mut self, name: &str, subscribed: bool) -> Result<()>;
+    /// Delete a mailbox (`DELETE`), permanently and with everything it
+    /// holds. `force` is passed through for signature parity but is not
+    /// this method's to act on: the access-level, INBOX and non-empty
+    /// checks (which `force` bypasses) live in [`ImapClient`], above
+    /// every backend, and run before this is ever reached.
+    fn delete_folder(&mut self, name: &str, force: bool) -> Result<()>;
     /// The flags (system flags + keywords) of one message, as strings.
     /// `\Recent` is omitted (transient, server-managed), matching the
     /// `flags` of search results.
     fn message_flags(&mut self, folder: &str, uid: u32) -> Result<Vec<String>>;
-    /// Decode MIME part `part` of message `uid` and write it to `dest`.
-    /// Returns the number of bytes written.
     /// The decoded bytes of one MIME part.
     fn fetch_part(&mut self, folder: &str, uid: u32, part: u32) -> Result<Vec<u8>>;
 
@@ -392,6 +403,25 @@ impl ImapClient {
         }
         Ok(())
     }
+
+    /// Refuse deleting a mailbox unless the access level is `full`.
+    /// `restructure` is not enough on purpose: creating and renaming
+    /// leave every message where it was, but deleting a mailbox loses
+    /// it and everything in it, so it gets its own, stricter check
+    /// rather than sharing `check_folder_change`'s.
+    fn check_folder_delete(&self) -> Result<()> {
+        // Asks `AccessLevel`, rather than comparing here, so this gate
+        // and the `delete a folder` line `info` prints cannot drift
+        // apart into a tool that refuses what it advertises.
+        if !self.access.may_delete_folder() {
+            bail!(
+                "access level '{}' will not delete a mailbox: raise \"access-level\" to \
+                 'full' in the config",
+                self.access.as_str()
+            );
+        }
+        Ok(())
+    }
 }
 
 impl ImapBackend for ImapClient {
@@ -400,6 +430,13 @@ impl ImapBackend for ImapClient {
             Backend::Real(c) => c.list_folders(),
             #[cfg(feature = "mock")]
             Backend::Mock(c) => c.list_folders(),
+        }
+    }
+    fn list_subscribed_folders(&mut self) -> Result<Vec<FolderInfo>> {
+        match &mut self.backend {
+            Backend::Real(c) => c.list_subscribed_folders(),
+            #[cfg(feature = "mock")]
+            Backend::Mock(c) => c.list_subscribed_folders(),
         }
     }
     fn capabilities(&mut self) -> Result<Vec<String>> {
@@ -547,6 +584,42 @@ impl ImapBackend for ImapClient {
             Backend::Mock(c) => c.set_subscribed(name, subscribed),
         }
     }
+    fn delete_folder(&mut self, name: &str, force: bool) -> Result<()> {
+        self.check_folder_delete()?;
+        check_mailbox_name(name, "folder delete")?;
+        // The `imap` crate refuses this too (`Session::delete`'s own doc
+        // comment: "It is an error to attempt to delete INBOX", RFC 3501
+        // §6.3.4), but checking here means the same message regardless
+        // of backend, and before a STATUS round trip is spent below.
+        if name.eq_ignore_ascii_case("INBOX") {
+            bail!(
+                "INBOX cannot be deleted: every server refuses it, at every access \
+                 level. Empty it and leave it in place if that is what you want"
+            );
+        }
+        // The server would delete a non-empty mailbox without complaint
+        // -- this tool makes the caller say they meant it. `mailbox_counts`
+        // is ungated, so this is the same STATUS `count` already uses.
+        if !force {
+            let counts = self.mailbox_counts(Some(name))?;
+            if let Some(m) = counts.first() {
+                if m.messages > 0 {
+                    bail!(
+                        "'{}' holds {} message{} that would be destroyed along with it: \
+                         pass --force to delete it anyway, or move the messages out first",
+                        name,
+                        m.messages,
+                        if m.messages == 1 { "" } else { "s" }
+                    );
+                }
+            }
+        }
+        match &mut self.backend {
+            Backend::Real(c) => c.delete_folder(name, force),
+            #[cfg(feature = "mock")]
+            Backend::Mock(c) => c.delete_folder(name, force),
+        }
+    }
     fn message_flags(&mut self, folder: &str, uid: u32) -> Result<Vec<String>> {
         match &mut self.backend {
             Backend::Real(c) => c.message_flags(folder, uid),
@@ -668,6 +741,7 @@ mod mailbox_name_tests {
             c.set_subscribed(evil, true).err(),
             c.set_subscribed(evil, false).err(),
             c.move_messages("INBOX", &[1], evil).err(),
+            c.delete_folder(evil, false).err(),
         ] {
             let err = err.expect("a line break must never reach the wire");
             assert!(err.to_string().contains("line break"), "wrong reason: {}", err);

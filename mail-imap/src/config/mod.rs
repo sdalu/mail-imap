@@ -47,6 +47,13 @@ impl AccessLevel {
         self >= AccessLevel::Organize
     }
 
+    /// May a mailbox be deleted? Not `may_change_folders`: creating and
+    /// renaming lose nothing, deleting loses a mailbox and everything
+    /// in it, which is what `full` is for.
+    pub fn may_delete_folder(self) -> bool {
+        self >= AccessLevel::Full
+    }
+
     /// May the folder tree be changed — created, renamed, subscribed?
     /// `organize` deliberately stops short: it moves messages between
     /// folders that already exist and leaves the tree alone.

@@ -606,6 +606,34 @@ fn special_use_attr(attr: &NameAttribute<'_>) -> Option<&'static str> {
     }
 }
 
+/// Turn a `LIST`/`LSUB` response into the [`FolderInfo`]s this tool
+/// reports, shared so the two wire commands cannot drift apart.
+fn folder_infos(names: &imap::types::Names) -> Vec<FolderInfo> {
+    names
+        .iter()
+        .filter(|n| !n.attributes().contains(&NameAttribute::NoSelect))
+        .map(|n| {
+            let mut attrs = Vec::new();
+            if n.attributes().contains(&NameAttribute::Marked) {
+                attrs.push("\\Marked".to_string());
+            }
+            // RFC 6154: the special uses are what says which mailbox is
+            // the Trash on an account that does not call it "Trash".
+            for attr in n.attributes() {
+                if let Some(name) = special_use_attr(attr) {
+                    attrs.push(name.to_string());
+                }
+            }
+            FolderInfo {
+                name: n.name().to_string(),
+                delimiter: n.delimiter().map(str::to_string),
+                no_inferiors: n.attributes().contains(&NameAttribute::NoInferiors),
+                attrs,
+            }
+        })
+        .collect()
+}
+
 impl ImapBackend for RealClient {
     fn capabilities(&mut self) -> Result<Vec<String>> {
         self.ensure_capabilities();
@@ -617,34 +645,11 @@ impl ImapBackend for RealClient {
     }
 
     fn list_folders(&mut self) -> Result<Vec<FolderInfo>> {
-        let names = self.session
-            .list(None, Some("*"))?
-            .iter()
-            .filter(|n| !n.attributes().contains(&NameAttribute::NoSelect))
-            .map(|n| {
-                let mut attrs = Vec::new();
-                if n.attributes().contains(&NameAttribute::Marked) {
-                    attrs.push("\\Marked".to_string());
-                }
-                // RFC 6154: the special uses are what says which
-                // mailbox is the Trash on an account that does not
-                // call it "Trash".
-                for attr in n.attributes() {
-                    if let Some(name) = special_use_attr(attr) {
-                        attrs.push(name.to_string());
-                    }
-                }
-                FolderInfo {
-                    name: n.name().to_string(),
-                    delimiter: n.delimiter().map(str::to_string),
-                    no_inferiors: n
-                        .attributes()
-                        .contains(&NameAttribute::NoInferiors),
-                    attrs,
-                }
-            })
-            .collect();
-        Ok(names)
+        Ok(folder_infos(&self.session.list(None, Some("*"))?))
+    }
+
+    fn list_subscribed_folders(&mut self) -> Result<Vec<FolderInfo>> {
+        Ok(folder_infos(&self.session.lsub(None, Some("*"))?))
     }
 
     fn search_folders(
@@ -1052,6 +1057,15 @@ impl ImapBackend for RealClient {
                 .unsubscribe(name)
                 .with_context(|| format!("UNSUBSCRIBE '{}'", name))
         }
+    }
+
+    fn delete_folder(&mut self, name: &str, _force: bool) -> Result<()> {
+        // Every check `force` governs (access level, INBOX, non-empty)
+        // has already run in `ImapClient`; by the time this is reached
+        // the answer is always "proceed".
+        self.session
+            .delete(name)
+            .with_context(|| format!("DELETE '{}'", name))
     }
 
     fn message_flags(&mut self, folder: &str, uid: u32) -> Result<Vec<String>> {
