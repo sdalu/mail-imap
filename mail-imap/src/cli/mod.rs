@@ -22,7 +22,7 @@ pub fn parse_uids(spec: &str) -> Result<Vec<u32>> {
         }
         if token.contains('-') {
             bail!(
-                "UID ranges are not supported in spec '{}' (use a comma-separated list, e.g. '1,2,3')",
+                "UID ranges are not supported in spec '{}' (use separate arguments or a comma-separated list, e.g. '1 2 3' or '1,2,3')",
                 spec
             );
         }
@@ -431,6 +431,12 @@ pub fn parse_flag_names(names: &[String], allow_system: bool) -> Result<Vec<Stri
             }
             continue;
         }
+        if name.starts_with('-') {
+            bail!(
+                "invalid flag/keyword '{}' (names must not start with '-'; global options like -j go before the UID list, not after '--')",
+                name
+            );
+        }
         if name.contains(['\\', '*', '%', '(', ')', '{', '}', '"', ' ', ','])
             || name.chars().any(|c| c.is_control())
         {
@@ -834,7 +840,7 @@ mod tests {
 
     #[test]
     fn parse_flag_names_rejects_special_characters() {
-        for bad in ["a b", "a,b", "a*b", "a%b", "a(b", "a}b", "\"x\"", "a\nb"] {
+        for bad in ["a b", "a,b", "a*b", "a%b", "a(b", "a}b", "\"x\"", "a\nb", "-mytag", "-j"] {
             assert!(
                 parse_flag_names(&[bad.to_string()], true).is_err(),
                 "should reject {:?}",

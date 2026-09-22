@@ -16,7 +16,7 @@ the tool can be built, demoed and unit-tested without a reachable server.
 
 - List mailboxes/folders
 - Search emails in one or more folders (pass any IMAP `SEARCH` query)
-- Read email(s) by UID selection (comma-separated list, no ranges)
+- Read email(s) by UID selection (space- or comma-separated, no ranges)
 - Show message counts / status of mailboxes (IMAP `STATUS`)
 - List the message UIDs of a folder
 - List the message UIDs of the thread containing a given message
@@ -44,19 +44,19 @@ the tool can be built, demoed and unit-tested without a reachable server.
 |---------|--------|-------------|
 | `folder` | `folder` | List mailboxes/folders |
 | `search` | `search <QUERY> [FOLDER...]` | Search emails with any IMAP `SEARCH` query; one or more folders (comma-separated or repeated, default `-f`/config); most recent first unless `-S` |
-| `read` | `read <UID[,UID...]>` | Read email(s) by UID (comma-separated list, no ranges) |
+| `read` | `read <UID...>` | Read email(s) by UID: separate arguments or comma-separated (`read 1 4` = `read 1,4`; no ranges) |
 | `count` | `count [FOLDER]` | Message counts / status of all mailboxes or one (alias: `status`) |
 | `uid` | `uid` | List the message UIDs of the folder |
 | `thread` | `thread <UID>` | List the UIDs of every message in the thread containing the given message |
 | `unread` | `unread [FOLDER...]` | List unread emails of one or more folders (`search UNSEEN`) |
-| `part list` | `part list <UID[,UID...]>` | List the MIME parts of email(s) |
+| `part list` | `part list <UID...>` | List the MIME parts of email(s) |
 | `part save` | `part save <UID> <PART> [-o <FILE>]` | Save one MIME part to a file (default: the part's filename in the current directory) |
-| `flag list` | `flag list <UID[,UID...]>` | List the flags (system flags + keyword tags) of email(s) |
-| `flag add` | `flag add <UID[,UID...]> <FLAG...>` | Enable flags on email(s): `\Seen`, `\Answered`, `\Flagged`, `\Deleted`, `\Draft` or keywords (e.g. `junk`) |
-| `flag remove` | `flag remove <UID[,UID...]> <FLAG...>` | Disable flags on email(s) |
-| `tag list` | `tag list <UID[,UID...]>` | List the custom keyword tags of email(s) (system flags omitted) |
-| `tag add` | `tag add <UID[,UID...]> <TAG...>` | Add custom keyword tags (plain keywords, no system flags) |
-| `tag remove` | `tag remove <UID[,UID...]> <TAG...>` | Remove custom keyword tags |
+| `flag list` | `flag list <UID...>` | List the flags (system flags + keyword tags) of email(s) |
+| `flag add` | `flag add <UID...> -- <FLAG...>` | Enable flags on email(s): `\Seen`, `\Answered`, `\Flagged`, `\Deleted`, `\Draft` or keywords (e.g. `junk`); `--` separates the two lists |
+| `flag remove` | `flag remove <UID...> -- <FLAG...>` | Disable flags on email(s) |
+| `tag list` | `tag list <UID...>` | List the custom keyword tags of email(s) (system flags omitted) |
+| `tag add` | `tag add <UID...> -- <TAG...>` | Add custom keyword tags (plain keywords, no system flags) |
+| `tag remove` | `tag remove <UID...> -- <TAG...>` | Remove custom keyword tags |
 
 ```bash
 # List folders
@@ -79,9 +79,10 @@ mail-imap --config incal.conf -f INBOX search ALL
 mail-imap --config incal.conf -f INBOX -M 200 search ALL   # raise the cap for this run
 
 # Read an email by UID (default folder from config, or -f).
-# UID selection is a comma-separated list; ranges like "1-5" are not supported.
+# UID selection: separate arguments or comma-separated; ranges like "1-5" are unsupported.
 mail-imap --config incal.conf -f INBOX read 12345
-mail-imap --config incal.conf -f INBOX read 12345,67890
+mail-imap --config incal.conf -f INBOX read 12345 67890
+mail-imap --config incal.conf -f INBOX read 12345,67890   # same thing
 
 # Message counts / status (all mailboxes, or one)
 mail-imap --config incal.conf count
@@ -101,7 +102,7 @@ mail-imap --config incal.conf -f INBOX unread
 
 # List the MIME parts of one or more emails
 mail-imap --config incal.conf -f INBOX part list 12345
-mail-imap --config incal.conf -f INBOX part list 12345,67890
+mail-imap --config incal.conf -f INBOX part list 12345 67890
 
 # Save one part to a file (default: the part's filename, else
 # uid<N>_part<M>, in the current directory; -o to choose a path)
@@ -114,14 +115,15 @@ mail-imap --config incal.conf -S "subject,-size" -f INBOX search UNSEEN
 
 # Enable/disable message flags (\Seen, \Answered, \Flagged, \Deleted,
 # \Draft, or keywords; \Recent is server-managed and rejected)
-mail-imap --config incal.conf -f INBOX flag list 12345,67890
-mail-imap --config incal.conf -f INBOX flag add 12345,67890 '\Flagged'
-mail-imap --config incal.conf -f INBOX flag remove 12345 '\Seen' junk
+mail-imap --config incal.conf -f INBOX flag list 12345 67890
+mail-imap --config incal.conf -f INBOX flag add 12345 67890 -- '\Flagged'
+mail-imap --config incal.conf -f INBOX flag remove 12345 -- '\Seen' junk
 
-# Add/remove custom keyword tags (plain keywords only, no \system flags)
+# Add/remove custom keyword tags (plain keywords only, no \system flags);
+# after 'flag'/'tag' add|remove the names follow a '--' separator
 mail-imap --config incal.conf -f INBOX tag list 12345
-mail-imap --config incal.conf -f INBOX tag add 12345 invoice $Important
-mail-imap --config incal.conf -f INBOX tag remove 12345 invoice
+mail-imap --config incal.conf -f INBOX tag add 12345 -- invoice '$Important'
+mail-imap --config incal.conf -f INBOX tag remove 12345 -- invoice
 
 # JSON output (machine-readable: one compact JSON object on stdout)
 mail-imap --config incal.conf -j -f INBOX search "SINCE 01-Jan-2026"

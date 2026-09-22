@@ -63,9 +63,12 @@ fn fail(json: bool, message: &str) -> ! {
     process::exit(1);
 }
 
-/// UID selection: a single UID or a comma-separated list (e.g. `1,4,7`).
-/// Ranges are not supported.
-type UidSpec = String;
+/// Join CLI UID arguments (separate arguments, comma-separated tokens, or
+/// a mix) back into a single spec for `parse_uids`. Ranges are not
+/// supported.
+fn uid_spec(uids: &[String]) -> String {
+    uids.join(",")
+}
 
 /// Use the explicitly requested folders (deduplicated, order preserved),
 /// falling back to the single configured folder.
@@ -98,8 +101,9 @@ enum Command {
     },
     /// Read email(s) by UID
     Read {
-        /// UID selection: `5` or `1,4,7` (no ranges)
-        uids: UidSpec,
+        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
+        #[clap(value_name = "UID")]
+        uids: Vec<String>,
     },
     /// Show message counts / status of mailboxes (IMAP STATUS)
     #[clap(alias = "status")]
@@ -150,24 +154,27 @@ enum FlagAction {
     /// List the flags (system flags and keyword tags) of the given
     /// email(s)
     List {
-        /// UID selection: `5` or `1,4,7` (no ranges)
-        uids: UidSpec,
+        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
+        #[clap(value_name = "UID")]
+        uids: Vec<String>,
     },
     /// Enable the given flags on the given email(s)
     Add {
-        /// UID selection: `5` or `1,4,7` (no ranges)
-        uids: UidSpec,
-        /// Flags: `\Seen`, `\Answered`, `\Flagged`, `\Deleted`,
-        /// `\Draft` or custom keywords (e.g. junk)
-        #[clap(value_name = "FLAG", required = true)]
+        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
+        #[clap(value_name = "UID")]
+        uids: Vec<String>,
+        /// Flags to add (after `--`): `\Seen`, `\Answered`, `\Flagged`,
+        /// `\Deleted`, `\Draft` or custom keywords (e.g. junk)
+        #[clap(value_name = "FLAG", required = true, last = true)]
         flags: Vec<String>,
     },
     /// Disable the given flags on the given email(s)
     Remove {
-        /// UID selection: `5` or `1,4,7` (no ranges)
-        uids: UidSpec,
-        /// Flags to remove (same forms as `flag add`)
-        #[clap(value_name = "FLAG", required = true)]
+        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
+        #[clap(value_name = "UID")]
+        uids: Vec<String>,
+        /// Flags to remove (after `--`, same forms as `flag add`)
+        #[clap(value_name = "FLAG", required = true, last = true)]
         flags: Vec<String>,
     },
 }
@@ -176,23 +183,26 @@ enum FlagAction {
 enum TagAction {
     /// List the custom keyword tags of the given email(s)
     List {
-        /// UID selection: `5` or `1,4,7` (no ranges)
-        uids: UidSpec,
+        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
+        #[clap(value_name = "UID")]
+        uids: Vec<String>,
     },
     /// Add the given tags to the given email(s)
     Add {
-        /// UID selection: `5` or `1,4,7` (no ranges)
-        uids: UidSpec,
-        /// Tags (custom IMAP keywords, e.g. `invoice`, `$Important`)
-        #[clap(value_name = "TAG", required = true)]
+        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
+        #[clap(value_name = "UID")]
+        uids: Vec<String>,
+        /// Tags (after `--`): custom IMAP keywords, e.g. `invoice`, `$Important`
+        #[clap(value_name = "TAG", required = true, last = true)]
         tags: Vec<String>,
     },
     /// Remove the given tags from the given email(s)
     Remove {
-        /// UID selection: `5` or `1,4,7` (no ranges)
-        uids: UidSpec,
-        /// Tags to remove (same forms as `tag add`)
-        #[clap(value_name = "TAG", required = true)]
+        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
+        #[clap(value_name = "UID")]
+        uids: Vec<String>,
+        /// Tags to remove (after `--`, same forms as `tag add`)
+        #[clap(value_name = "TAG", required = true, last = true)]
         tags: Vec<String>,
     },
 }
@@ -201,8 +211,9 @@ enum TagAction {
 enum PartsAction {
     /// List the MIME parts of the given email(s)
     List {
-        /// UID selection: `5` or `1,4,7` (no ranges)
-        uids: UidSpec,
+        /// UID selection: `5`, `1 4 7`, or `1,4,7` (no ranges)
+        #[clap(value_name = "UID")]
+        uids: Vec<String>,
     },
     /// Save one part to a file
     Save {
@@ -258,7 +269,7 @@ fn main() {
             json,
             debug,
         ),
-        Command::Read { uids } => cli::read_emails(&config, uids, json, debug),
+        Command::Read { uids } => cli::read_emails(&config, &uid_spec(uids), json, debug),
         Command::Count { folder } => cli::mailbox_counts(&config, folder.as_deref(), json, debug),
         Command::Uid => cli::folder_uids(&config, json, debug),
         Command::Thread { uid } => cli::thread_uids(&config, *uid, json, debug),
@@ -266,27 +277,27 @@ fn main() {
             cli::unread(&config, resolve_folders(folders, &config), json, debug)
         }
         Command::Part { action } => match action {
-            PartsAction::List { uids } => cli::parts_list(&config, uids, json, debug),
+            PartsAction::List { uids } => cli::parts_list(&config, &uid_spec(uids), json, debug),
             PartsAction::Save { uid, part, out } => {
                 cli::parts_save(&config, *uid, *part, out.clone(), json, debug)
             }
         },
         Command::Flag { action } => match action {
-            FlagAction::List { uids } => cli::flag_list(&config, uids, false, json, debug),
+            FlagAction::List { uids } => cli::flag_list(&config, &uid_spec(uids), false, json, debug),
             FlagAction::Add { uids, flags } => {
-                cli::change_flags(&config, uids, flags, true, true, json, debug)
+                cli::change_flags(&config, &uid_spec(uids), flags, true, true, json, debug)
             }
             FlagAction::Remove { uids, flags } => {
-                cli::change_flags(&config, uids, flags, true, false, json, debug)
+                cli::change_flags(&config, &uid_spec(uids), flags, true, false, json, debug)
             }
         },
         Command::Tag { action } => match action {
-            TagAction::List { uids } => cli::flag_list(&config, uids, true, json, debug),
+            TagAction::List { uids } => cli::flag_list(&config, &uid_spec(uids), true, json, debug),
             TagAction::Add { uids, tags } => {
-                cli::change_flags(&config, uids, tags, false, true, json, debug)
+                cli::change_flags(&config, &uid_spec(uids), tags, false, true, json, debug)
             }
             TagAction::Remove { uids, tags } => {
-                cli::change_flags(&config, uids, tags, false, false, json, debug)
+                cli::change_flags(&config, &uid_spec(uids), tags, false, false, json, debug)
             }
         },
     };

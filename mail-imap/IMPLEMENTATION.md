@@ -189,10 +189,14 @@ Both share one backend operation (`store_flags`) and one handler
 ### UID selection
 
 Commands that take messages (`read`, `part list`, `flag`, `tag`) accept a
-UID selection:
-a single UID or a comma-separated list (`1,4,7`). Ranges (`1-7`) are rejected
-by `parse_uids` (`src/cli/mod.rs`) with a dedicated error. The list is
-deduplicated, input order is preserved, and each UID is fetched individually.
+UID selection: UIDs as separate arguments (`1 4 7`) or a comma-separated
+list (`1,4,7`), or a mix. The CLI-level `Vec<String>` positional is
+comma-joined (`uid_spec` in `src/main.rs`) and fed to `parse_uids`
+(`src/cli/mod.rs`). `flag`/`tag` `add`/`remove` take the names as a
+trailing list after `--` (clap allows only one variadic positional), so
+the shape is `flag add 1 4 -- '\Seen'`. Ranges (`1-7`) are rejected with
+a dedicated error. The list is deduplicated, input order is preserved,
+and each UID is fetched individually.
 
 ### MIME parsing (`mime.rs`)
 
