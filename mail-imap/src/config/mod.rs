@@ -47,6 +47,15 @@ impl AccessLevel {
         self >= AccessLevel::Organize
     }
 
+    /// May a message be rewritten — fetched, rebuilt without one of its
+    /// parts, put back, and the original removed? `full`, because the
+    /// part that goes is gone: `part strip` is the only operation here
+    /// that destroys something inside a message rather than the message
+    /// itself.
+    pub fn may_strip_part(self) -> bool {
+        self >= AccessLevel::Full
+    }
+
     /// May a mailbox be deleted? Not `may_change_folders`: creating and
     /// renaming lose nothing, deleting loses a mailbox and everything
     /// in it, which is what `full` is for.

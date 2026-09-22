@@ -107,6 +107,11 @@ cargo run -- --help
 - Sort search/unread results by uid/date/arrival/size/subject/from/to/cc
   (`-S`/`--sort`): server-side `UID SORT` (RFC 5256) when the server
   advertises `SORT`, client-side sorting otherwise
+- Strip a part out of a message and keep the message (`part strip`):
+  the attachment goes, a stub recording its name, type, size and
+  SHA-256 takes its slot, and the message is rewritten in place — which
+  on IMAP means appended and the original removed, so the UID changes
+  (`access-level` `full`)
 - List the MIME parts of an email, and save one part to a file, every
   part to a directory (`--all`), or one part to stdout (`-o -`) for
   piping
@@ -166,6 +171,7 @@ takes the folder flags `-f`/`-A`; see [Folder selection](#folder-selection).
 | `unread`             | `unread`                                          | List unread emails of the selected folder(s) (`search UNSEEN`)                                                                                                                  |
 | `part list`          | `part list <SELECTION...>`                        | List the MIME parts of the selected email(s)                                                                                                                                    |
 | `part save`          | `part save <SELECTION> <PART> [-o\|--out <FILE\|->]` | Save one MIME part of one message to a file, or to stdout with `-o -` (the selection must name exactly one message)                                                             |
+| `part strip`         | `part strip <SELECTION> <PART...>`                | Replace MIME part(s) with a stub recording what was there; the message survives, its UID changes. Needs `UIDPLUS` (needs `full`)                                               |
 | `part save --all`    | `part save <SELECTION> --all [-o\|--out <DIR>]`   | Save every MIME part of one message; `-o` names a directory that must already exist. Refuses to overwrite                                                                       |
 | `move`               | `move <SELECTION...> <FOLDER>`                    | File the selected email(s) into another folder, named last as `mv` does; it must already exist (needs `organize`)                                                               |
 | `copy`               | `copy <SELECTION...> <FOLDER>`                    | Copy the selected email(s) into another folder, leaving the originals; it must already exist (needs `organize`)                                                                |
@@ -315,6 +321,7 @@ Access level: organize
   copy mail into another folder       yes
   create / rename / subscribe         no
   delete a folder                     no
+  strip a part from a message         no
   set \Deleted                        no
   expunge a \Deleted message          no
   append a message into a mailbox     no
@@ -344,7 +351,7 @@ This server
 
 What each block is for:
 
-- **Access level** — the level in force, and the eight things it governs,
+- **Access level** — the level in force, and the nine things it governs,
   so an agent can tell `flag add` from `folder create` before trying
   one. A run narrowed with `--access-level` says so and names the
   ceiling the config still allows.
@@ -373,8 +380,8 @@ What each block is for:
  "access":{"effective":"organize","configured":"organize",
            "may":{"store_flags":true,"move_messages":true,
                   "copy_messages":true,"change_folders":false,
-                  "delete_folders":false,"set_deleted":false,
-                  "expunge":false,"append":false}},
+                  "delete_folders":false,"strip_part":false,
+                  "set_deleted":false,"expunge":false,"append":false}},
  "folders":{"delimiter":"/","delimiter_source":"server","server_delimiter":"/",
             "delimiters_seen":["/"],"default":"INBOX","default_exists":true,
             "count":12,"special_use":{"\\Trash":"Trash","\\Junk":"Spam"}},
@@ -838,6 +845,52 @@ mail-imap --config incal.conf -f INBOX part save 12345 --all -o /tmp/parts
 mail-imap --config incal.conf -f INBOX part save 12345 2 -o -
 ```
 
+#### Stripping an attachment (`part strip`)
+
+The reason this exists: a mailbox is 40 GB because of attachments
+nobody will open again, and the mail itself is worth keeping.
+Thunderbird calls it *Detach*.
+
+**IMAP cannot edit a message.** There is no command for it, so
+`part strip` fetches the message, rebuilds it without the named parts,
+`APPEND`s the result and removes the original — which means **the UID
+changes**, and the command reports the old one and the new one. Any
+UID you were holding for that message is stale afterwards.
+
+The part is replaced, not deleted. What takes its place is a
+`text/plain` stub naming the file, its type, its size and its SHA-256,
+and the message gains one `X-Mail-Imap-Stripped` header per part
+removed. Two things follow: part numbers stay stable, so a `part list`
+taken before the strip still describes the message; and the digest
+makes the removal **checkable** — the attachment saved to a disk
+archive can be matched back to the message it came from, years later,
+by one `sha256`. It is of the decoded bytes, the same ones `part save`
+would have written, because that is the form a saved file is in and
+because base64 may be re-wrapped in transit without the attachment
+changing at all.
+
+The rewritten copy keeps the original's **flags and internaldate**.
+Losing either would be quiet — the mail would still be there, unread
+again, or dated the day it was tidied rather than the day it arrived.
+
+It needs `UIDPLUS`, and checks for it *before* writing anything: the
+original is removed with `UID EXPUNGE`, and finding out at the last
+step that it cannot be would leave two copies behind. The order is
+write first, delete last, so a failure in between leaves both and says
+so, rather than losing the message.
+
+```console
+$ mail-imap -c incal.conf -f Archive part strip 12345 3
+Stripped part 3 (application/pdf, invoice-2026-01.pdf), 4194304 bytes
+  sha256 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+UID 12345 became UID 20881 in 'Archive' (4213770 -> 19664 bytes)
+```
+
+```bash
+mail-imap --config incal.conf -f Archive part strip 12345 3
+mail-imap --config incal.conf -f Archive part strip 12345 2 3
+```
+
 #### Setting flags and tags
 
 `flag` owns the IMAP-defined flags (`\Seen`, `\Answered`, `\Flagged`,
@@ -1085,7 +1138,7 @@ change. The levels are a ladder, each permitting everything below it:
 | `readonly`    | Nothing changes. Reads use `BODY.PEEK[]`, so even `\Seen` stays as it was            |
 | `organize`    | *(default)* Read, plus set and clear flags and tags, and move mail to another folder |
 | `restructure` | That, plus the folder tree: `folder create`, `rename`, `subscribe`, `unsubscribe`    |
-| `full`        | Everything the tool can do, including setting `\Deleted`, `expunge`, `append` and deleting a mailbox |
+| `full`        | Everything the tool can do: setting `\Deleted`, `expunge`, `append`, `part strip`, and deleting a mailbox |
 
 The two lines the ladder draws: `organize` is about **messages** —
 nothing is lost, so `\Deleted` cannot be *set* (it can be cleared,

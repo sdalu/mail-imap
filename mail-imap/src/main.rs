@@ -485,6 +485,19 @@ enum PartsAction {
         #[clap(flatten)]
         sel: Sel,
     },
+    /// Replace one or more MIME parts of a message with a stub
+    /// recording what was there, keeping the message. IMAP cannot edit
+    /// a message, so this appends the rebuilt one and removes the
+    /// original: the UID changes (needs access-level 'full')
+    #[clap(after_help = SELECTION_HELP)]
+    Strip {
+        /// Message selection naming exactly one message (5, Archive::5)
+        #[clap(value_name = "SELECTION")]
+        selection: String,
+        /// Part number(s) to strip, as listed by `part list`
+        #[clap(value_name = "PART", required = true)]
+        parts: Vec<u32>,
+    },
     /// Save one part of one message to a file, or every part with --all
     #[clap(after_help = SELECTION_HELP)]
     Save {
@@ -710,6 +723,20 @@ fn main() {
                     &config,
                     &folder_spec(&args),
                     &selections,
+                    json,
+                    debug,
+                )
+            }
+            PartsAction::Strip { selection, parts } => {
+                let one = match parse_selections(std::slice::from_ref(selection)) {
+                    Ok(s) => s,
+                    Err(e) => fail(json, &format!("{:#}", e)),
+                };
+                cli::parts_strip(
+                    &config,
+                    &folder_spec(&args),
+                    &one[0],
+                    parts,
                     json,
                     debug,
                 )

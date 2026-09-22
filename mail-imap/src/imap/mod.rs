@@ -29,6 +29,7 @@ mod sort;
 
 #[cfg(feature = "mock")]
 pub use mock::MockClient;
+pub use mime::StrippedPart;
 pub use real::RealClient;
 pub use sort::{parse_sort, sort_results, SortCriteria, SortKey};
 
@@ -101,6 +102,32 @@ impl Permanent {
     pub fn keepable<'a>(&self, wanted: &[&'a str]) -> Vec<&'a str> {
         wanted.iter().copied().filter(|n| self.keeps(n)).collect()
     }
+}
+
+/// A message as it sits on the server: the exact bytes, plus the two
+/// things a rewrite has to carry over to the copy it puts back. Losing
+/// either would be silent — the mail would still be there, dated wrong
+/// or unread again.
+#[derive(Debug, Clone)]
+pub struct RawMessage {
+    pub bytes: Vec<u8>,
+    pub flags: Vec<String>,
+    pub internal_date: Option<DateTime<FixedOffset>>,
+}
+
+/// What `part strip` did: where the message went, and what was taken
+/// out of it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StripOutcome {
+    pub folder: String,
+    /// The UID that was rewritten. It no longer exists.
+    pub old_uid: u32,
+    /// The UID of the message that replaced it, where the server
+    /// reported one.
+    pub new_uid: Option<u32>,
+    pub stripped: Vec<mime::StrippedPart>,
+    pub bytes_before: u64,
+    pub bytes_after: u64,
 }
 
 /// A single MIME part of a message, numbered in document order (1-based)
@@ -218,6 +245,17 @@ pub trait ImapBackend {
         flags: &[String],
         internal_date: Option<DateTime<FixedOffset>>,
     ) -> Result<Option<u32>>;
+    /// One message's exact bytes, with its flags and internaldate.
+    fn fetch_raw_message(&mut self, folder: &str, uid: u32) -> Result<RawMessage>;
+    /// Can this backend remove named messages and leave the rest — the
+    /// question `UIDPLUS` answers for a real server?
+    ///
+    /// Asked rather than inferred from `capabilities()` so that each
+    /// backend answers for itself: the mock advertises no extensions
+    /// and can still remove exactly the messages it is given, and a
+    /// `part strip` that refused there would be refusing a thing that
+    /// works.
+    fn can_expunge_by_uid(&mut self) -> Result<bool>;
     /// Create a mailbox. `use_attr` is an RFC 6154 special-use
     /// attribute (`\Archive`, `\Sent`, ...) to declare at creation —
     /// the only moment IMAP lets a client set one — and needs the
@@ -507,6 +545,86 @@ impl ImapClient {
     /// leave every message where it was, but deleting a mailbox loses
     /// it and everything in it, so it gets its own, stricter check
     /// rather than sharing `check_folder_change`'s.
+    /// Rewrite a message without the named parts: fetch it, rebuild it
+    /// with each one replaced by a stub recording what was there,
+    /// `APPEND` the result, and remove the original.
+    ///
+    /// IMAP cannot edit a message in place, so this is the only shape
+    /// available, and the order is the one that fails safely: **write
+    /// first, delete last**. If the append succeeds and the removal
+    /// does not, the mailbox holds two copies and a person can choose
+    /// between them; the other order loses the message whenever the
+    /// rebuild is wrong. `move_messages` files its fallback the same
+    /// way for the same reason.
+    ///
+    /// The new message carries the original's flags and internaldate.
+    /// Losing either would be quiet: the mail would still be there,
+    /// unread again or dated the day it was stripped, and an archive
+    /// dated by when it was tidied is an archive with no history.
+    pub fn strip_part(&mut self, folder: &str, uid: u32, parts: &[u32]) -> Result<StripOutcome> {
+        self.check_strip_part()?;
+        // Asked BEFORE anything is written. The removal is the last
+        // step, and discovering there that it cannot happen would mean
+        // having already appended a copy that nothing then cleans up.
+        if !self.can_expunge_by_uid()? {
+            bail!(
+                "the server does not advertise UIDPLUS (RFC 4315), so the original could                  not be removed after the rewrite -- 'part strip' would leave two copies,                  the stripped one and the message it was made from. Refusing"
+            );
+        }
+        let original = self.fetch_raw_message(folder, uid)?;
+        let stripped_at: DateTime<FixedOffset> = chrono::Local::now().into();
+        let (rebuilt, records) = mime::strip_parts(&original.bytes, parts, stripped_at)
+            .with_context(|| format!("rebuilding UID {} in '{}' without those parts", uid, folder))?;
+
+        let new_uid = self
+            .append_message(folder, &rebuilt, &original.flags, original.internal_date)
+            .with_context(|| {
+                format!(
+                    "appending the rewritten UID {} to '{}' (nothing was removed: the                      original is untouched)",
+                    uid, folder
+                )
+            })?;
+
+        // From here the original is the copy to lose, and any failure
+        // has to say that both exist rather than imply the strip did
+        // not happen.
+        let existing = format!(
+            "the stripped copy is in '{}'{} and the original UID {} is still there",
+            folder,
+            match new_uid {
+                Some(n) => format!(" as UID {}", n),
+                None => String::new(),
+            },
+            uid
+        );
+        self.store_flags(folder, &[uid], &["\\Deleted".to_string()], &[])
+            .with_context(|| format!("marking the original UID {} \\Deleted -- {}", uid, existing))?;
+        self.expunge_messages(folder, &[uid])
+            .with_context(|| format!("removing the original UID {} -- {}", uid, existing))?;
+
+        Ok(StripOutcome {
+            folder: folder.to_string(),
+            old_uid: uid,
+            new_uid,
+            stripped: records,
+            bytes_before: original.bytes.len() as u64,
+            bytes_after: rebuilt.len() as u64,
+        })
+    }
+
+    /// May this run rewrite a message? `part strip` is the only thing
+    /// that does, and what it takes out does not come back.
+    fn check_strip_part(&self) -> Result<()> {
+        if !self.access.may_strip_part() {
+            bail!(
+                "access level '{}' will not rewrite a message: raise \"access-level\" to \
+                 'full' in the config",
+                self.access.as_str()
+            );
+        }
+        Ok(())
+    }
+
     fn check_folder_delete(&self) -> Result<()> {
         // Asks `AccessLevel`, rather than comparing here, so this gate
         // and the `delete a folder` line `info` prints cannot drift
@@ -718,6 +836,20 @@ impl ImapBackend for ImapClient {
             Backend::Real(c) => c.append_message(folder, &content, flags, internal_date),
             #[cfg(feature = "mock")]
             Backend::Mock(c) => c.append_message(folder, &content, flags, internal_date),
+        }
+    }
+    fn fetch_raw_message(&mut self, folder: &str, uid: u32) -> Result<RawMessage> {
+        match &mut self.backend {
+            Backend::Real(c) => c.fetch_raw_message(folder, uid),
+            #[cfg(feature = "mock")]
+            Backend::Mock(c) => c.fetch_raw_message(folder, uid),
+        }
+    }
+    fn can_expunge_by_uid(&mut self) -> Result<bool> {
+        match &mut self.backend {
+            Backend::Real(c) => c.can_expunge_by_uid(),
+            #[cfg(feature = "mock")]
+            Backend::Mock(c) => c.can_expunge_by_uid(),
         }
     }
     fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {

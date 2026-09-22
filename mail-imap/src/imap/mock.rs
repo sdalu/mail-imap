@@ -1,8 +1,8 @@
 use crate::config::Config;
 use crate::imap::{
     Permanent,
-    sort_results, thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, SearchResult,
-    SortCriteria, ThreadRefs,
+    sort_results, thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, RawMessage,
+    SearchResult, SortCriteria, ThreadRefs,
 };
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, FixedOffset};
@@ -491,6 +491,71 @@ impl ImapBackend for MockClient {
         // mock must never be stricter than a real server, not that it
         // must match every detail of one.
         Ok(Some(uid))
+    }
+
+    fn fetch_raw_message(&mut self, folder: &str, uid: u32) -> Result<RawMessage> {
+        self.require_folder(folder)?;
+        let (_, subject, from, body) = self
+            .messages
+            .iter()
+            .find(|(u, _, _, _)| *u == uid)
+            .ok_or_else(|| anyhow::anyhow!("no email with UID {} (mock)", uid))?
+            .clone();
+        // Built to agree with `parts()`, which is what `part list`
+        // reports: a mock whose raw bytes described a different message
+        // than its own part listing would make `part strip` behave one
+        // way here and another on a server.
+        let parts = self.parts(uid);
+        let mut msg = format!(
+            "From: {}\r\nSubject: {}\r\nMIME-Version: 1.0\r\n",
+            from, subject
+        );
+        if parts.len() < 2 {
+            msg.push_str("Content-Type: text/plain\r\n\r\n");
+            msg.push_str(body.as_str());
+            msg.push_str("\r\n");
+        } else {
+            const B: &str = "mock-boundary-4a1f";
+            msg.push_str(&format!(
+                "Content-Type: multipart/mixed; boundary={}\r\n\r\n--{}\r\n\
+                 Content-Type: text/plain\r\n\r\n{}\r\n",
+                B, B, body
+            ));
+            for p in parts.iter().skip(1) {
+                // Filler sized to what `parts()` declares, base64'd, so
+                // the decoded length a strip records matches the size
+                // `part list` printed.
+                let filler = vec![b'.'; p.size as usize];
+                msg.push_str(&format!("--{}\r\nContent-Type: {}\r\n", B, p.content_type));
+                if let Some(name) = &p.filename {
+                    msg.push_str(&format!(
+                        "Content-Disposition: attachment; filename=\"{}\"\r\n",
+                        name
+                    ));
+                }
+                msg.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
+                for line in base64::encode(&filler).as_bytes().chunks(76) {
+                    msg.push_str(std::str::from_utf8(line).unwrap());
+                    msg.push_str("\r\n");
+                }
+            }
+            msg.push_str(&format!("--{}--\r\n", B));
+        }
+        Ok(RawMessage {
+            bytes: msg.into_bytes(),
+            flags: self
+                .message_flags
+                .get(&uid)
+                .map(|f| f.iter().cloned().collect())
+                .unwrap_or_default(),
+            internal_date: None,
+        })
+    }
+
+    fn can_expunge_by_uid(&mut self) -> Result<bool> {
+        // It advertises no extensions, but it can remove exactly the
+        // messages it is handed, which is what the question asks.
+        Ok(true)
     }
 
     fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {

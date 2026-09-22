@@ -343,6 +343,30 @@ raw and undecorated, for piping.
 Writing to standard output is refused under
 .Fl j ,
 where the JSON object and the part body would share the stream.
+.It Cm part strip Ar selection Ar part No ...
+Replace the named MIME part(s) of one message with a stub recording
+what was there \(em filename, content type, decoded size and SHA-256 \(em
+and add one
+.Ic X-Mail-Imap-Stripped
+header per part removed.
+Needs access level
+.Ic full ,
+and the server must advertise
+.Ic UIDPLUS .
+.Pp
+IMAP cannot edit a message in place, so the rebuilt message is appended
+and the original removed:
+.Sy the UID changes ,
+and both the old and the new one are reported.
+The copy keeps the original\(aqs flags and INTERNALDATE.
+The part is replaced rather than removed, so part numbers do not shift
+and a
+.Cm part list
+taken beforehand still describes the message.
+The digest is of the decoded bytes \(em what
+.Cm part save
+would have written \(em so an attachment kept elsewhere can be matched
+back to the message it came from.
 .It Cm part save Ar selection Fl -all Op Fl o | Fl -out Ar dir
 Save every MIME part of one message.
 The files are named for the parts: each part's own filename where it has

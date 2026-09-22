@@ -527,6 +527,7 @@ struct AccessMay {
     copy_messages: bool,
     change_folders: bool,
     delete_folders: bool,
+    strip_part: bool,
     set_deleted: bool,
     /// `UID EXPUNGE` a message already marked `\Deleted`.
     expunge: bool,
@@ -676,6 +677,7 @@ fn build_info<'a>(
                 copy_messages: level.may_move(),
                 change_folders: level.may_change_folders(),
                 delete_folders: level.may_delete_folder(),
+                strip_part: level.may_strip_part(),
                 set_deleted: level.may_set("\\Deleted"),
                 expunge: level.may_expunge(),
                 append: level.may_append(),
@@ -782,6 +784,7 @@ fn print_info(i: &InfoOutput) {
     println!("  {:<MAY$} {}", "copy mail into another folder", yes_no(i.access.may.copy_messages));
     println!("  {:<MAY$} {}", "create / rename / subscribe", yes_no(i.access.may.change_folders));
     println!("  {:<MAY$} {}", "delete a folder", yes_no(i.access.may.delete_folders));
+    println!("  {:<MAY$} {}", "strip a part from a message", yes_no(i.access.may.strip_part));
     println!("  {:<MAY$} {}", "set \\Deleted", yes_no(i.access.may.set_deleted));
     println!("  {:<MAY$} {}", "expunge a \\Deleted message", yes_no(i.access.may.expunge));
     println!("  {:<MAY$} {}", "append a message into a mailbox", yes_no(i.access.may.append));
@@ -2101,6 +2104,81 @@ fn sanitized_part_name(name: Option<&str>, fallback: &Path) -> PathBuf {
         return fallback.to_path_buf();
     }
     PathBuf::from(name)
+}
+
+/// One line per stripped part, plus where the message went.
+#[derive(Serialize)]
+struct StripOutput<'a> {
+    folder: &'a str,
+    old_uid: u32,
+    new_uid: Option<u32>,
+    bytes_before: u64,
+    bytes_after: u64,
+    stripped: &'a [crate::imap::StrippedPart],
+}
+
+pub fn parts_strip(
+    config: &Config,
+    spec: &FolderSpec,
+    selection: &Selection,
+    parts: &[u32],
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    let mut client = ImapClient::connect(config, debug)?;
+    let groups = selection_groups(&mut client, spec, config, std::slice::from_ref(selection))?;
+    let messages = flatten(&groups);
+    if messages.len() != 1 {
+        bail!(
+            "'part strip' rewrites one message, but selection '{}' names {} \
+             (use 'part list' to see the parts of one, then strip that one)",
+            selection.source,
+            messages.len()
+        );
+    }
+    let (folder, uid) = messages[0];
+    let folder = folder.to_string();
+    let out = client.strip_part(&folder, uid, parts)?;
+
+    if json {
+        emit_json(&StripOutput {
+            folder: &out.folder,
+            old_uid: out.old_uid,
+            new_uid: out.new_uid,
+            bytes_before: out.bytes_before,
+            bytes_after: out.bytes_after,
+            stripped: &out.stripped,
+        })?;
+    } else {
+        for p in &out.stripped {
+            println!(
+                "Stripped part {} ({}{}), {} bytes",
+                p.part,
+                p.content_type,
+                match &p.filename {
+                    Some(f) => format!(", {}", f),
+                    None => String::new(),
+                },
+                p.size
+            );
+            println!("  sha256 {}", p.sha256);
+        }
+        match out.new_uid {
+            Some(n) => println!(
+                "UID {} became UID {} in '{}' ({} -> {} bytes)",
+                out.old_uid, n, out.folder, out.bytes_before, out.bytes_after
+            ),
+            // Without UIDPLUS there is no APPENDUID, and this command
+            // refuses without UIDPLUS -- so this branch is a server
+            // that has the capability and did not report the UID.
+            None => println!(
+                "UID {} was rewritten in '{}' ({} -> {} bytes); the server reported no \
+                 new UID",
+                out.old_uid, out.folder, out.bytes_before, out.bytes_after
+            ),
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

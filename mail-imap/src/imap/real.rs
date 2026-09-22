@@ -2,8 +2,8 @@ use crate::config::Config;
 use crate::imap::mime;
 use crate::imap::{
     Permanent,
-    sort_results, thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, SearchResult,
-    SortCriteria, SortKey, ThreadRefs,
+    sort_results, thread_component, FolderInfo, ImapBackend, Mailbox, PartInfo, RawMessage,
+    SearchResult, SortCriteria, SortKey, ThreadRefs,
 };
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, FixedOffset};
@@ -1170,6 +1170,39 @@ impl ImapBackend for RealClient {
             Some(imap_proto::types::UidSetMember::UidRange(r)) => Some(*r.start()),
             None => None,
         })
+    }
+
+    fn fetch_raw_message(&mut self, folder: &str, uid: u32) -> Result<RawMessage> {
+        self.session.select(folder)?;
+        let fetches = self
+            .session
+            .uid_fetch(uid.to_string(), "(UID FLAGS INTERNALDATE BODY.PEEK[])")
+            .with_context(|| format!("UID FETCH of UID {} in '{}'", uid, folder))?;
+        let f = fetches
+            .iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no email with UID {} in folder '{}'", uid, folder))?;
+        let bytes = f
+            .body()
+            .map(|b| b.to_vec())
+            .ok_or_else(|| anyhow::anyhow!("UID {} in '{}' returned no body", uid, folder))?;
+        Ok(RawMessage {
+            bytes,
+            // `\Recent` is the server's to set and is refused on the way
+            // back in, so carrying it to the copy would only produce a
+            // rejected APPEND.
+            flags: f
+                .flags()
+                .iter()
+                .filter(|fl| !matches!(fl, Flag::Recent))
+                .map(|fl| fl.to_string())
+                .collect(),
+            internal_date: f.internal_date(),
+        })
+    }
+
+    fn can_expunge_by_uid(&mut self) -> Result<bool> {
+        Ok(self.has_capability("UIDPLUS"))
     }
 
     fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {

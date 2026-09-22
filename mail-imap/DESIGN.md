@@ -408,6 +408,57 @@ earlier in `split_args`; it is a precondition of those commands rather
 than a fact about parsing names, and it would read better at the call
 sites that need it.
 
+### Stripping a part (`part strip`)
+
+The only operation here that destroys something *inside* a message,
+and the only one that changes a UID.
+
+**IMAP has no edit.** A message on a server is immutable, so the
+sequence is: fetch it whole, rebuild it without the named parts
+(`mime::strip_parts`), `APPEND` the result, mark the original
+`\Deleted`, `UID EXPUNGE` it. `ImapClient::strip_part` composes that
+out of trait methods the backends already implement rather than adding
+a backend method of its own, which is also why the mock gets it without
+knowing anything about it.
+
+**Write first, delete last.** If the append succeeds and the removal
+does not, the mailbox holds two copies and a person can choose between
+them; the other order loses the message whenever the rebuild is wrong.
+`move_messages` files its fallback the same way for the same reason,
+and the errors on the second half say explicitly that both copies
+exist, rather than reading like the strip did not happen.
+
+**UIDPLUS is checked before anything is written**, not when the removal
+is reached. The original goes with `UID EXPUNGE`; discovering at the
+last step that the server cannot do it would mean having already
+appended a copy that nothing then cleans up. The question is asked as
+`can_expunge_by_uid` on the backend rather than read off
+`capabilities()`, so each backend answers for itself — the mock
+advertises no extensions and can still remove exactly the messages it
+is handed, and refusing there would be refusing something that works.
+
+**The copy carries the original's flags and internaldate.** Both would
+be lost silently otherwise: the mail is still present, merely unread
+again, or dated the day it was tidied. An archive dated by when it was
+tidied has no history left.
+
+**The part is replaced, not removed**, which is what keeps part numbers
+stable — a `part list` taken before the strip still describes the
+message. The stub names the file, its type, its decoded size and its
+SHA-256, and the message gains one `X-Mail-Imap-Stripped` header per
+part. The digest is of the *decoded* bytes, for two reasons: that is
+the form a saved file is in, which is the whole point of being able to
+match a kept attachment against the record; and the encoded form is
+not stable, since a gateway may re-wrap base64 at a different line
+length without changing the attachment at all.
+
+One consequence worth stating because it surprises: **stripping a small
+part makes the message bigger.** The stub and a 64-character digest
+outweigh a few hundred bytes of attachment. That is correct, and it is
+not what the command is for — the wire test uses a 4000-byte
+attachment precisely so that it asserts the space is actually
+reclaimed, which a toy fixture would have quietly failed to do.
+
 ### Passive read-only behaviour
 
 Nothing implicitly mutates the mailbox: there is no `MOVE`, `COPY` or

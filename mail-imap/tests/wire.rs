@@ -1178,3 +1178,96 @@ fn the_mock_answers_like_a_real_server() {
         differ.join("\n")
     );
 }
+
+/// `part strip` end to end against a real server: the attachment goes,
+/// the message stays, the text part is untouched, and what was removed
+/// is recorded well enough to recognise the file again years later.
+///
+/// This is the only operation here that destroys something inside a
+/// message, so the assertions are about what survived, not only about
+/// what went.
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn stripping_an_attachment_keeps_the_message_and_records_what_went() {
+    let mut c = client();
+    let token = unique("strip");
+    // 4000 bytes of 'A'. Big enough that removing it actually shrinks
+    // the message -- a tiny attachment is replaced by a stub and a
+    // 64-character digest, so the message GROWS, which is correct and
+    // is not what anyone runs this command for. And a digest anybody
+    // can check from outside: `printf 'A%.0s' $(seq 4000) | sha256sum`.
+    let attachment: String = base64::encode(vec![b'A'; 4000])
+        .as_bytes()
+        .chunks(76)
+        .map(|l| format!("{}\r\n", std::str::from_utf8(l).unwrap()))
+        .collect();
+    let msg = format!(
+        "From: alice@example.com\r\nTo: {}\r\nSubject: {}\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=WIREBOUND\r\n\r\n\
+         --WIREBOUND\r\nContent-Type: text/plain\r\n\r\nkeep this text\r\n\
+         --WIREBOUND\r\nContent-Type: application/pdf\r\n\
+         Content-Disposition: attachment; filename=doc.pdf\r\n\
+         Content-Transfer-Encoding: base64\r\n\r\n{}\
+         --WIREBOUND--\r\n",
+        RECIPIENT, token, attachment
+    );
+    let uid = c
+        .append_message("INBOX", msg.as_bytes(), &["\\Flagged".to_string()], None)
+        .expect("append the fixture")
+        .expect("GreenMail advertises UIDPLUS");
+
+    let before = c.fetch_raw_message("INBOX", uid).expect("fetch before");
+    let out = c.strip_part("INBOX", uid, &[2]).expect("strip");
+
+    assert_eq!(out.old_uid, uid);
+    let new_uid = out.new_uid.expect("UIDPLUS server must report the new UID");
+    assert_ne!(new_uid, uid, "a rewrite cannot reuse the UID it replaced");
+    assert!(
+        out.bytes_after < out.bytes_before,
+        "stripping a real attachment must reclaim space: {} -> {} bytes",
+        out.bytes_before,
+        out.bytes_after
+    );
+
+    // What went, recorded so the file can be recognised again.
+    assert_eq!(out.stripped.len(), 1);
+    assert_eq!(out.stripped[0].part, 2);
+    assert_eq!(out.stripped[0].filename.as_deref(), Some("doc.pdf"));
+    assert_eq!(
+        out.stripped[0].size, 4000,
+        "the size recorded is of the decoded bytes, not the base64 that carried them"
+    );
+    assert_eq!(
+        out.stripped[0].sha256,
+        "0be9c4ddcb61a41f9ab4b420833c13b2f30312fac1231defce7b972b710c7d5e",
+        "the digest is of the DECODED bytes: sha256 of 4000 'A's, checkable outside this tree"
+    );
+
+    // The original is gone and exactly one message carries the token.
+    let found = uids_for(&mut c, &token);
+    assert_eq!(found, vec![new_uid], "the original should have been removed");
+
+    // The text part survived, and the stub took the attachment's slot
+    // so the numbering a `part list` reported still holds.
+    let parts = c.list_parts("INBOX", new_uid).expect("part list");
+    assert_eq!(parts.len(), 2, "the stripped part is replaced, not removed");
+    assert_eq!(
+        c.fetch_part("INBOX", new_uid, 1).expect("part 1"),
+        b"keep this text",
+        "the part that was not stripped must come back byte for byte"
+    );
+    let stub = String::from_utf8(c.fetch_part("INBOX", new_uid, 2).expect("part 2")).unwrap();
+    assert!(stub.contains("doc.pdf"), "{}", stub);
+    assert!(stub.contains(&out.stripped[0].sha256), "{}", stub);
+
+    // The flags came across. Losing them would be quiet: the mail is
+    // still there, just unread again or no longer flagged.
+    let flags = c.message_flags("INBOX", new_uid).expect("flags");
+    assert!(
+        flags.iter().any(|f| f.eq_ignore_ascii_case("\\Flagged")),
+        "the rewritten copy lost the original's flags: {:?} (original had {:?})",
+        flags,
+        before.flags
+    );
+}

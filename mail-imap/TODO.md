@@ -47,136 +47,6 @@ doing on its own — it is one config field, one `std::process::Command`,
 and it makes `pass`, `gpg` and a keyring all work without this tool
 knowing about any of them.
 
-## 6. `part strip`
-
-Decided: the command is `part strip`, not `part remove`. Removing a
-MIME part is not something IMAP can be asked to do, and a name that
-implies otherwise sets up the surprise. What the command does is
-replace a message with a copy of itself that no longer carries a
-given part — and the name should say the narrow thing it is for.
-
-The use is archives: a mailbox is 40 GB because of attachments nobody
-will open again, and the mail itself is worth keeping. Thunderbird
-calls it *Detach*.
-
-### Shape
-
-```
-part strip <SELECTION> <PART>...        # part numbers as `part list` prints them
-```
-
-One message per invocation, as `part save` already requires: the part
-numbers are read off a listing of *that* message, so a selection
-naming several has no coherent reading.
-
-### What it does on the wire
-
-A message on an IMAP server is immutable — there is no command that
-edits one in place. So:
-
-1. `UID FETCH <uid> (FLAGS INTERNALDATE BODY.PEEK[])`;
-2. rebuild the MIME with the named parts replaced by stubs;
-3. `APPEND` the result to the same mailbox, carrying the original
-   flags and internaldate (RFC 3501 §6.3.11 takes both — omit them and
-   the archived message comes back unread and dated today);
-4. read the new UID from `APPENDUID`;
-5. `UID STORE <uid> +FLAGS (\Deleted)`, then `UID EXPUNGE <uid>`.
-
-Write first, delete last, which is the order `move_messages` already
-uses (`src/imap/real.rs:963`): if step 5 fails the mailbox holds two
-copies and a human can choose, whereas the other order loses the
-message when the rebuild is wrong.
-
-**It requires UIDPLUS, and refuses without it.** Not for the reason
-`move` does but for two: without `APPENDUID` there is no way to learn
-which message was just written, and a plain `EXPUNGE` would take every
-`\Deleted` message in the mailbox with it. Refusing is the same
-judgement as `src/imap/real.rs:931-938`.
-
-### The stub
-
-The part is replaced, not deleted. A `text/plain` body naming what was
-there — filename, content type, decoded size, the SHA-256 of what was
-removed, and the date it was stripped — plus an `X-Mail-Imap-Stripped`
-header on the message carrying the same, one line per stripped part:
-
-```
-X-Mail-Imap-Stripped: part=3; type="application/pdf";
-    filename="invoice-2026-01.pdf"; size=4194304;
-    sha256=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08;
-    date="Tue, 22 Sep 2026 18:40:11 +0200"
-```
-
-Three reasons for the stub. Part numbers stay stable, so a `part list`
-from before the strip still describes the message. A reader who goes
-looking for the invoice finds out what happened to it, rather than
-finding a message that never had one. And the digest makes the strip
-**checkable**: the attachment saved to a disk archive can be matched
-back to the message it came from, years later, by one `sha256 -q`
-— without it, "size=4194304" is all anyone has, and the only way to
-know whether the right file was kept is to remember.
-
-**The digest is of the decoded bytes** — what `part save` would have
-written, not the base64 as it sat on the wire. Two reasons: it is the
-form a saved file is in, which is the whole point of being able to
-compare; and the encoded form is not stable, since a server or a
-gateway may re-wrap base64 at a different line length without changing
-the attachment at all.
-
-This is one crate — `sha2` — and it is worth the dependency for the
-one property nothing else here provides: `part strip` is the only
-operation that destroys something, and the digest is what makes the
-destruction auditable after the fact.
-
-### What the caller has to be told
-
-**The UID changes.** This is the first operation here that does — `move`
-changes the mailbox, `flag` changes the flags, neither invalidates a
-UID a caller is holding. The text output and the JSON both have to
-report old and new, and DESIGN.md's *Output* section needs the shape.
-
-The rebuilt message also **fails DKIM**, and its `Received` chain no
-longer describes it. Acceptable for an archive, and worth saying in
-the README rather than leaving to be discovered.
-
-### Access level
-
-`full`. The ladder is about what may be lost, and this loses an
-attachment — which is what `full` is already for (it exists to permit
-`\Deleted`; `src/config/mod.rs:59`). A fifth level would be a config
-compatibility break for one command.
-
-The gate goes in `ImapClient` beside the others (`src/imap/mod.rs:363`),
-not in the handler, and `info` gains a line for it — it is the one
-operation that changes a UID, and `info` is where a caller finds out
-what this run may do.
-
-### What it needs first
-
-Nothing, now. `append` arrived with §5 and `expunge` with §4, so this
-command is those two plus a MIME writer — and the writer is all that is
-left to build. `src/imap/mime.rs` is still a parser only (`leaves`,
-`decoded`, `parse_message`, `decode_body`); what is missing is boundary
-generation, transfer-encoding and `Content-Type` rewriting, plus the
-SHA-256 of the removed bytes for the stub. And the writer is the work: `src/imap/mime.rs` is a
-parser only (`leaves`, `decoded`, `parse_message`, `decode_body`), so
-what is missing is boundary generation, transfer-encoding and
-`Content-Type` rewriting. Removal never changes a message's top-level
-structure, so the writer needed here is the small one — it does not
-have to promote a single-part message to `multipart/mixed`.
-
-Before it ships it owes: a mock backend that accepts `APPEND` (the mock
-is held to what a real server does — CLAUDE.md), a `tests/wire.rs` case
-that strips a part from a real multipart message and checks the
-surviving parts byte-for-byte, and a real account, because this is the
-first path that can lose mail.
-
-### Not the other direction
-
-Adding a part to a message is composing mail, and this tool does not
-send mail. What looks like a use for it — building a message with an
-attachment to put in Drafts — is §5 and belongs to `append`.
-
 ## 7. Smaller, still real
 
 - **No timeout on the session socket.**
@@ -204,16 +74,19 @@ attachment to put in Drafts — is §5 and belongs to `append`.
 
 Done and out of this list: the `SEARCH` charset declaration,
 `part save --all` / `-o -`, §3 (`folder delete` and
-`folder list --subscribed`), §4 (`copy` and `expunge`) and §5
-(`append`). What they
+`folder list --subscribed`), §4 (`copy` and `expunge`), §5 (`append`)
+and §6 (`part strip`). What they
 left behind is recorded where it belongs rather than here: the untested
 charset fallback in DESIGN.md under *Declaring a charset on `SEARCH`*,
 why `fetch_part` is the trait's primitive under *MIME parsing*, where
 the line falls between `restructure` and `full` under *Access level*,
 why `expunge` never marks `\Deleted` itself under *Copying and
-expunging*, and why a lone LF is normalised before an `append` under
-*Putting a message in*.
+expunging*, why a lone LF is normalised before an `append` under
+*Putting a message in*, and why `part strip` writes before it deletes
+under *Stripping a part*.
 
-The numbers of what remains do not close up as entries leave. §6 cites
-§5 by number, and a renumbering that made the list tidier would quietly
-make that citation point at the wrong thing.
+The numbers of what remains do not close up as entries leave: §1, §2
+and §7 keep the numbers they were given. Nothing cites another entry
+any more — §6 was the last that did — but renumbering now would break
+every reference to this file from a commit message, which is where the
+reasoning for each of these lives.
