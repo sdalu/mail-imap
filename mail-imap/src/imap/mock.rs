@@ -6,7 +6,6 @@ use crate::imap::{
 };
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 /// In-memory mock backend. This is the original mockup, kept for offline
 /// testing so the tool can be exercised without a reachable IMAP server.
@@ -280,13 +279,7 @@ impl ImapBackend for MockClient {
         Ok(self.parts(uid))
     }
 
-    fn save_part(
-        &mut self,
-        folder: &str,
-        uid: u32,
-        part: u32,
-        dest: &Path,
-    ) -> Result<u64> {
+    fn fetch_part(&mut self, folder: &str, uid: u32, part: u32) -> Result<Vec<u8>> {
         let parts = self.list_parts(folder, uid)?;
         let max_part = parts.iter().map(|p| p.part).max().unwrap_or(0);
         if part == 0 || part > max_part {
@@ -316,8 +309,7 @@ impl ImapBackend for MockClient {
             data.resize(declared, 0);
             data
         };
-        std::fs::write(dest, &data)?;
-        Ok(data.len() as u64)
+        Ok(data)
     }
 
     fn store_flags(

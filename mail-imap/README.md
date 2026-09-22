@@ -88,7 +88,9 @@ cargo run -- --help
 - Change the folder tree: create a mailbox (declaring an RFC 6154
   special use if the server takes one), rename one, subscribe and
   unsubscribe (`access-level` `restructure`)
-- Search emails in one or more folders (pass any IMAP `SEARCH` query)
+- Search emails in one or more folders (pass any IMAP `SEARCH` query); a
+  query carrying a non-ASCII term is sent as `CHARSET UTF-8`, falling
+  back to the bare form on a server that refuses it
 - Read email(s) by message selection: `[FOLDER::]UIDS`, with lists, ranges
   and `*` for every message
 - Show message counts / status of mailboxes (IMAP `STATUS`)
@@ -101,7 +103,9 @@ cargo run -- --help
 - Sort search/unread results by uid/date/arrival/size/subject/from/to/cc
   (`-S`/`--sort`): server-side `UID SORT` (RFC 5256) when the server
   advertises `SORT`, client-side sorting otherwise
-- List the MIME parts of an email, and save one part to a file
+- List the MIME parts of an email, and save one part to a file, every
+  part to a directory (`--all`), or one part to stdout (`-o -`) for
+  piping
 - Move email(s) to another folder, named last as `mv` does: `UID MOVE`
   (RFC 6851) where the server has it, `UID COPY` + `UID EXPUNGE`
   (RFC 4315) where it does not, and a refusal where it has neither
@@ -146,7 +150,8 @@ takes the folder flags `-f`/`-A`; see [Folder selection](#folder-selection).
 | `thread`             | `thread <SELECTION...>`                           | List the UIDs of every message in the thread(s) containing the selected message(s)                                                                                              |
 | `unread`             | `unread`                                          | List unread emails of the selected folder(s) (`search UNSEEN`)                                                                                                                  |
 | `part list`          | `part list <SELECTION...>`                        | List the MIME parts of the selected email(s)                                                                                                                                    |
-| `part save`          | `part save <SELECTION> <PART> [-o\|--out <FILE>]` | Save one MIME part of one message to a file (the selection must name exactly one message)                                                                                       |
+| `part save`          | `part save <SELECTION> <PART> [-o\|--out <FILE\|->]` | Save one MIME part of one message to a file, or to stdout with `-o -` (the selection must name exactly one message)                                                             |
+| `part save --all`    | `part save <SELECTION> --all [-o\|--out <DIR>]`   | Save every MIME part of one message; `-o` names a directory that must already exist. Refuses to overwrite                                                                       |
 | `move`               | `move <SELECTION...> <FOLDER>`                    | File the selected email(s) into another folder, named last as `mv` does; it must already exist (needs `organize`)                                                               |
 | `flag list`          | `flag list [--wire] <SELECTION...>`               | List the flags (system flags + keyword tags) of the selected email(s)                                                                                                           |
 | `flag add`           | `flag add [--wire] <SELECTION...> <FLAG...>`      | Enable IMAP-defined flags on the selected email(s): `seen`, `answered`, `flagged`, `deleted`, `draft`                                                                           |
@@ -672,8 +677,25 @@ mail-imap --config incal.conf -f INBOX thread 12345
 #### MIME parts
 
 `part save` writes the part's own filename, else `uid<N>_part<M>`, into
-the current directory; `-o` chooses a path. The selection must name
-exactly one message.
+the current directory; `-o` chooses a path, and `-o -` writes the part
+to stdout, raw and undecorated, for piping into something else. The
+selection must name exactly one message.
+
+`--all` saves every part of that message instead of one. It names the
+files itself — the part's own filename where it has one, `part-<N>.bin`
+where it has none, no extension guessed from the content type, because
+a wrong extension is worse than none. `-o` then names a **directory**,
+which must already exist; it is not created. `-o -` is refused with
+`--all` (several binaries concatenated on one stream is not a thing
+anyone can use), and so is `-o -` under `-j`, where the JSON object and
+the part body would be on the same stream.
+
+**`--all` refuses to overwrite** an existing file, naming it and saying
+how many parts were written before it stopped; single-part `part save`
+still overwrites as it always has. That reads as an inconsistency and
+is not one: `-o FILE` is a destination the caller named, and clobbering
+what you named is what every tool does, while `--all` invents its own
+names and refusing there is refusing to surprise.
 
 The part's filename is used only when it is a bare file name. It comes
 out of the message — `Content-Disposition: filename=` — so it is chosen
@@ -689,6 +711,12 @@ the caller named the path.
 mail-imap --config incal.conf -f INBOX part list 12345
 mail-imap --config incal.conf -f INBOX part list 12345 67890
 mail-imap --config incal.conf -f INBOX part save 12345 2 -o /tmp/invoice.pdf
+
+# every part of one message, into a directory that already exists
+mail-imap --config incal.conf -f INBOX part save 12345 --all -o /tmp/parts
+
+# one part on stdout, for piping
+mail-imap --config incal.conf -f INBOX part save 12345 2 -o -
 ```
 
 #### Setting flags and tags
@@ -746,7 +774,7 @@ Each command prints one compact JSON object to stdout:
 | `thread`                                                 | one `{"folder", "uid", "count", "uids": [1, 2, ...]}` object per selected message (all UIDs of the thread containing `uid`, ascending, `uid` included)                                                                      |
 | `unread`                                                 | same shape as `search` (query fixed to `UNSEEN`, folder(s) + part counts included)                                                                                                                                          |
 | `part list`                                              | one `{"folder", "uid", "count", "parts": [{"part", "content_type", "filename", "size"}]}` per selected UID                                                                                                                  |
-| `part save`                                              | `{"folder", "uid", "part", "file", "size"}`                                                                                                                                                                                 |
+| `part save`                                              | `{"folder", "uid", "part", "file", "size"}`; with `--all`, one such object per saved part                                                                                                                                   |
 | `move`                                                   | one `{"folder", "to", "count", "uids": [...]}` object per selected folder (`folder` is where the messages came from, `to` where they went)                                                                                  |
 | `flag list` / `tag list`                                 | one `{"folder", "uid", "count", "flags": [...]}` per selected UID (`\Recent` omitted; `tag list` keeps keywords only)                                                                                                       |
 | `flag add` / `flag remove` / `tag add` / `tag remove`    | one `{"folder", "count", "uids": [...], "added": [...], "removed": [...]}` object per selected folder (`added` populated by add, `removed` by remove)                                                                       |

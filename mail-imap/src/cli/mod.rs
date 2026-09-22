@@ -1814,9 +1814,24 @@ pub fn parts_list(
 /// the other half of what they should not get to choose. `-o` is
 /// unfiltered, because there the caller named the path.
 pub(crate) fn safe_part_filename(name: Option<&str>, uid: u32, part: u32) -> PathBuf {
-    let fallback = PathBuf::from(format!("uid{}_part{}", uid, part));
+    sanitized_part_name(name, &PathBuf::from(format!("uid{}_part{}", uid, part)))
+}
+
+/// The file to write a part to under `--all`, when the caller did not
+/// pick a name for it. Same sanitization as `safe_part_filename`, but a
+/// fallback that does not need a `uid` -- `--all` already names exactly
+/// one message -- and does not guess at an extension from the content
+/// type: a wrong one is worse than `.bin`.
+fn safe_part_filename_all(name: Option<&str>, part: u32) -> PathBuf {
+    sanitized_part_name(name, &PathBuf::from(format!("part-{}.bin", part)))
+}
+
+/// Shared by `safe_part_filename` and `safe_part_filename_all`: accept
+/// the MIME-declared name only if it is a single bare path component,
+/// else fall back to `fallback` and say why.
+fn sanitized_part_name(name: Option<&str>, fallback: &Path) -> PathBuf {
     let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) else {
-        return fallback;
+        return fallback.to_path_buf();
     };
     let bare = !name.contains('/')
         && !name.contains('\\')
@@ -1831,33 +1846,57 @@ pub(crate) fn safe_part_filename(name: Option<&str>, uid: u32, part: u32) -> Pat
             name,
             fallback.display()
         );
-        return fallback;
+        return fallback.to_path_buf();
     }
     PathBuf::from(name)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn parts_save(
     config: &Config,
     spec: &FolderSpec,
     selection: &Selection,
-    part: u32,
+    part: Option<u32>,
+    all: bool,
     out: Option<PathBuf>,
     json: bool,
     debug: bool,
 ) -> Result<()> {
+    let to_stdout = out.as_deref() == Some(Path::new("-"));
+    if all && to_stdout {
+        bail!(
+            "'part save --all' can't write to stdout ('-o -'): several binaries \
+             concatenated on one stream is not a thing anyone can use. Give a \
+             directory with -o, or drop --all and save one part at a time"
+        );
+    }
+    if to_stdout && json {
+        bail!(
+            "'part save -o -' can't be combined with -j/--json: the JSON object and \
+             the part body would be on the same stdout stream"
+        );
+    }
+
     let mut client = ImapClient::connect(config, debug)?;
     let groups = selection_groups(&mut client, spec, config, std::slice::from_ref(selection))?;
     let messages = flatten(&groups);
     if messages.len() != 1 {
         bail!(
-            "'part save' writes one part of one message, but selection '{}' names {} \
+            "'part save' writes {} of one message, but selection '{}' names {} \
              (use 'part list' to see them, then save one at a time)",
+            if all { "every part" } else { "one part" },
             selection.source,
             messages.len()
         );
     }
     let (folder, uid) = messages[0];
     let folder = folder.to_string();
+
+    if all {
+        return parts_save_all(&mut client, &folder, uid, out, json, debug);
+    }
+
+    let part = part.expect("clap requires PART unless --all");
     if debug {
         eprintln!("Saving part {} of UID {} to '{}'", part, uid, out.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "default filename".to_string()));
     }
@@ -1873,6 +1912,18 @@ pub fn parts_save(
                 parts.len()
             )
         })?;
+
+    if to_stdout {
+        let size = stream_part_to_stdout(&mut client, &folder, uid, part)?;
+        if debug {
+            eprintln!(
+                "Wrote {} bytes of part {} of UID {} to stdout",
+                size, part, uid
+            );
+        }
+        return Ok(());
+    }
+
     let dest = out.unwrap_or_else(|| safe_part_filename(info.filename.as_deref(), uid, part));
 
     let size = client.save_part(&folder, uid, part, &dest)?;
@@ -1894,6 +1945,89 @@ pub fn parts_save(
         );
     }
     Ok(())
+}
+
+/// `part save SELECTION --all`: every leaf part of the one selected
+/// message, into `dir` (or the current directory). Refuses to
+/// overwrite a file already there -- with attachment names coming from
+/// the message rather than the caller, that is the one mistake this
+/// command could make that a "no" can't undo.
+fn parts_save_all(
+    client: &mut ImapClient,
+    folder: &str,
+    uid: u32,
+    out: Option<PathBuf>,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    let dir = out.unwrap_or_else(|| PathBuf::from("."));
+    if !dir.is_dir() {
+        bail!(
+            "'part save --all -o {}' needs a directory that already exists; it will \
+             not create one",
+            dir.display()
+        );
+    }
+    if debug {
+        eprintln!("Saving all parts of UID {} to '{}'", uid, dir.display());
+    }
+    let parts = client.list_parts(folder, uid)?;
+    for (saved, p) in parts.iter().enumerate() {
+        let name = safe_part_filename_all(p.filename.as_deref(), p.part);
+        let dest = dir.join(&name);
+        if dest.exists() {
+            bail!(
+                "'{}' already exists; refusing to overwrite it ({} part(s) already \
+                 saved before this one)",
+                dest.display(),
+                saved
+            );
+        }
+        let size = client.save_part(folder, uid, p.part, &dest)?;
+        if json {
+            emit_json(&PartsSaveOutput {
+                folder,
+                uid,
+                part: p.part,
+                file: dest.to_str().unwrap_or_default(),
+                size,
+            })?;
+        } else {
+            println!(
+                "Saved part {} of UID {} to '{}' ({} bytes)",
+                p.part,
+                uid,
+                dest.display(),
+                size
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Write one part's decoded bytes to stdout, raw and undecorated, for
+/// piping. `ImapClient::save_part` only knows how to write to a path,
+/// so this goes through a private temp file rather than the caller's
+/// own stdout descriptor, and always cleans it up.
+fn stream_part_to_stdout(
+    client: &mut ImapClient,
+    folder: &str,
+    uid: u32,
+    part: u32,
+) -> Result<u64> {
+    use std::io::Write;
+
+    // Straight from the server to stdout. The earlier route through a
+    // temporary file was not merely a detour: `std::env::temp_dir()` is
+    // world-readable and the name was built from the pid, the UID and
+    // the part number, so the attachment was briefly readable by every
+    // local user at a path any of them could predict -- and could be
+    // redirected by a symlink planted there first.
+    let data = client.fetch_part(folder, uid, part)?;
+    let mut stdout = std::io::stdout();
+    stdout.write_all(&data)?;
+    stdout.flush()?;
+    Ok(data.len() as u64)
 }
 
 #[cfg(test)]
@@ -2118,7 +2252,8 @@ mod tests {
             &config,
             &FolderSpec::default(),
             &select::parse_selection("1,2").unwrap(),
-            1,
+            Some(1),
+            false,
             None,
             false,
             false,

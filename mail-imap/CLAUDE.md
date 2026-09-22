@@ -15,6 +15,10 @@ enforced in `ImapClient` rather than in the handlers.
   commands each operation sends, the degradation ladders, threading,
   sorting, and how a command line becomes per-folder UID groups.
 - `CHECKLIST.md` — what has to be true before a round here is done.
+- `TODO.md` — what is not here yet: the gaps between what IMAP offers
+  and what this tool does, each with where the code would change and
+  what it costs. Candidates, not commitments; one that turns out to be
+  a deliberate boundary moves to DESIGN.md with its reason.
 - `man/mail-imap.1` — the man page (mdoc). The same surface as the
   README's reference sections, in the form `man` expects; `make check`
   lints it, `make install` puts it under `MANDIR`.

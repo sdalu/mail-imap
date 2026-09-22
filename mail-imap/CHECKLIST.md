@@ -61,6 +61,14 @@ this morning is a claim, not a fact.
       places: the struct, the README table, the man page, and this
       template. `scripts/check-examples.sh` does not read configs, so nothing
       catches a stale one but this line.
+- [ ] **The doc comments above what this round touched.** A module
+      header and a trait's summary are documents too, and nothing here
+      reads them: `ImapBackend` in `src/imap/mod.rs` still said "nothing
+      ever moves or deletes mail" several rounds after `move`, `folder
+      create` and `folder rename` landed in it. `make check` cannot
+      catch that — clippy lints the code, not the claim above it — so
+      re-reading the comment over the code you changed is the only
+      thing that does.
 
 ## Dependencies
 

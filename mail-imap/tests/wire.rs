@@ -28,6 +28,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use mail_imap::config::{AccessLevel, Config};
 use mail_imap::imap::{ImapBackend, ImapClient};
 
+use imap::{ClientBuilder, ConnectionMode};
+
 /// Config naming the server to talk to. `make tests-wire` sets it.
 const CONFIG_ENV: &str = "MAIL_IMAP_WIRE_CONFIG";
 const DEFAULT_CONFIG: &str = "tests-tmp/greenmail.conf";
@@ -147,6 +149,29 @@ fn deliver(token: &str, body: &str) {
     ));
 }
 
+/// Puts `message` into INBOX with IMAP `APPEND` instead of SMTP: an
+/// IMAP literal carries exactly the byte count handed to it, so raw
+/// 8-bit content (a non-ASCII `Subject:`, say) reaches the server
+/// intact -- no 7-bit transport, no charset to declare, nothing for a
+/// line reader to mangle. `deliver`/`deliver_raw` stay untouched for
+/// every other test; this is only for the one test that needs bytes
+/// SMTP cannot be trusted to carry.
+fn append_raw(message: &str) {
+    let cfg = config();
+    let client = ClientBuilder::new(cfg.server.as_str(), cfg.port)
+        .mode(ConnectionMode::Plaintext)
+        .connect()
+        .unwrap_or_else(|e| panic!("could not connect for APPEND ({:#}).", e));
+    let mut session = client
+        .login(cfg.username.as_str(), cfg.password.as_str())
+        .map_err(|(e, _)| e)
+        .unwrap_or_else(|e| panic!("login as '{}' failed for APPEND ({:#}).", cfg.username, e));
+    session
+        .append("INBOX", message.as_bytes())
+        .finish()
+        .unwrap_or_else(|e| panic!("APPEND failed ({:#}).", e));
+}
+
 /// The UIDs of the messages carrying `token`, ascending.
 fn uids_for(client: &mut ImapClient, token: &str) -> Vec<u32> {
     let hits = client
@@ -237,6 +262,73 @@ fn a_search_returns_the_metadata_it_was_asked_for() {
     let mut newest_first = uids.clone();
     newest_first.sort_unstable_by(|a, b| b.cmp(a));
     assert_eq!(got, newest_first, "default order is newest first");
+}
+
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn a_non_ascii_search_is_accepted_as_charset_utf8_though_greenmail_does_not_match_it() {
+    let mut c = client();
+    // The accented "é" is what routes this search through
+    // `CHARSET UTF-8` (src/imap/real.rs, RealClient::uid_search_charset);
+    // a plain-ASCII subject never exercises that path. Delivered via
+    // `append_raw`, not `deliver`: an IMAP literal carries the exact
+    // byte count handed to it, so this is unaffected by anything SMTP
+    // (7-bit headers -- RFC 5321/5322; 8BITMIME covers the body, not
+    // the Subject) might do to an 8-bit header.
+    let token = unique("charset");
+    let subject = format!("R\u{e9}union {}", token);
+    append_raw(&format!(
+        "From: alice@example.com\r\n\
+         To: {}\r\n\
+         Subject: {}\r\n\
+         Content-Type: text/plain\r\n\
+         \r\n\
+         body\r\n",
+        RECIPIENT, subject
+    ));
+
+    // Prove the message is really on the server first, matched by the
+    // plain-ASCII half of its own subject -- this does not exercise
+    // CHARSET at all, so it isolates "did the message arrive intact"
+    // from "does this server's SEARCH match a non-ASCII byte".
+    let ascii_hits = c
+        .search_folders(
+            &["INBOX".to_string()],
+            &format!("HEADER SUBJECT \"{}\"", token),
+            0,
+            None,
+        )
+        .expect("ASCII search");
+    assert_eq!(
+        ascii_hits.len(),
+        1,
+        "the message never reached the server intact: {:?}",
+        ascii_hits
+    );
+
+    // The interesting case: search on the accented subject itself.
+    // GreenMail (v2.1.9, as vendored by scripts/greenmail-server.sh)
+    // accepts `CHARSET UTF-8` without complaint -- no BAD/NO, so
+    // `uid_search_charset`'s fallback never fires here -- but it does
+    // not actually match a non-ASCII byte in a header: `hits` comes
+    // back empty even though the message above is proven to carry
+    // exactly this subject. That is a limit of this particular server,
+    // not something this test can claim about real ones, so only the
+    // wire form is proven here (declared, accepted, no fallback); the
+    // matching half is left unproven on GreenMail.
+    let hits = c
+        .search_folders(
+            &["INBOX".to_string()],
+            &format!("HEADER SUBJECT \"{}\"", subject),
+            0,
+            None,
+        )
+        .expect("UID SEARCH CHARSET UTF-8 must be accepted, not refused with BAD/NO");
+    assert!(
+        hits.is_empty() || hits.iter().any(|h| h.subject == subject),
+        "a hit that does not carry the searched-for subject would be a real bug: {:?}",
+        hits
+    );
 }
 
 #[test]

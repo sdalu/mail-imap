@@ -200,6 +200,37 @@ countermeasures (`src/imap/real.rs`):
 - if a hard error still strikes mid-search, the results collected so far
   are reported with a warning instead of being thrown away.
 
+### Declaring a charset on `SEARCH`
+
+RFC 3501 lets a `SEARCH` carry an optional `CHARSET` before its keys,
+and lets a server refuse a search containing non-ASCII bytes when none
+was declared. So `uid_search_charset` (`real.rs`) is one more ladder:
+
+- a **pure-ASCII query goes on the wire byte for byte**, with no prefix.
+  This is the whole compatibility story — a server that dislikes
+  `CHARSET` never sees one unless the search actually needs it, so
+  nothing that worked before can start failing;
+- a query carrying any non-ASCII byte is sent as
+  `UID SEARCH CHARSET UTF-8 <query>`;
+- if that comes back `BAD` or `NO`, it is retried once without the
+  prefix. A server refusing the charset is not a failed search; it is a
+  server that can only do ASCII, and the bare query is the best it can
+  be asked.
+
+`-d` names which form went out, and says so when the fallback fires.
+
+**The fallback branch is covered by no test, and that is worth knowing
+rather than discovering.** GreenMail accepts `CHARSET UTF-8`, so
+`tests/wire.rs` never drives the retry; and the branch needs a live
+session, so no unit test reaches it either. What the wire test does
+prove is the half that can be proven against this server: the declared
+form is accepted, not refused. GreenMail also does not *match* a
+non-ASCII byte in a header — the message is demonstrably there, found
+by the ASCII half of its own subject, and the accented search returns
+nothing — so the matching half is unproven here too. The test says all
+of this in its own comments rather than asserting something weaker and
+looking complete.
+
 ### Access level
 
 `Config::access` (`access-level` in the config file) is an ordered
@@ -575,6 +606,18 @@ With no `-f`/`-A`, the default is `Config::folder` (`INBOX`), except for
 discarded), and leaf parts are numbered in document order (1-based). Part
 bytes are decoded per CTE: base64 (whitespace-tolerant, padding restored),
 quoted-printable (hex escapes + soft line breaks), or raw for 7bit/8bit/binary.
+
+**Bytes are the primitive, not the file.** `ImapBackend::fetch_part`
+returns a part's decoded bytes; `save_part` is a *provided* method on
+the trait written in terms of it, so a backend implements one and gets
+the other. It is arranged that way round because the reverse cannot be
+undone: a caller that wants the part on stdout (`part save -o -`) and
+has only a write-to-a-path primitive has to invent a temporary file,
+and the obvious temporary file — `std::env::temp_dir()`, named from the
+pid and the UID — puts somebody's mail attachment in a world-readable
+directory under a name any local user can guess, at a path a planted
+symlink can redirect. `-o -` therefore never touches the filesystem;
+the bytes go from the fetch to stdout.
 
 ### RFC 2047 subject decoding
 ENVELOPE subjects may be encoded-words (e.g. `=?utf-8?Q?Votre=20facture?=`).

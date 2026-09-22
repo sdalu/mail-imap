@@ -11,9 +11,8 @@ use imap::extensions::thread::{ThreadAlgorithm, ThreadCharset};
 use imap::{ClientBuilder, Connection, ConnectionMode, Session};
 use imap_proto::NameAttribute;
 use imap::types::Flag;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::ToSocketAddrs;
-use std::path::Path;
 
 pub struct RealClient {
     session: Session<Connection>,
@@ -322,8 +321,7 @@ impl RealClient {
         }
         if !server_sorted {
             uids = self
-                .session
-                .uid_search(query)?
+                .uid_search_charset(query)?
                 .into_iter()
                 .collect::<BTreeSet<_>>()
                 .into_iter()
@@ -385,6 +383,45 @@ impl RealClient {
             }
         }
         Ok(out)
+    }
+
+    /// `query` with `CHARSET UTF-8 ` prepended, or `None` when `query` is
+    /// pure ASCII and belongs on the wire unchanged. Split out of
+    /// `uid_search_charset` because this half needs no session to test.
+    fn charset_prefixed(query: &str) -> Option<String> {
+        if query.is_ascii() {
+            None
+        } else {
+            Some(format!("CHARSET UTF-8 {}", query))
+        }
+    }
+
+    /// `UID SEARCH`, declaring `CHARSET UTF-8` only when the query is not
+    /// pure ASCII: RFC 3501 lets a server refuse a non-ASCII search when
+    /// no charset is declared, and a pure-ASCII query still goes on the
+    /// wire unchanged, so servers that dislike `CHARSET` never see it. If
+    /// the declared-charset form comes back `NO`/`BAD`, retries once
+    /// without it -- a server refusing the charset is not a failed
+    /// search, it just cannot do more than ASCII.
+    fn uid_search_charset(&mut self, query: &str) -> imap::Result<HashSet<u32>> {
+        let Some(charset_query) = Self::charset_prefixed(query) else {
+            if self.debug {
+                eprintln!("search: UID SEARCH (ASCII)");
+            }
+            return self.session.uid_search(query);
+        };
+        if self.debug {
+            eprintln!("search: UID SEARCH CHARSET UTF-8");
+        }
+        match self.session.uid_search(charset_query) {
+            Err(imap::Error::Bad(_)) | Err(imap::Error::No(_)) => {
+                if self.debug {
+                    eprintln!("UID SEARCH CHARSET UTF-8 refused; retrying without it");
+                }
+                self.session.uid_search(query)
+            }
+            other => other,
+        }
     }
 
     /// Fetch metadata for one comma-separated UID list, degrading the
@@ -835,13 +872,7 @@ impl ImapBackend for RealClient {
             .collect()
     }
 
-    fn save_part(
-        &mut self,
-        folder: &str,
-        uid: u32,
-        part: u32,
-        dest: &Path,
-    ) -> Result<u64> {
+    fn fetch_part(&mut self, folder: &str, uid: u32, part: u32) -> Result<Vec<u8>> {
         let raw = self.fetch_raw(folder, uid)?;
         let root = mime::parse_message(&raw)
             .with_context(|| format!("parsing MIME structure of UID {}", uid))?;
@@ -858,10 +889,7 @@ impl ImapBackend for RealClient {
                 leaves.len()
             )
         })?;
-        let data = leaf.decoded()?;
-        std::fs::write(dest, &data)
-            .with_context(|| format!("writing part to {}", dest.display()))?;
-        Ok(data.len() as u64)
+        leaf.decoded()
     }
 
     fn store_flags(
@@ -1320,7 +1348,7 @@ fn format_address(addr: &imap_proto::types::Address) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{address_from_header, decode_rfc2047, header_value};
+    use super::{address_from_header, decode_rfc2047, header_value, RealClient};
 
     #[test]
     fn header_value_basic_case_insensitive() {
@@ -1407,6 +1435,19 @@ mod tests {
         assert_eq!(
             decode_rfc2047("Re: =?utf-8?Q?Votre=20facture?=".into()),
             "Re: Votre facture"
+        );
+    }
+
+    #[test]
+    fn charset_prefixed_leaves_ascii_query_on_the_wire_unchanged() {
+        assert_eq!(RealClient::charset_prefixed("SUBJECT hello"), None);
+    }
+
+    #[test]
+    fn charset_prefixed_declares_utf8_for_a_non_ascii_query() {
+        assert_eq!(
+            RealClient::charset_prefixed("SUBJECT caf\u{e9}"),
+            Some("CHARSET UTF-8 SUBJECT café".to_string())
         );
     }
 }

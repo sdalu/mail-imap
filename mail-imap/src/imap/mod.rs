@@ -1,10 +1,12 @@
 //! IMAP access layer.
 //!
 //! Reads never change anything: they use `BODY.PEEK[]`, so even
-//! fetching a message does not set `\Seen`. The only mutating operation
-//! is [`ImapBackend::store_flags`] (`UID STORE`), which the explicit
-//! `flag` / `tag` commands use — and which [`ImapClient`] gates on the
-//! configured [`AccessLevel`].
+//! fetching a message does not set `\Seen`. The mutating operations are
+//! [`ImapBackend::store_flags`] (`flag`, `tag`),
+//! [`ImapBackend::move_messages`] (`move`), and the folder-tree three —
+//! [`ImapBackend::create_folder`], [`ImapBackend::rename_folder`] and
+//! [`ImapBackend::set_subscribed`]. Every one of them is gated by
+//! [`ImapClient`] on the configured [`AccessLevel`], never by its caller.
 //!
 //! Operations are exposed through the [`ImapBackend`] trait. Two backends exist:
 //!
@@ -27,7 +29,7 @@ pub use real::RealClient;
 pub use sort::{parse_sort, sort_results, SortCriteria, SortKey};
 
 use crate::config::{AccessLevel, Config};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 
 /// A single mailbox as reported by `LIST`.
@@ -107,9 +109,16 @@ pub struct PartInfo {
     pub size: u64,
 }
 
-/// The operations the CLI needs from an IMAP account. All operations are
-/// read-only except [`ImapBackend::store_flags`], which the explicit
-/// `flag` / `tag` commands use (nothing ever moves or deletes mail).
+/// The operations the CLI needs from an IMAP account.
+///
+/// Most are reads. The ones that change the server are `store_flags`
+/// (`flag`, `tag`), `move_messages` (`move`), and `create_folder`,
+/// `rename_folder` and `set_subscribed` (`folder`). `save_part` writes
+/// a local file and touches nothing on the server.
+///
+/// None of them gates itself. `access-level` is enforced in
+/// [`ImapClient`], the wrapper every command goes through, so a second
+/// backend cannot forget a check by implementing this trait directly.
 pub trait ImapBackend {
     fn list_folders(&mut self) -> Result<Vec<FolderInfo>>;
     /// Everything the server advertises, upper-cased. Empty when the
@@ -178,13 +187,25 @@ pub trait ImapBackend {
     fn message_flags(&mut self, folder: &str, uid: u32) -> Result<Vec<String>>;
     /// Decode MIME part `part` of message `uid` and write it to `dest`.
     /// Returns the number of bytes written.
-    fn save_part(
-        &mut self,
-        folder: &str,
-        uid: u32,
-        part: u32,
-        dest: &Path,
-    ) -> Result<u64>;
+    /// The decoded bytes of one MIME part.
+    fn fetch_part(&mut self, folder: &str, uid: u32, part: u32) -> Result<Vec<u8>>;
+
+    /// Write one MIME part to a file, returning its size.
+    ///
+    /// Provided in terms of [`ImapBackend::fetch_part`] rather than the
+    /// other way round, because bytes are the primitive and a file is
+    /// one thing to do with them. A caller that wants the part on
+    /// stdout (`part save -o -`) takes `fetch_part` and never touches
+    /// the filesystem — which matters: the temporary file the other
+    /// direction would need lands in a world-readable directory under a
+    /// guessable name, and the content here is somebody's mail.
+    fn save_part(&mut self, folder: &str, uid: u32, part: u32, dest: &Path) -> Result<u64> {
+        let data = self.fetch_part(folder, uid, part)?;
+        std::fs::write(dest, &data)
+            .with_context(|| format!("writing part to {}", dest.display()))?;
+        Ok(data.len() as u64)
+    }
+
     fn close(&mut self);
 }
 
@@ -533,17 +554,11 @@ impl ImapBackend for ImapClient {
             Backend::Mock(c) => c.message_flags(folder, uid),
         }
     }
-    fn save_part(
-        &mut self,
-        folder: &str,
-        uid: u32,
-        part: u32,
-        dest: &Path,
-    ) -> Result<u64> {
+    fn fetch_part(&mut self, folder: &str, uid: u32, part: u32) -> Result<Vec<u8>> {
         match &mut self.backend {
-            Backend::Real(c) => c.save_part(folder, uid, part, dest),
+            Backend::Real(c) => c.fetch_part(folder, uid, part),
             #[cfg(feature = "mock")]
-            Backend::Mock(c) => c.save_part(folder, uid, part, dest),
+            Backend::Mock(c) => c.fetch_part(folder, uid, part),
         }
     }
     fn close(&mut self) {

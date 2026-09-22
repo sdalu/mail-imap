@@ -246,8 +246,27 @@ List or save the MIME parts of an email.
 .Bl -tag -width Ds -compact
 .It Cm part list Ar selection No ...
 List the MIME parts of the selected email(s).
-.It Cm part save Ar selection Ar part Op Fl o | Fl -out Ar file
-Save one MIME part of one message to a file.
+.It Cm part save Ar selection Ar part Op Fl o | Fl -out Ar file | -
+Save one MIME part of one message to a file, or to standard output when
+.Ar file
+is
+.Ql - ,
+raw and undecorated, for piping.
+Writing to standard output is refused under
+.Fl j ,
+where the JSON object and the part body would share the stream.
+.It Cm part save Ar selection Fl -all Op Fl o | Fl -out Ar dir
+Save every MIME part of one message.
+The files are named for the parts: each part's own filename where it has
+one, otherwise
+.Ar part Ns - Ns Ar N Ns .bin \(em
+no extension is guessed from the content type.
+.Fl o
+names a directory, which must already exist; it is not created, and
+.Ql -
+is refused here.
+An existing file is never overwritten: the run stops, naming the file
+and how many parts were written before it.
 .Ar selection
 must name exactly one message.
 Default destination: the part's filename, else

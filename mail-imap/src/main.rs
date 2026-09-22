@@ -430,15 +430,22 @@ enum PartsAction {
         #[clap(flatten)]
         sel: Sel,
     },
-    /// Save one part of one message to a file
+    /// Save one part of one message to a file, or every part with --all
     #[clap(after_help = SELECTION_HELP)]
     Save {
         /// Message selection naming exactly one message (5, Archive::5)
         #[clap(value_name = "SELECTION")]
         selection: String,
-        /// Part number (as listed by `part list`)
-        part: u32,
-        /// Destination file (default: the part's filename in the current directory)
+        /// Part number (as listed by `part list`); omitted with --all
+        #[clap(required_unless_present = "all")]
+        part: Option<u32>,
+        /// Save every part of the message instead of one
+        #[clap(long = "all", conflicts_with = "part")]
+        all: bool,
+        /// Destination file (default: the part's filename in the current
+        /// directory); with --all, a directory that must already exist
+        /// (default: the current directory); '-' writes one part raw to
+        /// stdout (refused with --all or -j/--json)
         #[clap(short = 'o', long = "out")]
         out: Option<std::path::PathBuf>,
     },
@@ -615,6 +622,7 @@ fn main() {
             PartsAction::Save {
                 selection,
                 part,
+                all,
                 out,
             } => {
                 let one = match parse_selections(std::slice::from_ref(selection)) {
@@ -626,6 +634,7 @@ fn main() {
                     &folder_spec(&args),
                     &one[0],
                     *part,
+                    *all,
                     out.clone(),
                     json,
                     debug,
