@@ -240,6 +240,32 @@ enum Backend {
     Mock(MockClient),
 }
 
+/// Refuse a mailbox name that would break out of its own IMAP command.
+///
+/// A folder name reaches the server inside a quoted string, and the
+/// quoting escapes `\` and `"` -- but not CR or LF, which end a command
+/// line. A name carrying one splits the command in two, and the second
+/// half is run as a command in its own right. Confirmed on a live
+/// server: `folder subscribe $'Evil<CR><LF>A1 NOOP'` put `C: A1 NOOP`
+/// on the wire and got back `S: A1 OK NOOP completed`.
+///
+/// The check lives here because coverage below is patchy and invisible
+/// from the call site: the `imap` crate validates `CREATE` and `SELECT`
+/// this way but not `RENAME`, `SUBSCRIBE` or `UID COPY`, and the
+/// `CREATE ... (USE ...)` command is built by hand in `real.rs`. One
+/// rule where every folder name passes beats six that have to be
+/// remembered.
+fn check_mailbox_name(name: &str, what: &str) -> Result<()> {
+    if name.contains(['\r', '\n']) {
+        bail!(
+            "the mailbox name given to {} contains a line break, which would end the \
+             IMAP command and start another: refusing to send it",
+            what
+        );
+    }
+    Ok(())
+}
+
 /// The backend, plus the access level it is held to.
 ///
 /// Every operation the CLI performs goes through here, which is why the
@@ -405,6 +431,9 @@ impl ImapBackend for ImapClient {
                 to
             );
         }
+        // UID COPY, the fallback route, does not validate its
+        // destination in the `imap` crate at all.
+        check_mailbox_name(to, "move")?;
         if folder.eq_ignore_ascii_case(to) {
             bail!("'{}' is where those messages already are", to);
         }
@@ -415,6 +444,7 @@ impl ImapBackend for ImapClient {
     }
     fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {
         self.check_folder_change("create a mailbox")?;
+        check_mailbox_name(name, "folder create")?;
         match &mut self.backend {
             Backend::Real(c) => c.create_folder(name, use_attr),
             Backend::Mock(c) => c.create_folder(name, use_attr),
@@ -422,6 +452,8 @@ impl ImapBackend for ImapClient {
     }
     fn rename_folder(&mut self, from: &str, to: &str) -> Result<()> {
         self.check_folder_change("rename a mailbox")?;
+        check_mailbox_name(from, "folder rename")?;
+        check_mailbox_name(to, "folder rename")?;
         // RFC 3501 §6.3.5 gives RENAME INBOX a special meaning: it moves
         // every message out into the new mailbox and leaves INBOX empty.
         // Nothing is destroyed, but nobody means it, so it is refused
@@ -441,6 +473,10 @@ impl ImapBackend for ImapClient {
         }
     }
     fn set_subscribed(&mut self, name: &str, subscribed: bool) -> Result<()> {
+        check_mailbox_name(
+            name,
+            if subscribed { "folder subscribe" } else { "folder unsubscribe" },
+        )?;
         self.check_folder_change(if subscribed {
             "subscribe to a mailbox"
         } else {
@@ -546,6 +582,44 @@ pub fn thread_component(target: u32, msgs: &[ThreadRefs]) -> Option<Vec<u32>> {
         .collect();
     out.sort_unstable();
     Some(out)
+}
+
+#[cfg(test)]
+mod mailbox_name_tests {
+    use super::*;
+    use crate::config::Config;
+
+    fn client() -> ImapClient {
+        ImapClient::connect(
+            &Config { mock: true, access: AccessLevel::Full, ..Config::default() },
+            false,
+        )
+        .expect("connect")
+    }
+
+    #[test]
+    fn a_line_break_in_a_mailbox_name_is_refused_on_every_path() {
+        // Confirmed on a live server before this guard: the second line
+        // was run as its own command (`S: A1 OK NOOP completed`).
+        let evil = "Evil\r\nA1 NOOP";
+        let mut c = client();
+        for err in [
+            c.create_folder(evil, None).err(),
+            c.create_folder(evil, Some("\\Archive")).err(),
+            c.rename_folder(evil, "Fine").err(),
+            c.rename_folder("Spam", evil).err(),
+            c.set_subscribed(evil, true).err(),
+            c.set_subscribed(evil, false).err(),
+            c.move_messages("INBOX", &[1], evil).err(),
+        ] {
+            let err = err.expect("a line break must never reach the wire");
+            assert!(err.to_string().contains("line break"), "wrong reason: {}", err);
+        }
+        // A bare LF is the same hazard.
+        assert!(c.set_subscribed("Evil\nX LOGOUT", true).is_err());
+        // ... and an ordinary name is untouched.
+        assert!(c.create_folder("Archive/2026", None).is_ok());
+    }
 }
 
 #[cfg(test)]

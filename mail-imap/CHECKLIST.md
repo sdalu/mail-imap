@@ -8,13 +8,13 @@ Run in order. A red gate is answered before anything else, and the
 answer is sometimes that the checker is wrong rather than the file.
 
 - [ ] `make check` — clippy with warnings denied, the release number
-      still written only in `Cargo.toml`, and `mail-imap.1` still
+      still written only in `Cargo.toml`, and `man/mail-imap.1` still
       well-formed mdoc
 - [ ] `make tests` — the Rust suite against the mock backend, then
-      `check-examples.sh`: every command line the documents print, run
+      `scripts/check-examples.sh`: every command line the documents print, run
       against `--mock`, failing on a clap usage error
 - [ ] `target/debug/mail-imap --mock <the commands this round touched>` —
-      `check-examples.sh` covers the shapes that are written down. One
+      `scripts/check-examples.sh` covers the shapes that are written down. One
       this round added and did not document is covered by nothing, so
       run it. If it is worth running, it is worth an example.
 
@@ -43,7 +43,7 @@ this morning is a claim, not a fact.
       IMAP commands sent, the fallbacks, or the resolution of selections?
 - [ ] `CLAUDE.md` — does it still point at files that exist, and is its
       gate command still the one that runs?
-- [ ] `mail-imap.1` — a command, flag or config field changes in three
+- [ ] `man/mail-imap.1` — a command, flag or config field changes in three
       places or none: the README table, the man page, and `--help`.
       `make check` proves the page parses, not that it is true.
 - [ ] `QUICKSTART.md` — do its commands still run? Every one of them is
@@ -53,7 +53,7 @@ this morning is a claim, not a fact.
       written out for someone to copy.
 - [ ] `example.conf` — a config field that changed is written in four
       places: the struct, the README table, the man page, and this
-      template. `check-examples.sh` does not read configs, so nothing
+      template. `scripts/check-examples.sh` does not read configs, so nothing
       catches a stale one but this line.
 
 ## Release

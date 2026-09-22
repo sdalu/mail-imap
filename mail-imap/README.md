@@ -47,7 +47,7 @@ each operation will take — none of which has to be discovered by trying
 commands and reading refusals.
 
 [QUICKSTART.md](QUICKSTART.md) walks the same path with output;
-`mail-imap.1` is the man page. The rest of this file is the reference.
+`man/mail-imap.1` is the man page. The rest of this file is the reference.
 
 ## Build & Install
 
@@ -66,11 +66,11 @@ what it does):
 | Target           | Does                                                                                                                                                            |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `make` (`help`)  | Print the target list and the current build variables                                                                                                           |
-| `make check`     | Preflight, running none of the project's code: clippy with warnings denied, the release number written only in `Cargo.toml`, and `mail-imap.1` well-formed mdoc |
+| `make check`     | Preflight, running none of the project's code: clippy with warnings denied, the release number written only in `Cargo.toml`, and `man/mail-imap.1` well-formed mdoc |
 | `make build`     | Build the binary (`RELEASE=no` for a debug build; release is the default)                                                                                       |
 | `make tests`     | The whole suite: `tests-unit` (cargo test) then `tests-examples` (every documented command line, run against `--mock`)                                          |
 | `make doc`       | Generate the API documentation (`cargo doc --no-deps`)                                                                                                          |
-| `make install`   | Install the binary under `BINDIR` and `mail-imap.1` under `MANDIR` (`DESTDIR` stages both)                                                                      |
+| `make install`   | Install the binary under `BINDIR` and `man/mail-imap.1` under `MANDIR` (`DESTDIR` stages both)                                                                      |
 | `make uninstall` | Remove what `install` put down                                                                                                                                  |
 | `make clean`     | Remove what a build here made (`cargo clean`)                                                                                                                   |
 | `make options`   | Print the build knobs and their defaults                                                                                                                        |
@@ -688,6 +688,16 @@ mail-imap --config incal.conf -f INBOX thread 12345
 the current directory; `-o` chooses a path. The selection must name
 exactly one message.
 
+The part's filename is used only when it is a bare file name. It comes
+out of the message — `Content-Disposition: filename=` — so it is chosen
+by whoever sent the mail, and a name carrying a path
+(`../../../.ssh/authorized_keys`, `/etc/passwd`, `..`) would write
+somewhere the caller never named. Such a name is refused and
+`uid<N>_part<M>` used instead, with a note saying so; it is not trimmed
+to its last component, because that would still let the sender choose
+the name of a file in the working directory. `-o` is unfiltered: there
+the caller named the path.
+
 ```bash
 mail-imap --config incal.conf -f INBOX part list 12345
 mail-imap --config incal.conf -f INBOX part list 12345 67890
@@ -974,6 +984,12 @@ capital — makes the whole file fail to parse rather than quietly
 becoming a level nobody chose. A run that cannot read its access level
 does not get to guess at it.
 
+A typo in the *key* fails the file for the same reason. An unrecognised
+key is refused (the error names it and lists the ones that exist)
+rather than being dropped, because a dropped key leaves its setting at
+the default — and `acess-level = readonly` silently defaulting to
+`organize` would widen exactly what the line was written to narrow.
+
 This is not a security boundary: the same account can be reached by any
 other client with the same password. It is a guard against *this* tool
 doing more than you meant it to — which matters most when an agent is
@@ -995,7 +1011,7 @@ make tests
 make tests-unit          # or plain: cargo test
 
 # Just the documented command lines
-make tests-examples      # or: ./check-examples.sh
+make tests-examples      # or: ./scripts/check-examples.sh
 ```
 
 Neither half needs a server or a config.
@@ -1010,7 +1026,7 @@ reports, the MIME parser, the RFC 2047 decoder, and that the real
 backend fails cleanly rather than fabricating data when no server is
 reachable. [DESIGN.md](DESIGN.md#testing) lists it in full.
 
-`check-examples.sh` is the second half: it extracts every `mail-imap`
+`scripts/check-examples.sh` is the second half: it extracts every `mail-imap`
 command line these documents print, replays it against `--mock`, and
 fails if the CLI rejects one. The Rust suite calls the `cli::`
 functions directly, so an argument shape broken in `src/main.rs` passes

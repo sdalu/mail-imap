@@ -15,7 +15,7 @@ enforced in `ImapClient` rather than in the handlers.
   commands each operation sends, the degradation ladders, threading,
   sorting, and how a command line becomes per-folder UID groups.
 - `CHECKLIST.md` — what has to be true before a round here is done.
-- `mail-imap.1` — the man page (mdoc). The same surface as the
+- `man/mail-imap.1` — the man page (mdoc). The same surface as the
   README's reference sections, in the form `man` expects; `make check`
   lints it, `make install` puts it under `MANDIR`.
 - `Makefile` — the interface. `make` alone prints it.
@@ -34,7 +34,7 @@ Gate: `make check && make tests`
   running the binary against a real account — see CHECKLIST.md.
 - **The Rust suite does not drive the CLI surface.** It calls the
   `cli::` functions, so an argument shape broken in `src/main.rs`
-  passes it. `make tests` therefore also runs `check-examples.sh`,
+  passes it. `make tests` therefore also runs `scripts/check-examples.sh`,
   which replays every command line the documents print against
   `--mock` and fails on a clap usage error. That covers the
   *documented* shapes only: a shape nobody wrote down is still

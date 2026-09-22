@@ -91,7 +91,15 @@ impl AccessLevel {
     }
 }
 
+/// `deny_unknown_fields` because a key this tool does not know is
+/// almost always a typo, and the field it was meant to be then takes
+/// its default silently. That is worst for `access-level`: the suite
+/// already refuses an unknown *value* so a typo cannot widen what the
+/// config meant to narrow, and a typo in the *key* has to be refused
+/// for the same reason -- `acess-level = readonly` otherwise runs at
+/// the default `organize`, which may change mail.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub server: String,
     #[serde(default = "default_port")]
@@ -535,6 +543,31 @@ mod tests {
         )
         .expect_err("an unknown level must be refused");
         assert!(format!("{:#}", err).contains("readonlyy"));
+    }
+
+    #[test]
+    fn an_unknown_key_is_refused_rather_than_silently_defaulted() {
+        // The mirror of `an_unknown_access_level_fails_...`: a typo in
+        // the KEY used to drop the setting and take the default, so
+        // `acess-level = readonly` ran at `organize` -- which may
+        // change mail. Both halves of the typo must fail the file.
+        let err = parse_one(
+            "server = \"s\"\nusername = \"u\"\npassword = \"p\"\nacess-level = readonly\n",
+        )
+        .expect_err("an unknown key must be refused");
+        let text = format!("{:#}", err);
+        assert!(text.contains("acess-level"), "{}", text);
+        assert!(text.contains("access-level"), "it should name the real key: {}", text);
+        // A key that is merely unknown, not a near-miss, fails too.
+        assert!(parse_one(
+            "server = \"s\"\nusername = \"u\"\npassword = \"p\"\nnonsense = 1\n"
+        )
+        .is_err());
+        // Both spellings of the real key still work.
+        assert!(parse_one(
+            "server = \"s\"\nusername = \"u\"\npassword = \"p\"\naccess_level = full\n"
+        )
+        .is_ok());
     }
 
     #[test]

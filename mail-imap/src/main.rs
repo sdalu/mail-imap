@@ -129,6 +129,12 @@ struct Sel {
 /// Selections come first and names follow — the shapes would allow any
 /// order, but one order reads the same way every time, and a selection
 /// after a name is far likelier to be a mistake than an intention.
+///
+/// That refusal is what makes this split well-defined: a bare number
+/// can only be a UID here. The CLI never reaches the check itself —
+/// the token has been taken as a selection by then — so the cost is
+/// that a tag cannot be *named* `2024`, and the "no name given" error
+/// below says so rather than leaving the user to guess.
 fn split_args(args: &[String], json: bool) -> (Vec<Selection>, Vec<String>) {
     let split = args
         .iter()
@@ -157,7 +163,20 @@ fn split_args(args: &[String], json: bool) -> (Vec<Selection>, Vec<String>) {
         );
     }
     if names.is_empty() {
-        fail(json, "no flag or tag name given");
+        // Every argument read as a selection, so nothing is left to be
+        // a name. "No name given" alone hides why: a name that reads
+        // as a selection is not accepted as one, so `tag add 5 2024`
+        // has no reading in which 2024 is a tag.
+        fail(
+            json,
+            &format!(
+                "no flag or tag name given: every argument reads as a message selection \
+                 (the last one is '{}'). A name that reads as a selection -- a bare \
+                 number, a range, '*', last:N -- is not accepted as a flag or tag name, \
+                 so there is no way to spell one here",
+                args.last().map(String::as_str).unwrap_or(""),
+            ),
+        );
     }
     match parse_selections(&sel_args) {
         Ok(s) => (s, names),

@@ -257,6 +257,12 @@ must name exactly one message.
 Default destination: the part's filename, else
 .Ar uid Ns Ar N Ns _part Ns Ar M ,
 in the current directory.
+The filename is taken from the message, so it is chosen by the sender:
+it is used only when it is a bare file name, and one carrying a path is
+refused in favour of
+.Ar uid Ns Ar N Ns _part Ns Ar M .
+.Fl o
+is unfiltered.
 .El
 .It Cm flag
 Enable, disable, or list the IMAP-defined message flags

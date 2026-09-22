@@ -10,7 +10,7 @@ use serde::Serialize;
 use select::Selection;
 use unicode_normalization::UnicodeNormalization;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The folders a command works on, as given on the command line:
 /// literal names, IMAP `LIST` patterns, or nothing at all (in which
@@ -1406,7 +1406,7 @@ pub fn parse_flag_names(names: &[String], system: bool, wire_form: bool) -> Resu
             || name.chars().any(|c| c.is_control() || is_invisible(c))
         {
             bail!(
-                "invalid keyword '{}': an IMAP atom excludes ( ) {{ % * \" \\ ] , spaces \
+                "invalid keyword '{}': an IMAP atom excludes ( ) {{ % * \" \\ ] spaces \
                  and control characters, and this tool also refuses invisible ones \
                  (NBSP, BOM, zero-width) because they make lookalike keywords \
                  (a comma is fine: modified UTF-7 uses it)",
@@ -1488,6 +1488,37 @@ pub fn parse_flag_names(names: &[String], system: bool, wire_form: bool) -> Resu
     Ok(out)
 }
 
+/// Refuse the command if any group names a UID the folder does not have.
+///
+/// RFC 3501 §6.4.8: `UID STORE` ignores a UID that does not exist,
+/// without an error. Reporting "Added \Deleted on 1 message(s)" for a
+/// typo'd UID would be a lie the server never told.
+///
+/// This runs over EVERY group before the first `store_flags`, not per
+/// group inside the mutation loop. Inside it, a bad UID in the second
+/// folder aborts with "nothing was changed" after the first folder was
+/// already changed -- the one thing the message promises did not happen.
+fn check_uids_exist(client: &mut ImapClient, groups: &[Group]) -> Result<()> {
+    for group in groups {
+        let existing = client.folder_uids(&group.folder)?;
+        let missing: Vec<String> = group
+            .uids
+            .iter()
+            .filter(|u| !existing.contains(u))
+            .map(|u| u.to_string())
+            .collect();
+        if !missing.is_empty() {
+            bail!(
+                "no message with UID {} in '{}' (UID STORE would ignore it silently, \
+                 so nothing was changed)",
+                missing.join(", "),
+                group.folder
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Shared implementation of `flag add|remove` and `tag add|remove`.
 /// `system` distinguishes flag (true) from tag (false);
 /// `add` enables the flags, `remove` disables them.
@@ -1509,6 +1540,8 @@ pub fn change_flags(
     let (added, removed): (&[String], &[String]) =
         if add { (&flags, &[]) } else { (&[], &flags) };
 
+    // Everything that can refuse the command is answered here, for every
+    // group, before any group is changed.
     for group in &groups {
         // RFC 3501 §7.1: a flag outside PERMANENTFLAGS is either
         // ignored or kept for this session only. Storing one and
@@ -1529,25 +1562,10 @@ pub fn change_flags(
                 }
             );
         }
-        // RFC 3501: `UID STORE` ignores a UID that does not exist,
-        // without an error. Reporting "Added \Deleted on 1 message(s)"
-        // for a typo'd UID would be a lie the server never told, so the
-        // only mutating path checks the UIDs first.
-        let existing = client.folder_uids(&group.folder)?;
-        let missing: Vec<String> = group
-            .uids
-            .iter()
-            .filter(|u| !existing.contains(u))
-            .map(|u| u.to_string())
-            .collect();
-        if !missing.is_empty() {
-            bail!(
-                "no message with UID {} in '{}' (UID STORE would ignore it silently, \
-                 so nothing was changed)",
-                missing.join(", "),
-                group.folder
-            );
-        }
+    }
+    check_uids_exist(&mut client, &groups)?;
+
+    for group in &groups {
         if debug {
             eprintln!(
                 "{} {:?} on UIDs {:?} in '{}'",
@@ -1615,6 +1633,10 @@ pub fn set_junk(
         (keywords::NOT_JUNK, keywords::JUNK)
     };
 
+    // What each group will write, decided before anything is written: a
+    // group that cannot take the keyword must refuse the whole command,
+    // not just its own turn in the loop.
+    let mut writes: Vec<Vec<String>> = Vec::new();
     for group in &groups {
         let permanent = client.permanent_flags(&group.folder)?;
         let add: Vec<String> = permanent
@@ -1631,6 +1653,14 @@ pub fn set_junk(
                 if junk { "junk" } else { "not junk" }
             );
         }
+        writes.push(add);
+    }
+    // `tag junk` mutates exactly as `tag add` does, so it owes the same
+    // check: without it a typo'd UID is reported as a successful
+    // marking, because UID STORE ignores it in silence.
+    check_uids_exist(&mut client, &groups)?;
+
+    for (group, add) in groups.iter().zip(&writes) {
         let remove: Vec<String> = other.iter().map(|s| s.to_string()).collect();
         if debug {
             eprintln!(
@@ -1638,13 +1668,13 @@ pub fn set_junk(
                 add, remove, group.folder
             );
         }
-        client.store_flags(&group.folder, &group.uids, &add, &remove)?;
+        client.store_flags(&group.folder, &group.uids, add, &remove)?;
         if json {
             emit_json(&FlagChangeOutput {
                 folder: &group.folder,
                 count: group.uids.len(),
                 uids: &group.uids,
-                added: &add,
+                added: add,
                 removed: &remove,
             })?;
             continue;
@@ -1771,6 +1801,41 @@ pub fn parts_list(
     Ok(())
 }
 
+/// The file to write a part to when `-o` names none.
+///
+/// The name comes out of the message -- `Content-Disposition: filename=`
+/// or the `name=` parameter -- so it is remote input, chosen by whoever
+/// sent the mail. Left as it arrived it is a path, and
+/// `filename="../../../.ssh/authorized_keys"` writes there.
+///
+/// A rejected name falls back to the `uid<N>_part<M>` form rather than
+/// being trimmed to its last component: trimming would still let the
+/// sender pick the name of a file in the working directory, which is
+/// the other half of what they should not get to choose. `-o` is
+/// unfiltered, because there the caller named the path.
+pub(crate) fn safe_part_filename(name: Option<&str>, uid: u32, part: u32) -> PathBuf {
+    let fallback = PathBuf::from(format!("uid{}_part{}", uid, part));
+    let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) else {
+        return fallback;
+    };
+    let bare = !name.contains('/')
+        && !name.contains('\\')
+        && name != "."
+        && name != ".."
+        && !Path::new(name).is_absolute()
+        && Path::new(name).components().count() == 1;
+    if !bare {
+        eprintln!(
+            "Note: the message calls this part {:?}, which is a path and not a file \
+             name; saving as '{}' instead. Use -o to choose the destination.",
+            name,
+            fallback.display()
+        );
+        return fallback;
+    }
+    PathBuf::from(name)
+}
+
 pub fn parts_save(
     config: &Config,
     spec: &FolderSpec,
@@ -1808,13 +1873,7 @@ pub fn parts_save(
                 parts.len()
             )
         })?;
-    let dest = out.unwrap_or_else(|| {
-        PathBuf::from(
-            info.filename
-                .as_deref()
-                .unwrap_or(&format!("uid{}_part{}", uid, part)),
-        )
-    });
+    let dest = out.unwrap_or_else(|| safe_part_filename(info.filename.as_deref(), uid, part));
 
     let size = client.save_part(&folder, uid, part, &dest)?;
     if json {
@@ -1855,6 +1914,69 @@ mod tests {
     fn sels(tokens: &[&str]) -> Vec<Selection> {
         let owned: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
         select::parse_selections(&owned).expect("parse")
+    }
+
+    #[test]
+    fn a_part_filename_from_the_message_cannot_name_a_path() {
+        // Every one of these arrives from a `Content-Disposition` the
+        // sender wrote, and must not become a destination path.
+        for hostile in [
+            "../../../tmp/escape",
+            "/etc/passwd",
+            "..",
+            ".",
+            "sub/dir.pdf",
+            "..\\..\\win.ini",
+            "",
+            "   ",
+        ] {
+            assert_eq!(
+                safe_part_filename(Some(hostile), 7, 2),
+                PathBuf::from("uid7_part2"),
+                "{:?} must fall back, not be used",
+                hostile
+            );
+        }
+        assert_eq!(safe_part_filename(Some("q3.xlsx"), 7, 2), PathBuf::from("q3.xlsx"));
+        assert_eq!(
+            safe_part_filename(Some("  invoice 42.pdf  "), 7, 2),
+            PathBuf::from("invoice 42.pdf")
+        );
+        assert_eq!(safe_part_filename(None, 7, 2), PathBuf::from("uid7_part2"));
+    }
+
+    #[test]
+    fn every_group_is_checked_before_any_group_is_changed() {
+        // The check that used to sit inside the mutation loop: a bad
+        // UID in the second folder aborted with "nothing was changed"
+        // after the first folder had already been changed.
+        let mut client = mock_client();
+        let groups = vec![
+            Group { folder: "INBOX".to_string(), uids: vec![1] },
+            Group { folder: "Trash".to_string(), uids: vec![99999] },
+        ];
+        let err = check_uids_exist(&mut client, &groups)
+            .expect_err("a UID that is not there must stop the command");
+        assert!(err.to_string().contains("99999"), "{}", err);
+        assert!(err.to_string().contains("Trash"), "{}", err);
+        let fine = vec![Group { folder: "INBOX".to_string(), uids: vec![1, 2] }];
+        assert!(check_uids_exist(&mut client, &fine).is_ok());
+    }
+
+    #[test]
+    fn the_keyword_error_does_not_call_a_comma_illegal() {
+        // A comma IS legal in an atom -- modified UTF-7 writes one
+        // inside base64 -- and the message used to list it as excluded
+        // in the same breath as saying it was fine.
+        assert_eq!(
+            parse_flag_names(&["a,b".into()], false, false).unwrap(),
+            vec!["a,b".to_string()]
+        );
+        let err = parse_flag_names(&["a(b".into()], false, false)
+            .expect_err("'(' is an atom-special");
+        let text = err.to_string();
+        let excluded = text.split("spaces").next().unwrap_or("");
+        assert!(!excluded.contains(','), "the list still excludes a comma: {}", text);
     }
 
     #[test]

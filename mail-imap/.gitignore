@@ -4,3 +4,8 @@ target/
 *.conf
 !example.conf
 incal.conf
+# cargo-mutants scratch output
+mutants.out/
+mutants.out.old/
+# scratch for the test server: fetched jar + its runtime state
+tests-tmp/

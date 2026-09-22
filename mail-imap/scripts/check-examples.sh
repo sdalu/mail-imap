@@ -27,7 +27,7 @@ if [ $# -gt 0 ]; then
 	files=$*
 else
 	files=
-	for f in README.md QUICKSTART.md DESIGN.md mail-imap.1; do
+	for f in README.md QUICKSTART.md DESIGN.md man/mail-imap.1; do
 		[ -f "$f" ] && files="$files $f"
 	done
 fi
