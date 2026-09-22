@@ -63,7 +63,7 @@ the folders selected by `-f`/`-A` (repeatable, comma-separated, and IMAP
 `LIST` patterns; default the `-f`/config folder) on one connection. Results are
 grouped per folder, ordered by the `-S`/`--sort` criteria (default:
 most-recent first within each folder), and the total result count is capped
-by `Config::max` (default 50; overridable per run with `-M/--max`,
+by `Config::max` (default `0`, no cap; overridable per run with `-M/--max`,
 `0` = unlimited). Each result carries the `folder` it came from; the JSON
 output uses `"folder"` for a single folder and `"folders"` for several.
 

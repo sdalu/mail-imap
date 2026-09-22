@@ -7,7 +7,7 @@
     "starttls": false,
     "insecure": false,
     "folder": "INBOX",
-    "max": 50,
+    "max": 0,
     "sort": null,
     "mock": false,
     "delimiter": null,

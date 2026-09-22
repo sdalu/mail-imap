@@ -111,6 +111,7 @@ pub struct Config {
     #[serde(default = "default_folder")]
     pub folder: String,
     /// Maximum number of search results to fetch (0 = no limit).
+    /// Cap on search results. `0` is no cap, and is the default.
     #[serde(default = "default_max")]
     pub max: usize,
     /// Sort spec for search/unread (`-S`/`--sort` overrides), e.g.
@@ -146,8 +147,10 @@ fn default_folder() -> String {
     "INBOX".to_string()
 }
 
+/// No cap. A search returns what it matched, and the caller decides
+/// what to do with it; `-M`/`--max` is there when that is too much.
 fn default_max() -> usize {
-    50
+    0
 }
 
 impl Default for Config {
@@ -670,6 +673,21 @@ mod tests {
         let (cfg, name) = parse_config(&with_default, Some("work")).expect("parse");
         assert_eq!(name.as_deref(), Some("work"));
         assert_eq!(cfg.server, "work.example");
+    }
+
+    #[test]
+    fn a_search_is_uncapped_unless_the_config_says_otherwise() {
+        // 0 is no cap, and is what a config that says nothing gets.
+        let (c, _) = parse_one_pair("server = \"h\"\nusername = \"u\"\npassword = \"p\"\n");
+        assert_eq!(c.max, 0);
+        assert_eq!(Config::default().max, 0);
+        let (c, _) =
+            parse_one_pair("server = \"h\"\nusername = \"u\"\npassword = \"p\"\nmax = 20\n");
+        assert_eq!(c.max, 20);
+    }
+
+    fn parse_one_pair(content: &str) -> (Config, Option<String>) {
+        parse_config(content, None).expect("parse")
     }
 
     #[test]

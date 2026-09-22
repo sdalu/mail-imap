@@ -110,8 +110,9 @@ Errors go to stderr as a JSON object with one key,
 .It Fl M Ar n , Fl -max Ar n
 Cap search results for this run, overriding
 .Ic max
-from the config
-.Pq Ar 0 No means unlimited .
+from the config.
+.Ar 0
+is no cap, which is the default.
 .It Fl S Ar spec , Fl -sort Ar spec
 Sort
 .Cm search Ns / Ns Cm unread
@@ -485,12 +486,13 @@ Default folder for commands that need one.
 Default
 .Ic INBOX .
 .It Ic max
-Maximum search results to fetch
-.Pq Ar 0 No means unlimited ;
-overridden by
+Cap on the number of search results fetched;
+.Ar 0
+is no cap.
+Overridden by
 .Fl M Ns / Ns Fl -max .
 Default
-.Ar 50 .
+.Ar 0 .
 .It Ic sort
 Default sort spec for
 .Cm search Ns / Ns Cm unread ,

@@ -314,7 +314,7 @@ Folders
   \Trash      Trash
 
 Search defaults
-  max         50
+  max         unlimited
   sort        (none: most recent first)
 
 This server
@@ -359,7 +359,7 @@ What each block is for:
  "folders":{"delimiter":"/","delimiter_source":"server","server_delimiter":"/",
             "delimiters_seen":["/"],"default":"INBOX","default_exists":true,
             "count":12,"special_use":{"\\Trash":"Trash","\\Junk":"Spam"}},
- "defaults":{"max":50,"sort":null},
+ "defaults":{"max":0,"sort":null},
  "server":{"capabilities":["IDLE","MOVE","SORT","UIDPLUS"],"filing":"UID MOVE",
            "sorting":"server","threading":"server","create_special_use":true}}
 ```
@@ -792,7 +792,7 @@ command.
   one descending (`-date`, `subject,-size`). Overrides `sort` from the
   config. Default: most recent first.
 - **`-M, --max <N>`** — cap search results for this run, overriding
-  `max` from the config. `0` means unlimited.
+  `max` from the config. `0` means no cap, which is the default.
 - **`-j, --json`** — one compact single-line JSON object per result on
   stdout; errors become `{"error": ...}` on stderr. See
   [JSON output](#json-output--j).
@@ -838,7 +838,7 @@ starttls = false
 insecure = false
 
 folder = "INBOX"
-max    = 50
+max    = 0
 
 # sort      = "-date"
 # delimiter = "/"
@@ -867,7 +867,7 @@ password of `30s` stays the text `30s` rather than becoming a number.
 | `starttls`     | `false`    | Upgrade a plain connection with STARTTLS (typical for port 143). Used when `ssl` is `false`.                              |
 | `insecure`     | `false`    | Accept invalid TLS certificates (self-signed local servers)                                                               |
 | `folder`       | `INBOX`    | Default folder for commands that need one                                                                                 |
-| `max`          | `50`       | Max search results to fetch (`0` = unlimited); overridden by `-M/--max` on the command line                               |
+| `max`          | `0`        | Cap on search results; `0` is no cap. Overridden by `-M/--max` on the command line                                        |
 | `sort`         | `null`     | Default sort spec for `search`/`unread` (same format as `-S/--sort`); overridden by `-S` on the command line              |
 | `mock`         | `false`    | Use the in-memory mock backend                                                                                            |
 | `delimiter`    | `null`     | The hierarchy delimiter `info` reports, overriding the server's own answer. Advisory only: nothing rewrites a folder name |
