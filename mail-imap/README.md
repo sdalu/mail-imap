@@ -1012,9 +1012,14 @@ make tests-unit          # or plain: cargo test
 
 # Just the documented command lines
 make tests-examples      # or: ./scripts/check-examples.sh
+
+# The wire: starts a throwaway IMAP server, runs tests/wire.rs, stops it
+make tests-wire
 ```
 
-Neither half needs a server or a config.
+Neither half of `make tests` needs a server or a config. `tests-wire` is
+deliberately not part of it, so the suite still runs on a machine with
+no network.
 
 The suite runs entirely against the mock backend: it opens no socket and
 needs no config. It covers the mock backend end-to-end (list / search /
@@ -1033,10 +1038,24 @@ functions directly, so an argument shape broken in `src/main.rs` passes
 it — this is what catches that, and it is why an example that stops
 working is a build failure rather than a surprise for a reader.
 
-What neither half proves: nothing here fails because the real backend
-sent the wrong thing to a server, and a command shape that appears in
-no document is checked by nothing. Both are covered by hand — see
-[CHECKLIST.md](CHECKLIST.md).
+`make tests-wire` is the third part, and the only one that opens a
+socket. It fetches a GreenMail jar into `tests-tmp/`, starts it on
+localhost, and runs `tests/wire.rs` against it: that reads go through
+`BODY.PEEK` and leave `\Seen` alone, that search results come back in
+UID order and honour `--max`, that `UID SORT` is what orders them when
+the server advertises `SORT`, that flags and keywords survive a round
+trip, that `UID MOVE` files a message, that the folder tree can be
+created, renamed and subscribed, that a MIME part is listed and saved
+with its transfer encoding decoded, and that a reply chain threads.
+The tests are `#[ignore]`d, so they appear as skipped in `make tests`
+rather than vanishing, and they fail rather than pass when no server
+answers.
+
+What none of it proves: a real account's quirks. GreenMail is one
+server with one set of capabilities, and the degradation ladders in
+`fetch_chunk` exist for servers it is not. A command shape that appears
+in no document is still checked by nothing. Both are covered by hand —
+see [CHECKLIST.md](CHECKLIST.md).
 
 ## Architecture
 

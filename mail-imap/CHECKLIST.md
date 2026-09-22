@@ -13,6 +13,9 @@ answer is sometimes that the checker is wrong rather than the file.
 - [ ] `make tests` — the Rust suite against the mock backend, then
       `scripts/check-examples.sh`: every command line the documents print, run
       against `--mock`, failing on a clap usage error
+- [ ] `make tests-wire` — the wire checks against a throwaway GreenMail
+      (it starts and stops it). This is what fails when
+      `src/imap/real.rs` sends the wrong thing; `make tests` cannot.
 - [ ] `target/debug/mail-imap --mock <the commands this round touched>` —
       `scripts/check-examples.sh` covers the shapes that are written down. One
       this round added and did not document is covered by nothing, so
@@ -20,12 +23,15 @@ answer is sometimes that the checker is wrong rather than the file.
 
 ## The real server
 
-The suite never talks to one, so a round that changed `src/imap/real.rs`
-or anything it sends has not been tested by anything above.
+`make tests-wire` talks to a throwaway GreenMail, which is not the same
+as an account in the wild: it is one server, advertising one set of
+capabilities, with none of the quirks the degradation ladders in
+`fetch_chunk` were written for. A round that changed what goes on the
+wire still owes a real account.
 
-- [ ] Did this round change what goes on the wire? If so, run it against
-      a real account (`-c incal.conf`, `-d` to see the exchange) and say
-      in the commit which commands were run.
+- [ ] Did this round change what goes on the wire? Then `make tests-wire`
+      passes, *and* it was run against a real account (`-c incal.conf`,
+      `-d` to see the exchange) with the commands named in the commit.
 - [ ] Did it change a mutating path (`flag`, `tag` — the only two)? Then
       it was run against a real account on a message that can be spared.
 - [ ] Did it add an operation that changes the server? Then its gate is

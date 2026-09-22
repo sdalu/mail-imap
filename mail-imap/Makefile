@@ -36,7 +36,8 @@ MAN1		= $(MANSRC)/$(MAN1PAGE)
 VERSION		!= sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml
 
 .PHONY: help all check check-lint check-version check-man build tests \
-	tests-unit tests-examples tests-server tests-server-stop doc version \
+	tests-unit tests-examples tests-wire tests-server tests-server-stop \
+	doc version \
 	options clean distclean install uninstall
 
 help:						## show this help (the default)
@@ -101,10 +102,19 @@ tests-examples:					## every documented command line is still accepted by the CL
 	$(CARGO) build
 	MAIL_IMAP=target/debug/$(NAME) $(SCRIPTS)/check-examples.sh
 
-# `make tests` deliberately does not depend on these: the suite must run
-# with no network and no server. The wire is the half the mock cannot
-# prove (see CLAUDE.md), and this is how you get a server to prove it
-# against -- it prints the config path to point -c at.
+# `make tests` deliberately does not depend on any of these: the suite
+# must run with no network and no server. The wire is the half the mock
+# cannot prove (see CLAUDE.md), and these are how it gets proved.
+tests-wire:					## run the wire checks against a throwaway server (starts and stops it)
+	@sh $(SCRIPTS)/greenmail-server.sh start > /dev/null
+	@MAIL_IMAP_WIRE_CONFIG=$(TESTS_TMP)/greenmail.conf \
+	    $(CARGO) test --test wire -- --ignored --test-threads=1; \
+	    status=$$?; \
+	    sh $(SCRIPTS)/greenmail-server.sh stop; \
+	    exit $$status
+
+# `tests-server` leaves it running instead, for poking at by hand --
+# it prints the config path to point -c at.
 tests-server:					## start a throwaway IMAP server (GreenMail) for exercising the real backend
 	@sh $(SCRIPTS)/greenmail-server.sh start
 

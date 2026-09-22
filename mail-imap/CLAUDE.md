@@ -28,10 +28,19 @@ Gate: `make check && make tests`
   (`../forks/rust-imap`, `../forks/tokio-imap/imap-proto`), carrying
   RFC 5256 THREAD/SORT support that upstream has not released. A
   checkout without `../forks` does not build.
-- **The suite proves the mock backend, not the wire.** `make tests`
-  never opens a socket, so nothing in it can fail because
-  `src/imap/real.rs` sends the wrong thing. Changes there are tested by
-  running the binary against a real account — see CHECKLIST.md.
+- **`make tests` proves the mock backend, not the wire.** It never
+  opens a socket, so nothing in it can fail because
+  `src/imap/real.rs` sends the wrong thing. `make tests-wire` is the
+  other half: it starts a throwaway GreenMail, runs `tests/wire.rs`
+  against it, and stops it. Those tests are `#[ignore]`d so the
+  ordinary suite stays server-free and shows them as skipped rather
+  than hiding them, and they fail loudly rather than pass quietly when
+  no server is there. They cover what the mock cannot — that reads use
+  `BODY.PEEK` and leave `\Seen` alone, UID order, the result cap,
+  server-side `UID SORT`, `UID STORE`, `UID MOVE`, the folder tree,
+  MIME over the wire, threading. What they still do not cover is a
+  *real* account's quirks (the degradation ladders in `fetch_chunk`
+  exist for servers GreenMail is not) — see CHECKLIST.md.
 - **The Rust suite does not drive the CLI surface.** It calls the
   `cli::` functions, so an argument shape broken in `src/main.rs`
   passes it. `make tests` therefore also runs `scripts/check-examples.sh`,
