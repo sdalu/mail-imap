@@ -110,6 +110,12 @@ cargo run -- --help
 - List the MIME parts of an email, and save one part to a file, every
   part to a directory (`--all`), or one part to stdout (`-o -`) for
   piping
+- Copy email(s) into another folder, named last as `mv` does: `UID COPY`
+  (`access-level` `organize`) — the originals stay where they are
+- Permanently remove messages already marked `\Deleted`: `expunge`,
+  a `UID EXPUNGE` (RFC 4315, needs `UIDPLUS`). It never marks anything
+  itself, so it removes only what was already marked (`access-level`
+  `full`)
 - Move email(s) to another folder, named last as `mv` does: `UID MOVE`
   (RFC 6851) where the server has it, `UID COPY` + `UID EXPUNGE`
   (RFC 4315) where it does not, and a refusal where it has neither
@@ -158,6 +164,8 @@ takes the folder flags `-f`/`-A`; see [Folder selection](#folder-selection).
 | `part save`          | `part save <SELECTION> <PART> [-o\|--out <FILE\|->]` | Save one MIME part of one message to a file, or to stdout with `-o -` (the selection must name exactly one message)                                                             |
 | `part save --all`    | `part save <SELECTION> --all [-o\|--out <DIR>]`   | Save every MIME part of one message; `-o` names a directory that must already exist. Refuses to overwrite                                                                       |
 | `move`               | `move <SELECTION...> <FOLDER>`                    | File the selected email(s) into another folder, named last as `mv` does; it must already exist (needs `organize`)                                                               |
+| `copy`               | `copy <SELECTION...> <FOLDER>`                    | Copy the selected email(s) into another folder, leaving the originals; it must already exist (needs `organize`)                                                                |
+| `expunge`            | `expunge <SELECTION...>`                          | Permanently remove the selected email(s), but only those already marked `\Deleted`; needs `UIDPLUS` (needs `full`)                                                             |
 | `flag list`          | `flag list [--wire] <SELECTION...>`               | List the flags (system flags + keyword tags) of the selected email(s)                                                                                                           |
 | `flag add`           | `flag add [--wire] <SELECTION...> <FLAG...>`      | Enable IMAP-defined flags on the selected email(s): `seen`, `answered`, `flagged`, `deleted`, `draft`                                                                           |
 | `flag remove`        | `flag remove <SELECTION...> <FLAG...>`            | Disable flags on the selected email(s)                                                                                                                                          |
@@ -299,9 +307,11 @@ mail-imap 0.1.0 (real backend)
 Access level: organize
   set and clear flags and tags        yes
   move mail to another folder         yes
+  copy mail into another folder       yes
   create / rename / subscribe         no
   delete a folder                     no
   set \Deleted                        no
+  expunge a \Deleted message          no
 
 Folders
   delimiter   '/' (from the server)
@@ -319,6 +329,7 @@ Search defaults
 
 This server
   moving mail         UID MOVE
+  expunging           UID EXPUNGE
   sorting (-S)        server-side
   threading           server-side
   folder create --use available
@@ -327,7 +338,7 @@ This server
 
 What each block is for:
 
-- **Access level** — the level in force, and the four things it governs,
+- **Access level** — the level in force, and the seven things it governs,
   so an agent can tell `flag add` from `folder create` before trying
   one. A run narrowed with `--access-level` says so and names the
   ceiling the config still allows.
@@ -355,14 +366,16 @@ What each block is for:
            "tls":"implicit","insecure":false,"username":"user@example.com"},
  "access":{"effective":"organize","configured":"organize",
            "may":{"store_flags":true,"move_messages":true,
-                  "change_folders":false,"delete_folders":false,
-                  "set_deleted":false}},
+                  "copy_messages":true,"change_folders":false,
+                  "delete_folders":false,"set_deleted":false,
+                  "expunge":false}},
  "folders":{"delimiter":"/","delimiter_source":"server","server_delimiter":"/",
             "delimiters_seen":["/"],"default":"INBOX","default_exists":true,
             "count":12,"special_use":{"\\Trash":"Trash","\\Junk":"Spam"}},
  "defaults":{"max":0,"sort":null},
  "server":{"capabilities":["IDLE","MOVE","SORT","UIDPLUS"],"filing":"UID MOVE",
-           "sorting":"server","threading":"server","create_special_use":true}}
+           "expunging":"UID EXPUNGE","sorting":"server","threading":"server",
+           "create_special_use":true}}
 ```
 
 (shown wrapped; the real output is one line). `config.path` is `null`
@@ -661,6 +674,57 @@ The folder is named last, as `mv` has it. Needs `"access-level":
 mail-imap --config incal.conf move 12345 Archive/2026
 mail-imap --config incal.conf -f INBOX move last:20 Archive/2026
 mail-imap --config incal.conf move 'INBOX::1-5' 'Spam::9' Trash
+```
+
+#### Copying mail
+
+`copy` is `move` without the removal: `UID COPY`, the same `mv`-style
+argument order, the same `organize` level, and the originals stay where
+they are.
+
+```bash
+mail-imap --config incal.conf copy 12345 Archive/2026
+mail-imap --config incal.conf -f INBOX copy last:20 Archive/2026
+```
+
+Unlike `move`, `copy` does **not** refuse a target equal to the source
+folder. The asymmetry is deliberate and follows from what each one
+does: moving mail into the folder it is already in would do nothing, so
+it is refused as a mistake, while copying it there produces a genuine
+second copy — a thing IMAP allows and this tool has no business
+overruling.
+
+#### Expunging mail
+
+`expunge` permanently removes messages, and it is the only command here
+that destroys mail. Two rules keep it narrow.
+
+It **removes only messages already marked `\Deleted`**, and never marks
+anything itself. Marking and expunging in one step would look like a
+convenience and would destroy mail the caller never asked to lose, so
+if none of the named messages carries `\Deleted` it refuses and says
+what marks them:
+
+```console
+$ mail-imap -c incal.conf expunge 12345
+Error: none of the given message(s) are marked \Deleted: 'expunge' only
+removes messages already marked for removal -- 'flag add <selection>
+deleted' is what marks them
+```
+
+And it **needs `UIDPLUS`**, refusing without it. `UID EXPUNGE` (RFC
+4315) is the only way to name which messages go; a plain `EXPUNGE`
+removes every `\Deleted` message in the mailbox, including ones another
+client marked. `info` reports which of the two this server can do on
+its `expunging` line.
+
+There is deliberately no form that expunges everything marked
+`\Deleted` in a mailbox. Compose it instead — `search DELETED` gives
+the UIDs, `expunge` takes them.
+
+```bash
+mail-imap --config incal.conf -f INBOX flag add 12345 deleted
+mail-imap --config incal.conf -f INBOX expunge 12345
 ```
 
 #### Counts, UIDs and threads
@@ -981,7 +1045,7 @@ change. The levels are a ladder, each permitting everything below it:
 | `readonly`    | Nothing changes. Reads use `BODY.PEEK[]`, so even `\Seen` stays as it was            |
 | `organize`    | *(default)* Read, plus set and clear flags and tags, and move mail to another folder |
 | `restructure` | That, plus the folder tree: `folder create`, `rename`, `subscribe`, `unsubscribe`    |
-| `full`        | Everything the tool can do, including setting `\Deleted` and deleting a mailbox      |
+| `full`        | Everything the tool can do, including setting `\Deleted`, `expunge` and deleting a mailbox |
 
 The two lines the ladder draws: `organize` is about **messages** —
 nothing is lost, so `\Deleted` cannot be *set* (it can be cleared,

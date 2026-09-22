@@ -386,6 +386,50 @@ impl ImapBackend for MockClient {
         Ok(())
     }
 
+    fn copy_messages(&mut self, folder: &str, _uids: &[u32], to: &str) -> Result<()> {
+        self.require_folder(folder)?;
+        if !self.folders.iter().any(|f| f == to) {
+            bail!("no mailbox '{}' to file into", to);
+        }
+        // Nothing else to track: a message the mock knows about is
+        // already visible from every folder it has not been `moved`
+        // out of (see `folder_uids`), so filing a copy into `to`
+        // changes nothing that read is not already showing. A UID that
+        // is not there is ignored, as with `store_flags`/`move_messages`.
+        Ok(())
+    }
+
+    fn expunge_messages(&mut self, folder: &str, uids: &[u32]) -> Result<Vec<u32>> {
+        self.require_folder(folder)?;
+        // No UIDPLUS gate here: `capabilities()` advertises nothing
+        // (that is the point of it -- see its own doc comment), and
+        // refusing for want of a capability the mock never claims would
+        // make it refuse every expunge, which is *stricter* than the
+        // real server it stands in for -- the direction CLAUDE.md
+        // records as the dangerous one.
+        let eligible: Vec<u32> = uids
+            .iter()
+            .copied()
+            .filter(|uid| {
+                self.message_flags
+                    .get(uid)
+                    .map(|flags| flags.iter().any(|f| f.eq_ignore_ascii_case("\\Deleted")))
+                    .unwrap_or(false)
+            })
+            .collect();
+        if eligible.is_empty() {
+            bail!(
+                "none of the given message(s) are marked \\Deleted (mock): 'expunge' only \
+                 removes messages already marked for removal -- 'flag add <selection> \
+                 deleted' is what marks them"
+            );
+        }
+        self.messages.retain(|(u, _, _, _)| !eligible.contains(u));
+        self.thread_ids.retain(|(u, _, _)| !eligible.contains(u));
+        self.message_flags.retain(|u, _| !eligible.contains(u));
+        Ok(eligible)
+    }
+
     fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {
         if self.folders.iter().any(|f| f == name) {
             bail!("mailbox '{}' already exists", name);

@@ -521,6 +521,39 @@ impl RealClient {
         )))
     }
 
+    /// Of `uids`, the ones the server currently reports as carrying
+    /// `\Deleted`. `folder` must already be selected.
+    fn deleted_among(&mut self, folder: &str, uids: &[u32]) -> Result<Vec<u32>> {
+        let mut out = Vec::new();
+        const BATCH: usize = 50;
+        for chunk in uids.chunks(BATCH) {
+            let list = chunk
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let fetches = match self.attempt_fetch(folder, &list, "(UID FLAGS)") {
+                Attempt::Success(fs) => fs,
+                Attempt::Unparseable => bail!(
+                    "could not read flags for UID(s) {} in '{}': server response could not \
+                     be parsed",
+                    list,
+                    folder
+                ),
+                Attempt::Fatal(e) => return Err(e),
+            };
+            for f in fetches.iter() {
+                if let Some(uid) = f.uid {
+                    if f.flags().iter().any(|fl| matches!(fl, Flag::Deleted)) {
+                        out.push(uid);
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        Ok(out)
+    }
+
     fn fetch_to_result(&self, f: &imap::types::Fetch<'_>, folder: &str) -> SearchResult {
         let env = f.envelope();
         let subject = env
@@ -1010,6 +1043,73 @@ impl ImapBackend for RealClient {
                 })?;
         }
         Ok(())
+    }
+
+    fn copy_messages(&mut self, folder: &str, uids: &[u32], to: &str) -> Result<()> {
+        self.session
+            .select(folder)
+            .with_context(|| format!("could not select '{}'", folder))?;
+        if self.debug {
+            eprintln!("Copying {} message(s) from '{}' to '{}' via UID COPY", uids.len(), folder, to);
+        }
+        const BATCH: usize = 50;
+        for chunk in uids.chunks(BATCH) {
+            let list = chunk
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            self.session
+                .uid_copy(&list, to)
+                .with_context(|| format!("UID COPY {} to '{}'", list, to))?;
+        }
+        Ok(())
+    }
+
+    fn expunge_messages(&mut self, folder: &str, uids: &[u32]) -> Result<Vec<u32>> {
+        self.session
+            .select(folder)
+            .with_context(|| format!("could not select '{}'", folder))?;
+        // A plain EXPUNGE removes every \Deleted message in the
+        // mailbox, not only these -- including ones somebody else
+        // marked. UID EXPUNGE (RFC 4315) is the only way to name which
+        // ones, and it needs UIDPLUS.
+        if !self.has_capability("UIDPLUS") {
+            bail!(
+                "the server does not advertise UIDPLUS (RFC 4315), so there is no UID \
+                 EXPUNGE: a plain EXPUNGE would remove every message marked \\Deleted in \
+                 '{}', not only these. Refusing",
+                folder
+            );
+        }
+        let eligible = self.deleted_among(folder, uids)?;
+        if eligible.is_empty() {
+            bail!(
+                "none of the given message(s) are marked \\Deleted: 'expunge' only removes \
+                 messages already marked for removal -- 'flag add <selection> deleted' is \
+                 what marks them"
+            );
+        }
+        if self.debug {
+            eprintln!(
+                "Expunging {} of {} given message(s) in '{}' (only the ones marked \\Deleted)",
+                eligible.len(),
+                uids.len(),
+                folder
+            );
+        }
+        const BATCH: usize = 50;
+        for chunk in eligible.chunks(BATCH) {
+            let list = chunk
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            self.session
+                .uid_expunge(&list)
+                .with_context(|| format!("UID EXPUNGE {} in '{}'", list, folder))?;
+        }
+        Ok(eligible)
     }
 
     fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {

@@ -331,6 +331,44 @@ business, and doing it implicitly would let `organize` change the
 folder tree by a side door. Moving to the folder the messages are
 already in is refused as a no-op.
 
+### Copying (`copy`) and expunging (`expunge`)
+
+`copy` is the easy half: `UID COPY`, `organize`, the `mv` argument
+order, and the same must-already-exist refusal `move` uses. It is not
+`move` minus a step in one respect — **a target equal to the source
+folder is allowed**, where `move` refuses it. The two refusals would
+mean different things: moving mail into the folder it is already in
+does nothing, so refusing catches a mistake; copying it there produces
+a real second copy, which IMAP permits and this tool has no business
+overruling.
+
+`expunge` is the only command here that destroys mail, and two rules
+keep it narrow.
+
+**It removes only what is already marked, and never marks anything
+itself.** `expunge_messages` fetches `(UID FLAGS)` for the named UIDs
+first (`deleted_among`), expunges the subset carrying `\Deleted`, and
+returns that subset — so the count reported is what went, not what was
+asked for. If none of them is marked it refuses and names
+`flag add <selection> deleted`. Marking and expunging in one step
+would read as a convenience and would destroy mail the caller never
+asked to lose; separating them means the destructive step can only ever
+act on a decision already recorded on the server.
+
+**It requires `UIDPLUS` and refuses without it.** `UID EXPUNGE`
+(RFC 4315) is the only way to name which messages go. The alternative
+is a plain `EXPUNGE`, which removes every `\Deleted` message in the
+mailbox — including ones another client marked, possibly years ago —
+and that is the same unbounded action `move_messages` already refuses
+on a server without UIDPLUS. A command offering it would contradict
+that refusal, so `info` reports which of the two the server can do on
+its `expunging` line and `expunge` refuses rather than degrading.
+
+For the same reason there is no form that expunges a mailbox's whole
+`\Deleted` set. It composes instead: `search DELETED` gives the UIDs,
+`expunge` takes them, and the unbounded version is never a keystroke
+away from the bounded one.
+
 ### Passive read-only behaviour
 
 Nothing implicitly mutates the mailbox: there is no `MOVE`, `COPY` or

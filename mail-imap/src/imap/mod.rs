@@ -3,11 +3,13 @@
 //! Reads never change anything: they use `BODY.PEEK[]`, so even
 //! fetching a message does not set `\Seen`. The mutating operations are
 //! [`ImapBackend::store_flags`] (`flag`, `tag`),
-//! [`ImapBackend::move_messages`] (`move`), and the folder-tree four —
-//! [`ImapBackend::create_folder`], [`ImapBackend::rename_folder`],
-//! [`ImapBackend::set_subscribed`] and [`ImapBackend::delete_folder`].
-//! Every one of them is gated by [`ImapClient`] on the configured
-//! [`AccessLevel`], never by its caller.
+//! [`ImapBackend::move_messages`] (`move`), [`ImapBackend::copy_messages`]
+//! (`copy`), [`ImapBackend::expunge_messages`] (`expunge`), and the
+//! folder-tree four — [`ImapBackend::create_folder`],
+//! [`ImapBackend::rename_folder`], [`ImapBackend::set_subscribed`] and
+//! [`ImapBackend::delete_folder`]. Every one of them is gated by
+//! [`ImapClient`] on the configured [`AccessLevel`], never by its
+//! caller.
 //!
 //! Operations are exposed through the [`ImapBackend`] trait. Two backends exist:
 //!
@@ -113,7 +115,8 @@ pub struct PartInfo {
 /// The operations the CLI needs from an IMAP account.
 ///
 /// Most are reads. The ones that change the server are `store_flags`
-/// (`flag`, `tag`), `move_messages` (`move`), and `create_folder`,
+/// (`flag`, `tag`), `move_messages` (`move`), `copy_messages` (`copy`),
+/// `expunge_messages` (`expunge`), and `create_folder`,
 /// `rename_folder`, `set_subscribed` and `delete_folder` (`folder`).
 /// `save_part` writes a local file and touches nothing on the server.
 ///
@@ -179,6 +182,19 @@ pub trait ImapBackend {
     /// (RFC 4315). The copy always happens first, so a failure part-way
     /// leaves a duplicate rather than a hole.
     fn move_messages(&mut self, folder: &str, uids: &[u32], to: &str) -> Result<()>;
+    /// Copy messages into another mailbox, leaving the originals where
+    /// they are: `UID COPY` (RFC 3501 §6.4.7). The target must already
+    /// exist, same as [`ImapBackend::move_messages`].
+    fn copy_messages(&mut self, folder: &str, uids: &[u32], to: &str) -> Result<()>;
+    /// Permanently remove messages already marked `\Deleted`: `UID
+    /// EXPUNGE` (RFC 4315 §2.1), which needs the server to advertise
+    /// `UIDPLUS` — without it a plain `EXPUNGE` is the only route, and
+    /// that removes every `\Deleted` message in the mailbox rather than
+    /// only these. Never sets `\Deleted` itself: of `uids`, only the
+    /// ones that already carry it are removed, and the ones that were
+    /// are returned. `flag add <selection> deleted` is what marks a
+    /// message for removal.
+    fn expunge_messages(&mut self, folder: &str, uids: &[u32]) -> Result<Vec<u32>>;
     /// Create a mailbox. `use_attr` is an RFC 6154 special-use
     /// attribute (`\Archive`, `\Sent`, ...) to declare at creation —
     /// the only moment IMAP lets a client set one — and needs the
@@ -422,6 +438,25 @@ impl ImapClient {
         }
         Ok(())
     }
+
+    /// Refuse `UID EXPUNGE` unless the access level is `full`. Setting
+    /// `\Deleted` already needs `full` (`check_flag_change` via
+    /// `AccessLevel::may_set`); removing a message so marked is the
+    /// same destruction, so it is held to the same level rather than a
+    /// lesser one.
+    fn check_expunge(&self) -> Result<()> {
+        // Asks `AccessLevel`, rather than comparing here, for the same
+        // reason `check_folder_delete` does: so this gate and the
+        // `remove a message` line `info` prints cannot drift apart.
+        if !self.access.may_expunge() {
+            bail!(
+                "access level '{}' will not remove a message: raise \"access-level\" to \
+                 'full' in the config",
+                self.access.as_str()
+            );
+        }
+        Ok(())
+    }
 }
 
 impl ImapBackend for ImapClient {
@@ -534,6 +569,35 @@ impl ImapBackend for ImapClient {
             Backend::Real(c) => c.move_messages(folder, uids, to),
             #[cfg(feature = "mock")]
             Backend::Mock(c) => c.move_messages(folder, uids, to),
+        }
+    }
+    fn copy_messages(&mut self, folder: &str, uids: &[u32], to: &str) -> Result<()> {
+        // Same rung as `move_messages`: the message keeps existing --
+        // filing a copy of it elsewhere is `organize`'s own operation,
+        // and cannot need more than moving one already needs.
+        if !self.access.may_move() {
+            bail!(
+                "access level '{}' allows no changes, and copying mail into '{}' is one: \
+                 raise \"access-level\" to 'organize' in the config",
+                self.access.as_str(),
+                to
+            );
+        }
+        // UID COPY does not validate its destination in the `imap`
+        // crate at all (see `check_mailbox_name`'s own doc comment).
+        check_mailbox_name(to, "copy")?;
+        match &mut self.backend {
+            Backend::Real(c) => c.copy_messages(folder, uids, to),
+            #[cfg(feature = "mock")]
+            Backend::Mock(c) => c.copy_messages(folder, uids, to),
+        }
+    }
+    fn expunge_messages(&mut self, folder: &str, uids: &[u32]) -> Result<Vec<u32>> {
+        self.check_expunge()?;
+        match &mut self.backend {
+            Backend::Real(c) => c.expunge_messages(folder, uids),
+            #[cfg(feature = "mock")]
+            Backend::Mock(c) => c.expunge_messages(folder, uids),
         }
     }
     fn create_folder(&mut self, name: &str, use_attr: Option<&str>) -> Result<()> {
@@ -741,6 +805,7 @@ mod mailbox_name_tests {
             c.set_subscribed(evil, true).err(),
             c.set_subscribed(evil, false).err(),
             c.move_messages("INBOX", &[1], evil).err(),
+            c.copy_messages("INBOX", &[1], evil).err(),
             c.delete_folder(evil, false).err(),
         ] {
             let err = err.expect("a line break must never reach the wire");

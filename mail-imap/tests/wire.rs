@@ -522,6 +522,80 @@ fn a_message_can_be_filed_into_another_folder() {
 
 #[test]
 #[ignore = "needs an IMAP server: make tests-wire"]
+fn a_message_can_be_copied_without_removing_the_original() {
+    let mut c = client();
+    let folder = unique("copied");
+    c.create_folder(&folder, None).expect("CREATE");
+    let (token, uids) = fixture(&mut c, "copy", 1);
+    let uid = uids[0];
+
+    c.copy_messages("INBOX", &[uid], &folder).expect("copy");
+
+    assert!(
+        c.folder_uids("INBOX").expect("uids").contains(&uid),
+        "the source must still list the original -- copy leaves it in place"
+    );
+    let landed = c
+        .search_folders(
+            std::slice::from_ref(&folder),
+            &format!("HEADER SUBJECT \"{}\"", token),
+            0,
+            None,
+        )
+        .expect("search the target");
+    assert_eq!(landed.len(), 1, "the message is not in '{}'", folder);
+}
+
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn expunge_removes_only_the_messages_already_marked_deleted() {
+    // GreenMail advertises UIDPLUS (confirmed by hand: `info` on a
+    // GreenMail config lists it among the capabilities), so this
+    // exercises the real UID EXPUNGE path, not only the refusal --
+    // unlike the CHARSET UTF-8 search, there is no gap to record here.
+    // What is *not* covered by any wire test is a server that does not
+    // advertise UIDPLUS: GreenMail always does, so the "the server
+    // does not advertise UIDPLUS" refusal in `src/imap/real.rs` has no
+    // wire coverage and is exercised only by inspection.
+    let mut c = client();
+    let (_token, uids) = fixture(&mut c, "expunge", 2);
+    let (keep, remove) = (uids[0], uids[1]);
+
+    // Neither is marked yet: refused, and the refusal says why.
+    let err = c
+        .expunge_messages("INBOX", &[keep, remove])
+        .expect_err("nothing here is marked \\Deleted yet");
+    assert!(
+        err.to_string().to_lowercase().contains("deleted"),
+        "wrong reason: {}",
+        err
+    );
+    assert!(
+        c.folder_uids("INBOX").expect("uids").contains(&keep)
+            && c.folder_uids("INBOX").expect("uids").contains(&remove),
+        "a refused expunge must not have removed anything"
+    );
+
+    // Mark only `remove`.
+    c.store_flags("INBOX", &[remove], &["\\Deleted".to_string()], &[])
+        .expect("mark \\Deleted");
+
+    let removed = c
+        .expunge_messages("INBOX", &[keep, remove])
+        .expect("expunge the one eligible UID");
+    assert_eq!(
+        removed,
+        vec![remove],
+        "only the UID that was actually marked should be reported as removed"
+    );
+
+    let remaining = c.folder_uids("INBOX").expect("uids");
+    assert!(remaining.contains(&keep), "the untouched message must survive");
+    assert!(!remaining.contains(&remove), "the marked message must be gone");
+}
+
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
 fn the_folder_tree_can_be_created_renamed_and_subscribed() {
     let mut c = client();
     let first = unique("tree");
@@ -707,6 +781,7 @@ fn a_line_break_in_a_folder_name_never_reaches_the_server() {
         c.rename_folder(evil, "Fine").err(),
         c.set_subscribed(evil, true).err(),
         c.move_messages("INBOX", &[1], evil).err(),
+        c.copy_messages("INBOX", &[1], evil).err(),
         c.delete_folder(evil, true).err(),
     ] {
         let err = err.expect("a line break must be refused before the socket");
@@ -805,6 +880,16 @@ fn probe(c: &mut ImapClient, g: &Ground) -> Vec<Probe> {
         // Moving.
         ("move: absent target", c.move_messages(&g.folder, &[g.uid], &g.absent_folder).is_ok()),
         ("move: absent uid", c.move_messages(&g.folder, &[g.absent_uid], &g.move_target).is_ok()),
+        // Copying. Unlike move, a UID that exists is still there
+        // afterwards, so these probes do not have to avoid spending it.
+        ("copy: absent target", c.copy_messages(&g.folder, &[g.uid], &g.absent_folder).is_ok()),
+        ("copy: absent uid", c.copy_messages(&g.folder, &[g.absent_uid], &g.move_target).is_ok()),
+        // Removing. `g.uid` is not yet marked \Deleted, so this refuses
+        // -- both of the next two probes must still see it afterwards,
+        // which is why the probe that actually marks and removes it
+        // comes last of all, once nothing later needs it.
+        ("expunge: not marked \\Deleted", c.expunge_messages(&g.folder, &[g.uid]).is_ok()),
+        ("expunge: absent uid", c.expunge_messages(&g.folder, &[g.absent_uid]).is_ok()),
         // Listing only the subscribed mailboxes must not error just
         // because nothing (or everything) is subscribed.
         ("list_subscribed_folders: ok", c.list_subscribed_folders().is_ok()),
@@ -814,6 +899,14 @@ fn probe(c: &mut ImapClient, g: &Ground) -> Vec<Probe> {
         ("delete_folder: empty folder, no force needed", c.delete_folder(&g.deletable_folder, false).is_ok()),
         // A line break in a name never reaches either backend.
         ("subscribe: name with CRLF", c.set_subscribed("Evil\r\nA1 NOOP", true).is_ok()),
+        // Last of all: marks `g.uid` \Deleted and removes it, so it
+        // must not run before anything above that still needs the
+        // message to exist.
+        ("expunge: marked \\Deleted succeeds", {
+            c.store_flags(&g.folder, &[g.uid], &["\\Deleted".to_string()], &[])
+                .ok();
+            c.expunge_messages(&g.folder, &[g.uid]).is_ok()
+        }),
     ]
 }
 

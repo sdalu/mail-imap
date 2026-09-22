@@ -47,21 +47,6 @@ doing on its own — it is one config field, one `std::process::Command`,
 and it makes `pass`, `gpg` and a keyring all work without this tool
 knowing about any of them.
 
-## 4. No `expunge`, and no `copy`
-
-`access-level full` exists for one thing — permitting `\Deleted` to be
-set (`src/config/mod.rs:59`) — and nothing ever removes what it marks.
-That interacts with the move fallback: on a server without UIDPLUS,
-`move` refuses precisely because a plain `EXPUNGE` would take every
-`\Deleted` message with it (`src/imap/real.rs:931-938`), including the
-ones this tool marked. So the tool can leave a mailbox in a state its
-own `move` then refuses to work in.
-
-`copy` is missing for no reason at all: `uid_copy` is already called in
-the move fallback (`src/imap/real.rs:966`), so the command is a handler
-and a gate, not new wire work. It is `organize`'s operation as much as
-`move` is — the message keeps existing, in one more place.
-
 ## 5. No `append`
 
 Nothing puts a message *into* a mailbox: no draft upload, no `.eml`
@@ -178,8 +163,10 @@ what this run may do.
 
 ### What it needs first
 
-§5 (`append`) and the expunge half of §4 — this command is both of them
-plus a MIME writer. And the writer is the work: `src/imap/mime.rs` is a
+§5 (`append`). The expunge half arrived with §4, so what is still
+missing is the ability to put the rebuilt message back — this command
+is `append` plus `expunge` plus a MIME writer, and only the first of
+those is still absent. And the writer is the work: `src/imap/mime.rs` is a
 parser only (`leaves`, `decoded`, `parse_message`, `decode_body`), so
 what is missing is boundary generation, transfer-encoding and
 `Content-Type` rewriting. Removal never changes a message's top-level
@@ -217,14 +204,15 @@ attachment to put in Drafts — is §5 and belongs to `append`.
 ---
 
 Done and out of this list: the `SEARCH` charset declaration,
-`part save --all` / `-o -`, and §3 — `folder delete` and
-`folder list --subscribed`. What they left behind is recorded where it
-belongs rather than here: the untested charset fallback in DESIGN.md
-under *Declaring a charset on `SEARCH`*, why `fetch_part` is the
-trait's primitive under *MIME parsing*, and where the line falls
-between `restructure` and `full` under *Access level*.
+`part save --all` / `-o -`, §3 (`folder delete` and
+`folder list --subscribed`) and §4 (`copy` and `expunge`). What they
+left behind is recorded where it belongs rather than here: the untested
+charset fallback in DESIGN.md under *Declaring a charset on `SEARCH`*,
+why `fetch_part` is the trait's primitive under *MIME parsing*, where
+the line falls between `restructure` and `full` under *Access level*,
+and why `expunge` never marks `\Deleted` itself under *Copying and
+expunging*.
 
 The numbers of what remains do not close up as entries leave. §6 cites
-"§5 (`append`) and the expunge half of §4", and a renumbering that made
-the list tidier would quietly make those citations point at the wrong
-thing.
+§5 by number, and a renumbering that made the list tidier would quietly
+make that citation point at the wrong thing.

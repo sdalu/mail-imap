@@ -267,6 +267,25 @@ enum Command {
         #[clap(flatten)]
         sel: Sel,
     },
+    /// Copy email(s) into another folder, named last, as `move` takes
+    /// it: `copy 1-5 Archive` (needs access-level 'organize'; the
+    /// folder must already exist; the originals are left where they are)
+    #[clap(after_help = SELECTION_HELP)]
+    Copy {
+        #[clap(flatten)]
+        sel: Sel,
+    },
+    /// Permanently remove the selected email(s) that are already marked
+    /// \Deleted (UID EXPUNGE, RFC 4315; needs access-level 'full' and a
+    /// server advertising UIDPLUS). Never marks a message itself --
+    /// `flag add <selection> deleted` does that, and `search DELETED`
+    /// finds what is already marked. There is no form that expunges an
+    /// entire mailbox
+    #[clap(after_help = SELECTION_HELP)]
+    Expunge {
+        #[clap(flatten)]
+        sel: Sel,
+    },
     /// List or save MIME parts of an email
     Part {
         /// What to do with the parts
@@ -624,6 +643,38 @@ fn main() {
                 &folder_spec(&args),
                 &selections,
                 to,
+                json,
+                debug,
+            )
+        }
+        Command::Copy { sel } => {
+            // The last argument is the folder, exactly as `move` takes it.
+            let Some((to, rest)) = sel.selection.split_last() else {
+                fail(
+                    json,
+                    "copy needs the folder to file into as its last argument \
+                     (copy 1-5 Archive)",
+                )
+            };
+            let selections = Sel {
+                selection: rest.to_vec(),
+            }
+            .resolve(json);
+            cli::copy_messages(
+                &config,
+                &folder_spec(&args),
+                &selections,
+                to,
+                json,
+                debug,
+            )
+        }
+        Command::Expunge { sel } => {
+            let selections = sel.resolve(json);
+            cli::expunge_messages(
+                &config,
+                &folder_spec(&args),
+                &selections,
                 json,
                 debug,
             )

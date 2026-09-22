@@ -257,6 +257,44 @@ plus
 .Ic UID EXPUNGE
 .Pq RFC 4315
 where it does not, and refuses where the server has neither.
+.It Cm copy Ar selection No ... Ar folder
+Copy the selected email(s) into
+.Ar folder ,
+named last as
+.Cm move
+has it, leaving the originals where they are
+.Pq Ic UID COPY , No RFC 3501 \(sc6.4.7 .
+.Ar folder
+must already exist.
+Needs access level
+.Ic organize .
+Unlike
+.Cm move ,
+a target equal to the source folder is not refused: moving mail into
+the folder it is already in would do nothing, while copying it there
+makes a second copy.
+.It Cm expunge Ar selection No ...
+Permanently remove the selected email(s)
+.Pq Ic UID EXPUNGE , No RFC 4315 .
+Needs access level
+.Ic full .
+Only messages already marked
+.Ic \eDeleted
+are removed, and this command never marks any itself: if none of the
+selected messages carries the flag it refuses and names
+.Cm flag add Ar selection Cm deleted
+as what marks them.
+Needs the server to advertise
+.Ic UIDPLUS ,
+and refuses without it \(em a plain
+.Ic EXPUNGE
+would remove every
+.Ic \eDeleted
+message in the mailbox rather than the named ones.
+There is deliberately no form that expunges a whole mailbox's
+.Ic \eDeleted
+set; compose it with
+.Cm search Ic DELETED .
 .It Cm part
 List or save the MIME parts of an email.
 .Bl -tag -width Ds -compact

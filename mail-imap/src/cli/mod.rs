@@ -251,6 +251,23 @@ struct MoveOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct CopyOutput<'a> {
+    folder: &'a str,
+    to: &'a str,
+    count: usize,
+    uids: &'a [u32],
+}
+
+#[derive(Serialize)]
+struct ExpungeOutput<'a> {
+    folder: &'a str,
+    /// How many of the selected UIDs were actually eligible (already
+    /// marked `\Deleted`) and so removed -- not how many were named.
+    count: usize,
+    uids: &'a [u32],
+}
+
+#[derive(Serialize)]
 struct FolderChangeOutput<'a> {
     action: &'a str,
     folder: &'a str,
@@ -493,9 +510,14 @@ struct AccessInfo<'a> {
 struct AccessMay {
     store_flags: bool,
     move_messages: bool,
+    /// Same rung as `move_messages`: the message keeps existing, one
+    /// more copy of it appears.
+    copy_messages: bool,
     change_folders: bool,
     delete_folders: bool,
     set_deleted: bool,
+    /// `UID EXPUNGE` a message already marked `\Deleted`.
+    expunge: bool,
 }
 
 #[derive(Serialize)]
@@ -531,6 +553,11 @@ struct ServerInfo {
     /// The path `move` will take: `UID MOVE`, `UID COPY + UID EXPUNGE`,
     /// or `refused`.
     filing: &'static str,
+    /// The path `expunge` will take: `UID EXPUNGE`, or `refused`
+    /// where the server has no UIDPLUS and a plain `EXPUNGE` would
+    /// take the whole mailbox's `\Deleted` set rather than the named
+    /// messages.
+    expunging: &'static str,
     /// `server` or `client`, for `-S` and for `thread`.
     sorting: &'static str,
     threading: &'static str,
@@ -632,9 +659,11 @@ fn build_info<'a>(
             may: AccessMay {
                 store_flags: level.may_store_flags(),
                 move_messages: level.may_move(),
+                copy_messages: level.may_move(),
                 change_folders: level.may_change_folders(),
                 delete_folders: level.may_delete_folder(),
                 set_deleted: level.may_set("\\Deleted"),
+                expunge: level.may_expunge(),
             },
         },
         folders: FoldersInfo {
@@ -658,6 +687,11 @@ fn build_info<'a>(
                 "UID MOVE"
             } else if has("UIDPLUS") {
                 "UID COPY + UID EXPUNGE"
+            } else {
+                "refused"
+            },
+            expunging: if has("UIDPLUS") {
+                "UID EXPUNGE"
             } else {
                 "refused"
             },
@@ -730,9 +764,11 @@ fn print_info(i: &InfoOutput) {
     const MAY: usize = 35;
     println!("  {:<MAY$} {}", "set and clear flags and tags", yes_no(i.access.may.store_flags));
     println!("  {:<MAY$} {}", "move mail to another folder", yes_no(i.access.may.move_messages));
+    println!("  {:<MAY$} {}", "copy mail into another folder", yes_no(i.access.may.copy_messages));
     println!("  {:<MAY$} {}", "create / rename / subscribe", yes_no(i.access.may.change_folders));
     println!("  {:<MAY$} {}", "delete a folder", yes_no(i.access.may.delete_folders));
     println!("  {:<MAY$} {}", "set \\Deleted", yes_no(i.access.may.set_deleted));
+    println!("  {:<MAY$} {}", "expunge a \\Deleted message", yes_no(i.access.may.expunge));
 
     println!();
     println!("Folders");
@@ -795,6 +831,7 @@ fn print_info(i: &InfoOutput) {
     println!();
     println!("This server");
     println!("  {:<19} {}", "moving mail", i.server.filing);
+    println!("  {:<19} {}", "expunging", i.server.expunging);
     println!("  {:<19} {}-side", "sorting (-S)", i.server.sorting);
     println!("  {:<19} {}-side", "threading", i.server.threading);
     println!(
@@ -1067,6 +1104,98 @@ pub fn move_messages(
             to,
             group
                 .uids
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// `copy <SELECTION...> <FOLDER>`: file a copy of the selected messages
+/// into the mailbox named last, leaving the originals where they are.
+/// Gated in `ImapClient` on `organize`, the same as `move`: the
+/// message keeps existing either way, one more copy of it appears. The
+/// target folder has to exist already, for the same reason `move`'s
+/// does.
+pub fn copy_messages(
+    config: &Config,
+    spec: &FolderSpec,
+    selections: &[Selection],
+    to: &str,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    let mut client = ImapClient::connect(config, debug)?;
+    let groups = selection_groups(&mut client, spec, config, selections)?;
+
+    for group in &groups {
+        client.copy_messages(&group.folder, &group.uids, to)?;
+        if json {
+            emit_json(&CopyOutput {
+                folder: &group.folder,
+                to,
+                count: group.uids.len(),
+                uids: &group.uids,
+            })?;
+            continue;
+        }
+        println!(
+            "Copied {} message(s) from '{}' into '{}': UIDs {}",
+            group.uids.len(),
+            group.folder,
+            to,
+            group
+                .uids
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// `expunge <SELECTION...>`: permanently remove the selected messages
+/// that already carry `\Deleted` (`UID EXPUNGE`). Gated in
+/// `ImapClient` on `full`. This never sets `\Deleted` itself -- of the
+/// selected UIDs, only the ones already marked are removed, and how
+/// many is what gets reported; `flag add <selection> deleted` is what
+/// marks a message for removal in the first place.
+///
+/// There is deliberately no form of this command that takes no
+/// selection and expunges everything marked `\Deleted` in a mailbox --
+/// that is the unbounded action `move_messages` already refuses to
+/// take on a server without UIDPLUS. `search DELETED` gives the UIDs;
+/// this takes them.
+pub fn expunge_messages(
+    config: &Config,
+    spec: &FolderSpec,
+    selections: &[Selection],
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    let mut client = ImapClient::connect(config, debug)?;
+    let groups = selection_groups(&mut client, spec, config, selections)?;
+
+    for group in &groups {
+        let removed = client.expunge_messages(&group.folder, &group.uids)?;
+        if json {
+            emit_json(&ExpungeOutput {
+                folder: &group.folder,
+                count: removed.len(),
+                uids: &removed,
+            })?;
+            continue;
+        }
+        println!(
+            "Removed {} of {} selected message(s) in '{}' (only the ones marked \\Deleted): \
+             UIDs {}",
+            removed.len(),
+            group.uids.len(),
+            group.folder,
+            removed
                 .iter()
                 .map(|u| u.to_string())
                 .collect::<Vec<_>>()
@@ -2476,10 +2605,14 @@ mod tests {
         assert_eq!(out.server.sorting, "client");
         assert_eq!(out.server.threading, "client");
         assert!(!out.server.create_special_use);
-        // organize: flags and filing yes, the tree and \Deleted no.
+        // organize: flags and filing (move, copy) yes, the tree,
+        // \Deleted and expunge no -- expunge is held to the same rung
+        // as setting \Deleted itself.
         assert_eq!(out.access.effective, "organize");
         assert!(out.access.may.store_flags && out.access.may.move_messages);
+        assert!(out.access.may.copy_messages);
         assert!(!out.access.may.change_folders && !out.access.may.set_deleted);
+        assert!(!out.access.may.expunge);
     }
 
     #[test]

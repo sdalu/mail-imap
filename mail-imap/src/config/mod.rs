@@ -54,6 +54,14 @@ impl AccessLevel {
         self >= AccessLevel::Full
     }
 
+    /// May `UID EXPUNGE` remove messages already marked `\Deleted`?
+    /// Setting `\Deleted` itself already needs `full` (`may_set`), and
+    /// removing a message so marked is the same destruction, so this
+    /// asks for the same level rather than a lesser one.
+    pub fn may_expunge(self) -> bool {
+        self >= AccessLevel::Full
+    }
+
     /// May the folder tree be changed — created, renamed, subscribed?
     /// `organize` deliberately stops short: it moves messages between
     /// folders that already exist and leaves the tree alone.
@@ -442,6 +450,17 @@ mod tests {
     #[test]
     fn full_permits_everything() {
         assert!(AccessLevel::Full.may_set("\\Deleted"));
+        assert!(AccessLevel::Full.may_expunge());
+    }
+
+    #[test]
+    fn only_full_may_expunge() {
+        // Same rung as setting \Deleted itself: marking a message for
+        // removal and removing it are both destruction.
+        assert!(!AccessLevel::ReadOnly.may_expunge());
+        assert!(!AccessLevel::Organize.may_expunge());
+        assert!(!AccessLevel::Restructure.may_expunge());
+        assert!(AccessLevel::Full.may_expunge());
     }
 
     #[test]
