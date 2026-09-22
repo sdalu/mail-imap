@@ -211,6 +211,14 @@ Both share one backend operation (`store_flags`) and one handler
   base64. Which is why a decoded gloss can read as nonsense ("r檉gie")
   while the tag was plainly "régie" — the case was lost before this
   tool ever saw the name, and no decoder can put it back.
+- `src/cli/tbkey.rs` reads the current scheme back, so `tag list` shows
+  `r=c3=a9gie ("régie", Thunderbird tag key)`. Decoding only: this tool
+  writes IMAP's own modified UTF-7 rather than adopting one client's
+  scheme, but what it owes a reader is the ability to read what that
+  client wrote. The decoder refuses anything `AddTag` could not have
+  emitted — a raw `&` or space, non-ASCII, a truncated `=xx`, bytes that
+  are not UTF-8 — so an ordinary keyword is never glossed as if it were
+  a key.
 - That registry is shared with JMAP, which spells four IMAP system flags
   as `$`-keywords (RFC 8621 §4.1.1 changes their leading `\` to `$`),
   plus `$recent`. Those five are refused with the flag they stand for,
@@ -218,7 +226,12 @@ Both share one backend operation (`store_flags`) and one handler
 - Keyword names are IMAP atoms, which are ASCII, so anything else
   travels as modified UTF-7 (RFC 3501 §5.1.3, `src/cli/modutf7.rs`).
   `tag add 5 -- régie` sends `r&AOk-gie`; sending the raw bytes would be
-  a malformed command, not a nicety. **Input is literal text and every
+  a malformed command, not a nicety. Names are NFC-composed first
+  (`unicode-normalization`): "régie" typed on a system that hands over
+  `e` + U+0301 would otherwise encode to a different atom that looks
+  identical in every listing, and a later `tag remove` spelled the other
+  way would silently miss it. `--wire` composes nothing, being verbatim
+  by definition. **Input is literal text and every
   `&` is escaped to `&-`**; `--wire` sends the names verbatim, which is
   how a key copied out of a listing goes back. An earlier rule passed a
   name through whenever it happened to decode, which is undecidable from

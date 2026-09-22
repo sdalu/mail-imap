@@ -1,12 +1,14 @@
 pub mod keywords;
 pub mod modutf7;
 pub mod select;
+pub mod tbkey;
 
 use crate::config::Config;
 use crate::imap::{FolderInfo, ImapBackend, ImapClient, Mailbox, PartInfo, SearchResult};
 use anyhow::{bail, Result};
 use serde::Serialize;
 use select::Selection;
+use unicode_normalization::UnicodeNormalization;
 use std::path::PathBuf;
 
 /// The folders a command works on, as given on the command line:
@@ -251,10 +253,17 @@ struct PartsSaveOutput<'a> {
 fn gloss(flags: &[String]) -> Vec<String> {
     flags
         .iter()
-        .map(|f| match (keywords::meaning(f), modutf7::decoded_display(f)) {
-            (Some(means), _) => format!("{} ({})", f, means),
-            (None, Some(text)) => format!("{} (\"{}\", modified UTF-7)", f, text),
-            (None, None) => f.clone(),
+        .map(|f| {
+            if let Some(means) = keywords::meaning(f) {
+                return format!("{} ({})", f, means);
+            }
+            if let Some(text) = modutf7::decoded_display(f) {
+                return format!("{} (\"{}\", modified UTF-7)", f, text);
+            }
+            if let Some(text) = tbkey::decode(f) {
+                return format!("{} (\"{}\", Thunderbird tag key)", f, text);
+            }
+            f.clone()
         })
         .collect()
 }
@@ -772,8 +781,24 @@ pub fn parse_flag_names(names: &[String], system: bool, wire_form: bool) -> Resu
         // default is literal, and `--wire` is how a key copied out of a
         // listing goes back verbatim.
         let wire = if wire_form {
+            // --wire says "this is already an atom", and an atom is
+            // ASCII. Sending the raw bytes would be a malformed command.
+            if !name.is_ascii() {
+                bail!(
+                    "'{}' is not ASCII, so it cannot be a wire keyword: drop --wire and \
+                     let it be encoded (it would be sent as '{}')",
+                    name,
+                    modutf7::encode(name)
+                );
+            }
             name.to_string()
         } else {
+            // Compose first: "régie" typed on a Mac may arrive as e +
+            // U+0301, which would encode to a different atom that looks
+            // identical in every listing, and which a later `tag remove`
+            // spelled the other way would silently miss.
+            let composed: String = name.nfc().collect();
+            let name: &str = &composed;
             let encoded = modutf7::encode(name);
             if encoded != name && modutf7::is_canonical(name) {
                 eprintln!(
@@ -1363,6 +1388,14 @@ mod tests {
     }
 
     #[test]
+    fn a_thunderbird_key_is_read_back() {
+        let flags = vec!["r=c3=a9gie".to_string(), "my=20tag".to_string()];
+        let shown = gloss(&flags);
+        assert_eq!(shown[0], "r=c3=a9gie (\"régie\", Thunderbird tag key)");
+        assert_eq!(shown[1], "my=20tag (\"my tag\", Thunderbird tag key)");
+    }
+
+    #[test]
     fn non_ascii_keywords_go_out_as_modified_utf7() {
         // An IMAP atom is ASCII, so this is correctness, not a nicety:
         // sending "régie" raw would be a malformed command.
@@ -1435,6 +1468,43 @@ mod tests {
                 bad
             );
         }
+    }
+
+    #[test]
+    fn decomposed_names_are_composed_before_encoding() {
+        // "régie" typed on a Mac can arrive as e + U+0301. Encoded as
+        // it stands it becomes a different atom that looks identical in
+        // every listing, and a later `tag remove` spelled the other way
+        // would silently miss it.
+        let nfd = "re\u{301}gie".to_string();
+        let nfc = "régie".to_string();
+        assert_ne!(nfd, nfc, "the two inputs really are different strings");
+        assert_eq!(
+            parse_flag_names(std::slice::from_ref(&nfd), false, false).unwrap(),
+            vec!["r&AOk-gie"]
+        );
+        assert_eq!(
+            parse_flag_names(&[nfd, nfc], false, false).unwrap(),
+            vec!["r&AOk-gie"],
+            "and the two spellings are one keyword"
+        );
+    }
+
+    #[test]
+    fn wire_mode_refuses_what_cannot_be_an_atom() {
+        // --wire says "this is already an atom", and an atom is ASCII —
+        // which also makes composition moot there: no decomposed name
+        // can reach wire mode in the first place.
+        let err = parse_flag_names(&["régie".into()], false, true)
+            .expect_err("an atom is ASCII");
+        assert!(err.to_string().contains("r&AOk-gie"), "{}", err);
+        let nfd = "re\u{301}gie".to_string();
+        assert!(parse_flag_names(std::slice::from_ref(&nfd), false, true).is_err());
+        // An ASCII name still goes through untouched.
+        assert_eq!(
+            parse_flag_names(&["r&AOk-gie".into()], false, true).unwrap(),
+            vec!["r&AOk-gie"]
+        );
     }
 
     #[test]

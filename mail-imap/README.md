@@ -39,7 +39,9 @@ the tool can be built, demoed and unit-tested without a reachable server.
   a known keyword is sent in its settled spelling, a convention keyword
   is glossed when listed, and `tag known` prints both tables
 - Handles modified UTF-7 keywords (RFC 3501 §5.1.3): `tag add … -- régie`
-  sends `r&AOk-gie`, and `tag list` decodes what it shows
+  sends `r&AOk-gie` (NFC-composed first), and `tag list` decodes what it
+  shows — including Thunderbird's own `=xx` tag keys
+  (`r=c3=a9gie` → "régie")
 - JSON output mode (`-j`) for programmatic use
 - Configuration via JSON file
 - RFC 2047 subject decoding (UTF-8, Latin-1, B & Q encodings)
