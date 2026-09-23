@@ -102,7 +102,10 @@ Gate: `make check && make tests`
   every worker dies with *"does not exist, refusing to create it"*.
   The baseline build and test succeed first, which makes it look like
   a code problem rather than a layout one. `.gitignore` carries
-  `mutants.out/`, so this has been run here before.
+  `mutants.out/`, so this has been run here before. A run over
+  `src/imap/real.rs` also needs the wire runner, or every mutant in it
+  "survives" because the ignored wire tests never ran — CHECKLIST.md
+  carries that command line, and the survivors already accounted for.
 - **The tree is not rustfmt-clean.** Do not run `cargo fmt` across it as
   part of another change: the reformatting of untouched code buries the
   diff. Format the lines you write.

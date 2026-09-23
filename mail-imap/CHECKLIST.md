@@ -197,6 +197,14 @@ they want opposite answers:
       that moves twice for one body of work tells a reader less than
       one that moves once. It lives in one file: `Cargo.toml`. There is no `make
       tag`: the tags belong to the AiTools repository this tree sits in.
+- [ ] **When it moves, the README's sample output moves with it, and
+      nothing checks that.** `make check-version` greps `src` only —
+      which is right, since the point is that the code reads
+      `CARGO_PKG_VERSION` — so it never sees the two places the README
+      *prints* a version: the `info` text output and the `-j` object
+      beside it. Both said 0.2.0 while `Cargo.toml` said 0.3.0, and
+      every gate passed. Grep the documents for the old number before
+      believing the bump is done.
 
 Then capture: whatever this round learned goes to the artifact that owns
 that kind of fact, and anything this list failed to ask becomes a line

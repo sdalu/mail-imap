@@ -315,7 +315,7 @@ and `LIST`, and changes nothing.
 
 ```console
 $ mail-imap -c incal.conf info
-mail-imap 0.2.0 (real backend)
+mail-imap 0.3.0 (real backend)
   config      incal.conf
   account     user@example.com@imap.example.com:993 (implicit TLS)
 
@@ -378,7 +378,7 @@ What each block is for:
 `-j` gives the same thing as one object:
 
 ```json
-{"tool":{"name":"mail-imap","version":"0.2.0","backend":"real"},
+{"tool":{"name":"mail-imap","version":"0.3.0","backend":"real"},
  "config":{"path":"incal.conf","server":"imap.example.com","port":993,
            "tls":"implicit","insecure":false,"username":"user@example.com"},
  "access":{"effective":"organize","configured":"organize",
@@ -1056,9 +1056,11 @@ access-level = organize
 ```
 
 **UCL is a superset of JSON**, so a config written as a JSON object is
-read unchanged — [`example-config.json`](example-config.json) is the
-same settings in that form, and any config written before the switch
-keeps working. What UCL adds is the part a hand-edited file wants:
+read unchanged, and any config written before the switch keeps working
+— `json_is_still_a_valid_config_because_ucl_is_a_superset`
+(`src/config/mod.rs`) is what holds that claim up, rather than a sample
+file that could rot beside it. What UCL adds is the part a hand-edited
+file wants:
 comments, bare keys, no commas, no outer braces, and unquoted values
 where they are unambiguous.
 
