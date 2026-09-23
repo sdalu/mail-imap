@@ -350,7 +350,14 @@ pub fn canonical_folder(name: &str) -> String {
 /// `*` matches any sequence of characters, `%` any sequence that does
 /// not cross `delimiter`. Matching is case-sensitive except for the
 /// special mailbox INBOX, which IMAP defines as case-insensitive.
-pub fn folder_matches(pattern: &str, name: &str, delimiter: char) -> bool {
+///
+/// `delimiter` is `None` when the `LIST` entry reported `NIL`, which
+/// RFC 3501 defines as "this name has no hierarchy" — not as "the
+/// usual separator". There is then no boundary for `%` to stop at, so
+/// it matches whatever `*` would. Substituting a plausible `/` instead
+/// would refuse RFC 3501's own example, the mailbox literally named
+/// `extended/notes`, whose slash is part of the name.
+pub fn folder_matches(pattern: &str, name: &str, delimiter: Option<char>) -> bool {
     if pattern.eq_ignore_ascii_case("INBOX") && name.eq_ignore_ascii_case("INBOX") {
         return true;
     }
@@ -358,7 +365,7 @@ pub fn folder_matches(pattern: &str, name: &str, delimiter: char) -> bool {
     matches_at(&p, &n, 0, 0, delimiter)
 }
 
-fn matches_at(p: &[char], n: &[char], pi: usize, ni: usize, delim: char) -> bool {
+fn matches_at(p: &[char], n: &[char], pi: usize, ni: usize, delim: Option<char>) -> bool {
     if pi == p.len() {
         return ni == n.len();
     }
@@ -373,7 +380,7 @@ fn matches_at(p: &[char], n: &[char], pi: usize, ni: usize, delim: char) -> bool
                 if i == n.len() {
                     return false;
                 }
-                if !crosses && n[i] == delim {
+                if !crosses && delim.is_some_and(|d| n[i] == d) {
                     return false;
                 }
                 i += 1;
@@ -410,10 +417,10 @@ pub fn expand_folders(
         }
         let before = out.len();
         for (name, delimiter) in known {
-            let delim = delimiter
-                .as_ref()
-                .and_then(|d| d.chars().next())
-                .unwrap_or('/');
+            // NIL (and the empty string some servers send for it) is
+            // "no hierarchy", not "the usual separator": see
+            // `folder_matches`.
+            let delim = delimiter.as_ref().and_then(|d| d.chars().next());
             if folder_matches(pattern, name, delim) && !out.contains(name) {
                 out.push(name.clone());
             }
@@ -678,14 +685,60 @@ mod tests {
 
     #[test]
     fn folder_patterns_follow_imap_wildcards() {
-        assert!(folder_matches("*", "Archive/2026", '/'));
-        assert!(folder_matches("Archive/*", "Archive/2026/Q1", '/'));
-        assert!(folder_matches("Archive/%", "Archive/2026", '/'));
-        assert!(!folder_matches("Archive/%", "Archive/2026/Q1", '/'));
-        assert!(folder_matches("Arch*", "Archive", '/'));
-        assert!(!folder_matches("Arch", "Archive", '/'));
-        assert!(folder_matches("inbox", "INBOX", '/'));
-        assert!(!folder_matches("Sent", "Sent Items", '/'));
+        assert!(folder_matches("*", "Archive/2026", Some('/')));
+        assert!(folder_matches("Archive/*", "Archive/2026/Q1", Some('/')));
+        assert!(folder_matches("Archive/%", "Archive/2026", Some('/')));
+        assert!(!folder_matches("Archive/%", "Archive/2026/Q1", Some('/')));
+        assert!(folder_matches("Arch*", "Archive", Some('/')));
+        assert!(!folder_matches("Arch", "Archive", Some('/')));
+        assert!(folder_matches("inbox", "INBOX", Some('/')));
+        assert!(!folder_matches("Sent", "Sent Items", Some('/')));
+    }
+
+    #[test]
+    fn a_nil_delimiter_leaves_percent_nothing_to_stop_at() {
+        // RFC 3501's own LIST example is a mailbox named
+        // `extended/notes` with a NIL delimiter: the slash is part of
+        // the name, not a boundary. Substituting '/' made `%` stop at
+        // it and `-f 'extended/%'` match nothing.
+        assert!(folder_matches("extended/%", "extended/notes", None));
+        assert!(folder_matches("%", "extended/notes", None));
+        assert!(folder_matches("*", "extended/notes", None));
+        // Without a hierarchy, `%` and `*` agree everywhere.
+        for name in ["INBOX", "extended/notes", "a/b/c", ""] {
+            assert_eq!(
+                folder_matches("%", name, None),
+                folder_matches("*", name, None),
+                "{name}"
+            );
+        }
+        // A NIL delimiter widens `%`; it does not make it match a
+        // literal that was never there.
+        assert!(!folder_matches("Arch%", "Sent", None));
+    }
+
+    #[test]
+    fn a_nil_delimiter_expands_per_entry() {
+        // The delimiter is per mailbox on the wire, so one NIL entry
+        // must not widen `%` for the entries that reported one -- and
+        // the empty string some servers send for NIL reads as NIL.
+        let known = vec![
+            ("extended/notes".to_string(), None),
+            ("Archive/2026".to_string(), Some("/".to_string())),
+            ("flat/name".to_string(), Some(String::new())),
+        ];
+        assert_eq!(
+            expand_folders(&["%".to_string()], &known).unwrap(),
+            vec!["extended/notes", "flat/name"]
+        );
+        assert_eq!(
+            expand_folders(&["extended/%".to_string()], &known).unwrap(),
+            vec!["extended/notes"]
+        );
+        assert_eq!(
+            expand_folders(&["*".to_string()], &known).unwrap(),
+            vec!["extended/notes", "Archive/2026", "flat/name"]
+        );
     }
 
     #[test]

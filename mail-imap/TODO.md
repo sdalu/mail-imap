@@ -42,18 +42,6 @@ not have.
   header — a header fetch on the very path that exists to avoid one —
   so it is worth doing only for someone who actually needs sent-date
   ordering on a server without `SORT`.
-- **`%` mis-defaults a NIL hierarchy delimiter to `/`.** A `LIST`
-  entry may report NIL for its delimiter — RFC 3501's own example is a
-  mailbox literally named `extended/notes`, where the `/` is part of
-  the name and not a separator. `expand_folders`
-  (`src/cli/select.rs`) substitutes `'/'` when the delimiter is None,
-  so `-f 'extended/%'` refuses to match it: `%` stops at a `/` the
-  server said was not a boundary. Narrow — it needs a server that
-  emits NIL for a name containing a slash — and the fix is a small
-  design decision rather than a line: either treat NIL as "no
-  delimiter" so `%` behaves like `*` for that entry, or fall back to
-  the config's `delimiter`, which is currently collected for `info`
-  and used nowhere else.
 - **The connect phase is still unbounded.** `timeout` covers a server
   that accepts and then goes quiet, and cannot cover the dial or the
   TLS handshake, which `ClientBuilder` owns — nor a stalled write,
@@ -69,8 +57,9 @@ Done and out of this list: the `SEARCH` charset declaration,
 `folder list --subscribed`), §4 (`copy` and `expunge`), §5 (`append`),
 §6 (`part strip`), §1 (`read` showing the readable text), the
 `password-command` half of §2, and four of §7 — the session read
-timeout, SIGPIPE, shell completions, and `parse_flag_names` no longer
-refusing an empty list. What they
+timeout, SIGPIPE, shell completions, `parse_flag_names` no longer
+refusing an empty list, and the NIL hierarchy delimiter `%` used to
+mis-default to `/`. What they
 left behind is recorded where it belongs rather than here: the untested
 charset fallback in DESIGN.md under *Declaring a charset on `SEARCH`*,
 why `fetch_part` is the trait's primitive under *MIME parsing*, where
@@ -78,8 +67,11 @@ the line falls between `restructure` and `full` under *Access level*,
 why `expunge` never marks `\Deleted` itself under *Copying and
 expunging*, why a lone LF is normalised before an `append` under
 *Putting a message in*, and why `part strip` writes before it deletes
-under *Stripping a part*, and why the message renderer sits in one
-place rather than in each backend under *Reading a message*.
+under *Stripping a part*, why the message renderer sits in one
+place rather than in each backend under *Reading a message*, and why a
+NIL delimiter makes `%` behave like `*` for that mailbox — and why the
+config's `delimiter` is not the fallback — under *Telling selections
+from names*.
 
 The numbers of what remains do not close up as entries leave: §1, §2
 and §7 keep the numbers they were given. Nothing cites another entry

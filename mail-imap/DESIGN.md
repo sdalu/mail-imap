@@ -864,6 +864,23 @@ passed through even if the server never mentioned it). `-A`/
 With no `-f`/`-A`, the default is `Config::folder` (`INBOX`), except for
 `count`, which defaults to every selectable mailbox.
 
+**A `NIL` delimiter means no hierarchy, not the usual separator.** The
+delimiter is per mailbox (see `info`, above), and a `LIST` entry may
+report `NIL` for it. `folder_matches` therefore takes an
+`Option<char>`, and `%` with `None` has no boundary to stop at, so it
+matches whatever `*` would — decided per entry, so one `NIL` mailbox
+does not widen `%` for the mailboxes that reported a delimiter. The
+alternative was to substitute a plausible `/`, which is what the code
+did and what made this wrong: RFC 3501's own `LIST` example is a
+mailbox literally named `extended/notes` with a `NIL` delimiter, and
+`-f 'extended/%'` refused to match it because `%` stopped at a slash
+the server had said was part of the name. The config's `delimiter` is
+*not* the fallback either — it is advisory and exists to be reported
+(above), so letting it decide what matches would make a field that
+rewrites nothing quietly rewrite which mailboxes a command touches.
+The empty string some servers send in place of `NIL` reads as `NIL`
+here, the same reading `info` already gives it.
+
 ### MIME parsing (`mime.rs`)
 
 `part` works on the raw RFC822 bytes: headers are unfolded and parsed

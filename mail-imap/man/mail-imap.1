@@ -74,6 +74,15 @@ A
 in the pattern crosses the hierarchy delimiter; a
 .Ql %
 does not.
+A mailbox whose
+.Ic LIST
+entry reports
+.Ql NIL
+for its delimiter has no hierarchy, so
+.Ql %
+matches there whatever
+.Ql *
+would.
 Repeatable and comma-separated.
 Default: the config's
 .Ic folder

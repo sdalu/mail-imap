@@ -575,7 +575,10 @@ different atom. JSON always carries the wire form.
   does not, so `-f 'Archive/*'` and `-f 'Archive/%'` differ. A pattern is
   matched against the mailbox list; a pattern matching no mailbox is an
   error. A literal name is passed through untouched even if `LIST` did
-  not report it;
+  not report it. A mailbox whose `LIST` entry reports no delimiter has
+  no hierarchy to cross, so `%` matches there whatever `*` would —
+  a name like `extended/notes` under a `NIL` delimiter is one name,
+  not two levels;
 - `-A`/`--all-folders` is exactly shorthand for `-f '*'`;
 - `INBOX` matches case-insensitively (as IMAP requires); other names do
   not;
