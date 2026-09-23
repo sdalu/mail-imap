@@ -23,6 +23,14 @@ if [ ! -x "$BIN" ]; then
 	exit 1
 fi
 
+# Absolute, because the examples are run from a scratch directory
+# rather than from the tree (see below), and a relative path would not
+# survive the move.
+case $BIN in
+/*) ;;
+*) BIN=$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN") ;;
+esac
+
 if [ $# -gt 0 ]; then
 	files=$*
 else
@@ -107,7 +115,13 @@ while IFS='	' read -r f args; do
 	# Run it in a child shell rather than with eval: a documented line
 	# with unbalanced quotes is itself a finding, and must not take
 	# this script down with it.
-	out=$(printf '%s %s\n' "$BIN" "$args" | sh 2>&1 || true)
+	# Run from the scratch directory, not from the tree. A documented
+	# `part save` writes its part into the working directory by
+	# design, so running these where they are written left an
+	# untracked `uid1_part1` in the repository after every `make
+	# tests` -- litter that makes `git status` dirty for a check that
+	# is supposed to change nothing.
+	out=$(printf '%s %s\n' "$BIN" "$args" | (cd "$work" && sh) 2>&1 || true)
 	checked=$((checked + 1))
 
 	case $out in

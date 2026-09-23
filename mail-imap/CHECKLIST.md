@@ -129,6 +129,11 @@ Three survivors are standing, and none of them is a test gap:
   server that states its PERMANENTFLAGS — and GreenMail always does.
   Equivalent here; distinguishable only on a server that stays silent.
 
+A **TIMEOUT** in the report is a third thing, and it is fine: the
+mutant made the code loop forever (`i += 1` into `i *= 1` in
+`matches_at`, say, or its `&&` into `||`) and the run was killed rather
+than passing. A test suite that hangs has noticed. Leave them.
+
 **Do not chase 100%.** A surviving mutant is one of two things, and
 they want opposite answers:
 

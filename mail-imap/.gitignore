@@ -6,5 +6,8 @@ target/
 # cargo-mutants scratch output
 mutants.out/
 mutants.out.old/
+# a mutant that loops forever is killed, and a killed process dumps
+# core here -- see CHECKLIST.md, where TIMEOUT is an expected result
+*.core
 # scratch for the test server: fetched jar + its runtime state
 tests-tmp/

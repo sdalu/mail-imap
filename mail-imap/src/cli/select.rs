@@ -684,6 +684,50 @@ mod tests {
     }
 
     #[test]
+    fn a_matchless_item_is_named_in_the_refusal_as_it_was_written() {
+        // The refusal exists because doing silently less than asked is
+        // the worst outcome on a mutating command -- so it has to say
+        // WHICH item found nothing, in the spelling that was typed, or
+        // a `move 4-7,9-11 Archive` that half-matched leaves the reader
+        // guessing at which half. Nothing asserted the text, and
+        // mutation testing found it: replacing `show_item`'s whole body
+        // with the empty string survived the suite.
+        // Every selection here carries a matching item beside the
+        // matchless one, so the item's own spelling is not also the
+        // whole selection's -- otherwise an empty `show_item` still
+        // leaves the right characters in the message, by way of the
+        // source, and the assertion passes for the wrong reason. (It
+        // did, on the first attempt at this test.)
+        let err = |token: &str, available: &[u32]| {
+            sel(token)
+                .resolve(Some(available))
+                .expect_err(token)
+                .to_string()
+        };
+        // A count matches whatever exists, so it is only matchless
+        // when the mailbox is empty; a range or a `from` needs only to
+        // fall outside what is there.
+        let cases: [(&str, &str, &[u32]); 4] = [
+            ("1,4-7", "4-7", &[1]),
+            ("1,99-", "99-", &[1]),
+            ("1,last:2", "last:2", &[]),
+            ("1,first:2", "first:2", &[]),
+        ];
+        for (token, item, available) in cases {
+            let text = err(token, available);
+            assert!(
+                text.starts_with(&format!("'{}' of selection '{}'", item, token)),
+                "the refusal must name the item, then the selection: {}",
+                text
+            );
+            assert!(text.contains("matched no message"), "{}", text);
+        }
+        // `*` cannot share a selection with anything (it is the whole
+        // mailbox), so it is checked on its own against no messages.
+        assert!(err("*", &[]).starts_with("'*' of selection '*'"));
+    }
+
+    #[test]
     fn folder_patterns_follow_imap_wildcards() {
         assert!(folder_matches("*", "Archive/2026", Some('/')));
         assert!(folder_matches("Archive/*", "Archive/2026/Q1", Some('/')));
@@ -693,6 +737,18 @@ mod tests {
         assert!(!folder_matches("Arch", "Archive", Some('/')));
         assert!(folder_matches("inbox", "INBOX", Some('/')));
         assert!(!folder_matches("Sent", "Sent Items", Some('/')));
+        // A pattern LONGER than the name runs the matcher off the end
+        // of it. Nothing tested that direction -- every case above has
+        // the name at least as long as the pattern -- and the bound
+        // that stops it is one character of one comparison: mutation
+        // testing turned `ni < n.len()` into `ni <= n.len()`, which
+        // indexes one past the end and panics, and the suite passed.
+        assert!(!folder_matches("Archive", "Arch", Some('/')));
+        assert!(!folder_matches("Archive/2026", "Archive/", Some('/')));
+        assert!(!folder_matches("A", "", Some('/')));
+        // The wildcards take their own route to the same edge.
+        assert!(!folder_matches("Arch*ive", "Arch", Some('/')));
+        assert!(!folder_matches("Arch%ive", "Arch", Some('/')));
     }
 
     #[test]
