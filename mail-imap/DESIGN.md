@@ -1351,6 +1351,17 @@ cargo run --release -- -c incal.conf -f INBOX search "SINCE 01-Jan-2026"
 
 ## Output
 
+**Every handler writes to a writer it is handed** (`out: &mut dyn
+Write`), and `main.rs` is the only place the real stdout is named: it
+locks it once for the run and passes it in. That is not ceremony. When
+the handlers printed with `println!`, a test could call one and see
+only its `Result` -- 152 of `cli/mod.rs`'s 368 mutants survived on
+that alone, and `read_emails`' whole body could be replaced with
+`Ok(())` unnoticed. Writing to a handle means a test can read back
+what a command printed, which is what the output tests in
+`src/cli/mod.rs` do. Locking once, rather than per line, is also what
+keeps a long listing from interleaving with anything else.
+
 Commands print human-readable text by default. With `-j`/`--json` each
 command prints a single compact JSON object to stdout instead; errors
 become `{"error": "..."}` on stderr (the exit code is unchanged either
@@ -1359,8 +1370,9 @@ in one place: [JSON output (`-j`) in README.md](README.md#json-output--j).
 What is decided here is how they are shaped.
 
 - **A stream of objects, not one wrapping array**, for everything that
-  can produce more than one. `emit_json` is `println!` of
-  `serde_json::to_string`, so each object is exactly one line and a
+  can produce more than one. `emit_json` writes
+  `serde_json::to_string` and a newline, so each object is exactly one
+  line and a
   caller reads the output line by line. Each is printed as it is
   finished, so the first folder's results arrive before the last folder
   has been touched, and a run that dies half-way has still delivered

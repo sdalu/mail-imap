@@ -168,6 +168,17 @@ they want opposite answers:
   (`len()`, `contains`) where the thing that matters is a *value*: a
   mutant turning `i + 1` into `i` survived `attachments.len() == 1`
   and would have renumbered every part.
+
+  **This one shape accounts for most of what the passes have found**,
+  and it recurs in the tests written to fix a mutant. `is_err()` where
+  the refusal's *wording* is the point (`parse_sort`,
+  `parse_flag_names`, `tbkey::decode`); `contains("4-7")` where those
+  same characters also appear elsewhere in the message;
+  `contains("\n\n---")` where the content already ended in a newline
+  and only *three* newlines distinguished the case. Every one of them
+  passed before the fix as well as after. So when a test is written to
+  kill a mutant, run the mutant again: a fix believed rather than
+  measured is how a gap survives its own repair.
 - an **equivalent mutant** — no input distinguishes it, so no test
   can. `decode_charset_bytes`'s `"utf-8"` arm does exactly what its
   fallback does; `rewrite_part`'s depth guard cannot fire because
