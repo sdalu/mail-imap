@@ -98,11 +98,35 @@ pub fn sort_results(results: &mut [SearchResult], spec: &SortCriteria) {
     }
 }
 
+/// The instant a `SearchResult`'s date string names, for ordering.
+///
+/// `None` sorts before everything, which is where a message with no
+/// internaldate already sat when this was a string comparison. A date
+/// that will not parse falls back to the same place rather than to a
+/// wrong instant: refusing to guess is the only honest option, and it
+/// is at worst the behaviour this had before.
+fn instant(date: &Option<String>) -> Option<i64> {
+    let text = date.as_deref()?;
+    chrono::DateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S %z")
+        .ok()
+        .map(|d| d.timestamp())
+}
+
 fn compare(a: &SearchResult, b: &SearchResult, key: SortKey) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match key {
         SortKey::Uid => a.uid.cmp(&b.uid),
-        SortKey::Date | SortKey::Arrival => a.date.cmp(&b.date),
+        // Compared as instants, not as the strings they are printed
+        // as. `date` carries its own UTC offset (`... -0400`), so a
+        // plain string comparison orders two messages by their local
+        // wall clocks: across a DST change or two senders in different
+        // zones, "01:30 -0400" sorts after "01:15 -0500" although it
+        // happened 45 minutes EARLIER. Silent, and invisible to the
+        // reader, who sees only a list in the wrong order.
+        //
+        // The mock stamps every message "+0000", which is exactly why
+        // neither the offline suite nor the wire tests could catch it.
+        SortKey::Date | SortKey::Arrival => instant(&a.date).cmp(&instant(&b.date)),
         SortKey::Size => a.size.cmp(&b.size),
         SortKey::Subject => a.subject.to_lowercase().cmp(&b.subject.to_lowercase()),
         SortKey::From => a.from.to_lowercase().cmp(&b.from.to_lowercase()),
@@ -188,5 +212,37 @@ mod tests {
         let mut results = vec![result(1, "Zebra", "a@x", 1), result(2, "apple", "a@x", 1)];
         sort_results(&mut results, &parse_sort("subject").unwrap());
         assert_eq!(uids(&results), vec![2, 1]);
+    }
+
+    #[test]
+    fn dates_are_ordered_as_instants_not_as_printed_strings() {
+        // The "fall back" hour, which every long-lived mailbox has:
+        // 01:30 -0400 is 05:30 UTC, and 01:15 -0500 is 06:15 UTC --
+        // so the SECOND one happened later, though its printed string
+        // sorts first. A string comparison got this exactly backwards.
+        let mut rs = vec![
+            result_dated(2, "2026-11-01 01:15:00 -0500"), // 06:15 UTC, later
+            result_dated(1, "2026-11-01 01:30:00 -0400"), // 05:30 UTC, earlier
+        ];
+        let spec = parse_sort("date").expect("parse");
+        sort_results(&mut rs, &spec);
+        assert_eq!(
+            rs.iter().map(|r| r.uid).collect::<Vec<_>>(),
+            vec![1, 2],
+            "ascending by date must put the earlier INSTANT first"
+        );
+    }
+
+    fn result_dated(uid: u32, date: &str) -> SearchResult {
+        SearchResult {
+            uid,
+            folder: "INBOX".to_string(),
+            subject: String::new(),
+            from: String::new(),
+            date: Some(date.to_string()),
+            size: None,
+            flags: Vec::new(),
+            parts: 0,
+        }
     }
 }

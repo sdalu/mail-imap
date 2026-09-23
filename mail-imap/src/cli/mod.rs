@@ -110,10 +110,14 @@ pub fn resolve_groups(
         } else {
             None
         };
+        // Same reason as `Selection::resolve`'s own set: input order is
+        // the contract, but asking "seen already" must not be a scan of
+        // everything collected so far.
         let mut uids: Vec<u32> = Vec::new();
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for selection in &selections {
             for uid in selection.resolve(available.as_deref())? {
-                if !uids.contains(&uid) {
+                if seen.insert(uid) {
                     uids.push(uid);
                 }
             }

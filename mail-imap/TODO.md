@@ -34,6 +34,26 @@ not have.
 
 ## 7. Smaller, still real
 
+- **Client-side `--sort date` and `--sort arrival` are the same
+  ordering.** Server-side they are distinct (`UID SORT` is sent `DATE`
+  or `ARRIVAL`), but `SearchResult` carries only the internaldate, so
+  the client-side fallback cannot tell them apart and silently treats
+  `date` as `arrival`. Closing it means fetching each hit's `Date:`
+  header — a header fetch on the very path that exists to avoid one —
+  so it is worth doing only for someone who actually needs sent-date
+  ordering on a server without `SORT`.
+- **`%` mis-defaults a NIL hierarchy delimiter to `/`.** A `LIST`
+  entry may report NIL for its delimiter — RFC 3501's own example is a
+  mailbox literally named `extended/notes`, where the `/` is part of
+  the name and not a separator. `expand_folders`
+  (`src/cli/select.rs`) substitutes `'/'` when the delimiter is None,
+  so `-f 'extended/%'` refuses to match it: `%` stops at a `/` the
+  server said was not a boundary. Narrow — it needs a server that
+  emits NIL for a name containing a slash — and the fix is a small
+  design decision rather than a line: either treat NIL as "no
+  delimiter" so `%` behaves like `*` for that entry, or fall back to
+  the config's `delimiter`, which is currently collected for `info`
+  and used nowhere else.
 - **The connect phase is still unbounded.** `timeout` covers a server
   that accepts and then goes quiet, and cannot cover the dial or the
   TLS handshake, which `ClientBuilder` owns — nor a stalled write,

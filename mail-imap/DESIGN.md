@@ -851,6 +851,27 @@ ENVELOPE subjects may be encoded-words (e.g. `=?utf-8?Q?Votre=20facture?=`).
 it (UTF-8, ISO-8859-1/Latin-1, `B` and `Q` encodings, padding restored for
 base64). Plain text is left untouched.
 
+### Comparing keywords, in both places that do it
+
+Two keywords are the same when their **decoded** text matches, folding
+ASCII case only. Inside a modified-UTF-7 shift the base64 is data:
+`r&AOk-gie` is "régie" and `r&aok-gie` is a different word, so folding
+the atom's case is not a relaxation, it is a wrong answer.
+
+That rule lives in two places — `cli::same_keyword`, for names the user
+typed, and `imap::same_keyword`, used by `Permanent::keeps`. The second
+was a raw `eq_ignore_ascii_case` until a review caught it, and it
+mattered more than it looks: `keeps` decides whether a mailbox with a
+closed `PERMANENTFLAGS` list will retain a keyword, so a false yes let
+`tag add` write one the server kept for the session and dropped at the
+next refresh — reporting success for a change that did not last, which
+is the exact failure that check exists to prevent.
+
+Two copies of one rule is a thing to watch. They are apart because the
+layers are: `Permanent` belongs to the IMAP side and must not reach up
+into the command layer for a comparison. If a third appears, the rule
+should move to one place instead.
+
 ## Configuration (`config/mod.rs`)
 
 The config file is **UCL**, not JSON. The file is hand-edited, lives

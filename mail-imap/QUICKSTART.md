@@ -40,7 +40,7 @@ Then a first query -- list, search, read:
 
 ```bash
 $ mail-imap -c myaccount.conf folder list
-$ mail-imap -c myaccount.conf search invoice
+$ mail-imap -c myaccount.conf search 'TEXT invoice'
 $ mail-imap -c myaccount.conf read 5
 ```
 
@@ -59,9 +59,19 @@ never shows up as a mysterious network failure. `-j` gives any of
 these as one line of JSON, for scripting; see
 [`info`](README.md#info) for every field.
 
-Two commands need no account at all, and no config: `tag known`
+The search query is an IMAP `SEARCH` expression, not a bare word:
+`TEXT invoice` looks in the whole message, `SUBJECT invoice` only in
+the subject, `UNSEEN` and `ALL` take no argument. A bare word is
+refused by the server, not by this tool.
+
+Three commands need no account at all, and no config: `tag known`
 (the keywords with an agreed meaning, read from a table in the
-binary) and `--version`.
+binary), `completion bash|zsh|fish`, and `--version`.
+
+One more thing worth doing early: the password need not sit in the
+file. `password-command` runs a command and reads the password from
+its output, so `pass`, `gpg` or a keyring can hold it instead — see
+[Security note](README.md#security-note).
 
 ## What to read next
 

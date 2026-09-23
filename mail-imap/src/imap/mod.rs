@@ -90,12 +90,39 @@ pub struct Permanent {
     pub unstated: bool,
 }
 
+/// Two keywords are the same when their decoded text matches, folding
+/// ASCII case only.
+///
+/// `modutf7` is an encoding, not a CLI concern, which is why this can
+/// live here rather than reaching up into the command layer. The same
+/// rule is applied to keyword names in `cli::same_keyword`; the two
+/// must not drift.
+fn same_keyword(a: &str, b: &str) -> bool {
+    match (
+        crate::cli::modutf7::decode(a),
+        crate::cli::modutf7::decode(b),
+    ) {
+        (Ok(x), Ok(y)) => x.eq_ignore_ascii_case(&y),
+        _ => a == b,
+    }
+}
+
 impl Permanent {
     /// Will this mailbox keep a keyword of this name?
+    ///
+    /// Compared the way keywords are compared everywhere else here: on
+    /// the DECODED text, folding ASCII case only. A raw
+    /// `eq_ignore_ascii_case` of the wire atoms would fold the base64
+    /// inside a modified-UTF-7 shift, where case is data — `r&AOk-gie`
+    /// is "régie" and `r&aok-gie` is something else entirely. Getting
+    /// that wrong here is not a cosmetic slip: this method's whole job
+    /// is to say whether the server will keep a keyword, so a false
+    /// yes writes one that is kept for the session and gone at the next
+    /// refresh, having reported success.
     pub fn keeps(&self, name: &str) -> bool {
         self.unstated
             || self.any_keyword
-            || self.flags.iter().any(|f| f.eq_ignore_ascii_case(name))
+            || self.flags.iter().any(|f| same_keyword(f, name))
     }
 
     /// Of `wanted`, the spellings this mailbox will actually keep.
@@ -324,6 +351,26 @@ mod permanent_tests {
     fn a_server_that_takes_new_keywords_keeps_everything() {
         let p = stated(&["\\Seen", "NonJunk"], true);
         assert!(p.keeps("Junk") && p.keeps("$Junk"));
+    }
+
+    #[test]
+    fn a_keyword_differing_only_in_base64_case_is_a_different_keyword() {
+        // `r&AOk-gie` decodes to "régie". `r&aok-gie` decodes to
+        // something else: inside a modified-UTF-7 shift the base64 is
+        // data, and folding its case changes the word. A raw
+        // eq_ignore_ascii_case said these were the same, so a closed
+        // PERMANENTFLAGS list naming one approved writing the other --
+        // reported as success, kept for the session, gone at the next
+        // refresh.
+        let p = stated(&["\\Seen", "r&AOk-gie"], false);
+        assert!(p.keeps("r&AOk-gie"), "the keyword the server named");
+        assert!(
+            !p.keeps("r&aok-gie"),
+            "a different word once decoded, and this mailbox never declared it"
+        );
+        // ASCII case outside a shift still folds, as it does everywhere.
+        let q = stated(&["Invoice"], false);
+        assert!(q.keeps("invoice"));
     }
 
     #[test]

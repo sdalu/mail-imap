@@ -84,14 +84,24 @@ impl Selection {
     /// could); ranges and `*` match only messages that exist.
     pub fn resolve(&self, available: Option<&[u32]>) -> Result<Vec<u32>> {
         let mut out: Vec<u32> = Vec::new();
-        let push = |uid: u32, out: &mut Vec<u32>| {
-            if !out.contains(&uid) {
+        // The order UIDs were named in is part of the contract, so the
+        // result stays a Vec; the set is only there to answer "seen
+        // already" in constant time. It used to be a `Vec::contains`
+        // scan of everything collected so far, which is quadratic --
+        // and `*` on a large archive folder pushes every UID the
+        // mailbox has, so `read '*'` or `move '*'` on a few hundred
+        // thousand messages spent minutes deciding what it had already
+        // seen. Nothing caps this path: `--max` is a search budget and
+        // never reaches here.
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let push = |uid: u32, out: &mut Vec<u32>, seen: &mut std::collections::HashSet<u32>| {
+            if seen.insert(uid) {
                 out.push(uid);
             }
         };
         for item in &self.items {
             match item {
-                UidItem::One(uid) => push(*uid, &mut out),
+                UidItem::One(uid) => push(*uid, &mut out, &mut seen),
                 _ => {
                     let all = match available {
                         Some(a) => a,
@@ -136,7 +146,7 @@ impl Selection {
                     }
                     matched.sort_unstable();
                     for uid in matched {
-                        push(uid, &mut out);
+                        push(uid, &mut out, &mut seen);
                     }
                 }
             }
@@ -711,5 +721,33 @@ mod tests {
             expand_folders(&patterns, &known).unwrap(),
             vec!["INBOX", "Archive"]
         );
+    }
+
+    #[test]
+    fn a_whole_large_mailbox_resolves_without_a_quadratic_scan() {
+        // `*` pushes every UID the mailbox has, and deduplication used
+        // to be a linear scan of everything already collected -- so
+        // this is the shape that made `read '*'` or `move '*'` on a
+        // large archive folder take minutes. There is no timing
+        // assertion here, because one would be flaky; the guard is
+        // cruder and more reliable: reintroduce the scan and this test
+        // alone makes the suite unbearable to run.
+        let available: Vec<u32> = (1..=200_000).collect();
+        let sel = parse_selection("*").expect("'*' parses");
+        let got = sel.resolve(Some(&available)).expect("resolve");
+        assert_eq!(got.len(), 200_000);
+        assert_eq!(got.first(), Some(&1));
+        assert_eq!(got.last(), Some(&200_000));
+    }
+
+    #[test]
+    fn deduplication_keeps_the_order_uids_were_named_in() {
+        // The dedup went from a Vec scan to a HashSet, and a set has no
+        // order -- so this pins the thing that could quietly have been
+        // lost in that change: the output follows the input, and the
+        // FIRST mention of a repeated UID is the one that survives.
+        let available: Vec<u32> = (1..=10).collect();
+        let sel = parse_selection("7,3,7,1,3").expect("parses");
+        assert_eq!(sel.resolve(Some(&available)).expect("resolve"), vec![7, 3, 1]);
     }
 }

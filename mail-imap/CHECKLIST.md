@@ -54,6 +54,15 @@ this morning is a claim, not a fact.
       `make check` proves the page parses, not that it is true.
 - [ ] `QUICKSTART.md` — do its commands still run? Every one of them is
       meant to be runnable as written, most under `--mock`.
+- [ ] **A documented `search` query is checked by nothing.**
+      `scripts/check-examples.sh` proves that clap ACCEPTS a command
+      line, not that a server accepts what it carries — the example
+      configs it names do not exist, so those runs stop before any
+      socket. QUICKSTART printed `search invoice` for several releases;
+      a bare word is not an IMAP `SEARCH` key and a real server answers
+      `BAD`. If a round adds or edits a `search` example, run it once
+      against the throwaway server (`make tests-server-start`, then
+      `-c tests-tmp/greenmail.conf`) before believing it.
 - [ ] `example.conf` — does it still parse, and does it still show a
       profile block? It is the only place the multi-account shape is
       written out for someone to copy.

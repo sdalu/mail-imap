@@ -96,7 +96,8 @@ const WELL_KNOWN: &[(&str, &str)] = &[
     ("$label4", "Thunderbird tag 4, \"To Do\" unless renamed"),
     ("$label5", "Thunderbird tag 5, \"Later\" unless renamed"),
     ("Junk", "junk marker (Thunderbird, SpamAssassin); the registry spells it $Junk"),
-    ("NonJunk", "not-junk marker; the registry spells it $NotJunk"),
+    ("NonJunk", "not-junk marker (Thunderbird's spelling); the registry spells it $NotJunk"),
+    ("NotJunk", "not-junk marker (Apple Mail's spelling); the registry spells it $NotJunk"),
 ];
 
 /// The spellings of "this is junk", and of "this is not".
@@ -322,5 +323,26 @@ mod tests {
         assert_eq!(jmap_spelling_of("$Seen"), Some("\\Seen"));
         assert_eq!(jmap_spelling_of("$recent"), Some("\\Recent"));
         assert_eq!(jmap_spelling_of("$junk"), None);
+    }
+
+    #[test]
+    fn every_junk_spelling_this_tool_acts_on_is_also_one_it_can_canonicalise() {
+        // JUNK and NOT_JUNK name the spellings `tag junk` reads and
+        // writes. Each has to be canonicalisable too, or `tag add`
+        // writes it in whatever case the user typed while its siblings
+        // are normalised -- which is how bare `NotJunk`, Apple Mail's
+        // own spelling, came to be absent from WELL_KNOWN while
+        // NOT_JUNK treated it as significant. A structural check
+        // rather than three assertions, so a spelling added to either
+        // list cannot quietly skip the table.
+        for name in JUNK.iter().chain(NOT_JUNK.iter()) {
+            assert_eq!(
+                canonical(&name.to_lowercase()),
+                Some(*name),
+                "{} is acted on but does not canonicalise to itself",
+                name
+            );
+            assert!(meaning(name).is_some(), "{} has no gloss", name);
+        }
     }
 }
