@@ -7,13 +7,13 @@ use crate::imap::{
 };
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, FixedOffset};
+use imap::extensions::idle::SetReadTimeout;
 use imap::extensions::sort::{SortCharset, SortCriterion};
 use imap::extensions::thread::{ThreadAlgorithm, ThreadCharset};
-use imap::{ClientBuilder, Connection, ConnectionMode, Session};
+use imap::{Client, ClientBuilder, Connection, ConnectionMode, Session};
 use imap_proto::NameAttribute;
 use imap::types::Flag;
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::net::ToSocketAddrs;
 
 pub struct RealClient {
     session: Session<Connection>,
@@ -74,18 +74,9 @@ impl RealClient {
     /// Log in and return a fresh session. Used for the initial connect and
     /// to recover after a poisoned response desyncs the stream.
     fn establish_session(config: &Config, debug: bool) -> Result<Session<Connection>> {
-        let addr = (config.server.as_str(), config.port);
-        let socket_addr = addr
-            .to_socket_addrs()
-            .with_context(|| format!("could not resolve {}", config.server))?
-            .next()
-            .with_context(|| format!("no addresses found for {}", config.server))?;
         if debug {
             eprintln!("Connecting to {}:{}...", config.server, config.port);
         }
-        let tcp = std::net::TcpStream::connect_timeout(&socket_addr, std::time::Duration::from_secs(10))
-            .with_context(|| format!("could not connect to {} at {}", config.server, socket_addr))?;
-        tcp.set_nodelay(true)?;
 
         let mut builder = ClientBuilder::new(config.server.as_str(), config.port);
         if config.ssl {
@@ -108,6 +99,36 @@ impl RealClient {
 
         let client = builder.connect()
             .with_context(|| format!("could not connect to {}:{}", config.server, config.port))?;
+
+        // `config.timeout` bounds a server that accepts the connection
+        // and then goes quiet mid-response -- it does NOT bound the
+        // connect above: `ClientBuilder::connect()` owns the dial (and,
+        // for TLS, the handshake) and hands back an already-established
+        // `Client`, with no hook for a caller to time that part. Doing
+        // so would mean patching the fork, which is out of scope here.
+        // A server that never accepts, or stalls mid-handshake, still
+        // hangs this CLI for good; only a server that answers and then
+        // stalls afterwards is caught by what follows.
+        //
+        // The greeting is already consumed by `builder.connect()`, so
+        // there is no `read_greeting()` to call again. Pulling the
+        // connection back out with `into_inner()` and re-wrapping it
+        // with `Client::new()` is the only route in: `Session` and
+        // `Client` have no `set_read_timeout` of their own, only the
+        // boxed `Connection` they hold does, via `SetReadTimeout`. That
+        // trait is also read-only -- there is no matching "set write
+        // timeout" -- so a stalled write (a large `APPEND` to a server
+        // that stopped reading, say) is not bounded by this either.
+        let client = if config.timeout == 0 {
+            client
+        } else {
+            let mut conn = client
+                .into_inner()
+                .context("could not take back the connection to set its read timeout")?;
+            conn.set_read_timeout(Some(std::time::Duration::from_secs(config.timeout)))
+                .context("could not set the session read timeout")?;
+            Client::new(conn)
+        };
 
         // The password itself is never logged, here or anywhere below:
         // only whether `password-command` ran and succeeded.

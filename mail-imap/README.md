@@ -187,6 +187,7 @@ takes the folder flags `-f`/`-A`; see [Folder selection](#folder-selection).
 | `tag remove`         | `tag remove <SELECTION...> <TAG...>`              | Remove custom keyword tags                                                                                                                                                      |
 | `tag junk`           | `tag junk <SELECTION...>`                         | Mark junk: set every spelling the mailbox keeps, clear every spelling of the opposite                                                                                           |
 | `tag notjunk`        | `tag notjunk <SELECTION...>`                      | Mark not junk (the same, the other way)                                                                                                                                         |
+| `completion`         | `completion <bash\|zsh\|fish>`                     | Print a shell completion script, generated from the command surface itself. Needs no config and no server                                                                       |
 | `tag known`          | `tag known`                                       | List the keywords with an agreed meaning: the IANA registry and the conventions no registry covers (no server needed)                                                           |
 
 ### Grammar
@@ -1059,6 +1060,7 @@ password of `30s` stays the text `30s` rather than becoming a number.
 | `username`     | —          | Login user                                                                                                                |
 | `password`     | —          | Login password (use an app password for e.g. Gmail). Exactly one of this and `password-command`                           |
 | `password-command` | —      | A command whose output is the password; run through the shell, with exactly one trailing newline stripped                  |
+| `timeout`      | `30`       | Seconds to wait on a silent server once connected; `0` disables it. It does not bound the connect itself — see below        |
 | `ssl`          | `true`     | Implicit TLS (typical for port 993)                                                                                       |
 | `starttls`     | `false`    | Upgrade a plain connection with STARTTLS (typical for port 143). Used when `ssl` is `false`.                              |
 | `insecure`     | `false`    | Accept invalid TLS certificates (self-signed local servers)                                                               |
@@ -1264,6 +1266,34 @@ src/
 ```
 
 See `DESIGN.md` for details.
+
+## Timeouts
+
+`timeout` (default 30 seconds, `0` to disable) bounds a server that
+accepts the connection and then goes quiet mid-response — the hang
+that otherwise lasts for ever.
+
+It is worth being exact about what it does **not** cover, because the
+gap is not obvious. It does not bound the connect or the TLS handshake:
+the `imap` crate's `ClientBuilder` owns the dial and hands back an
+already-established client, with no hook for a caller to time that
+part. And the trait it uses is read-only, so a stalled *write* — a
+large `append` to a server that stopped reading — is not bounded
+either. A server that never accepts, or that stalls mid-handshake,
+still hangs. Closing those needs a change in the `imap` fork rather
+than here.
+
+## Shell completions
+
+```bash
+mail-imap completion bash    # or zsh, or fish
+```
+
+The script is generated from the command surface itself, so it cannot
+drift from the flags the binary actually takes. `make install` writes
+all three under `PREFIX` (`BASHCOMPDIR`, `ZSHCOMPDIR`, `FISHCOMPDIR`);
+`make uninstall` removes them. Like `tag known`, `completion` needs
+neither a config nor a server.
 
 ## Security note
 

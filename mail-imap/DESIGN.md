@@ -910,6 +910,38 @@ The one exception is `--mock`, where no server is reached and the
 whole config is optional — and there `info` reports which file it
 actually read, or that it read none.
 
+### Timeouts, and what they do not cover
+
+`timeout` (seconds, default 30, `0` to disable) is set on the session
+after it is established, and the route in is worth recording because it
+is not obvious: `Session` and `Client` have no timeout of their own,
+only the boxed `Connection` they hold does, via `SetReadTimeout`. So
+`establish_session` takes the connection back with
+`Client::into_inner()`, sets the timeout on it, and re-wraps it with
+`Client::new()` — without a second `read_greeting()`, since
+`ClientBuilder::connect()` has already consumed the greeting.
+
+What it bounds is a server that accepts and then goes quiet
+mid-response. Three things it does not bound, all stated in the code
+beside it rather than left to be discovered:
+
+- **the connect**, and for TLS the handshake, which `ClientBuilder`
+  owns and hands back already finished;
+- **a stalled write** — `SetReadTimeout` is read-only and has no
+  counterpart, so a large `append` to a server that stopped reading
+  hangs;
+- **a server that never accepts at all.**
+
+Closing those means patching the fork, which is a bigger decision than
+this fix: the forks are rebased by hand and CHECKLIST.md wants that
+debt shrinking rather than growing.
+
+The dead pre-connect this replaced is worth a sentence, because it
+looked like a timeout and was not: `establish_session` built a
+`TcpStream` with `connect_timeout`, set `nodelay` on it, and dropped
+it, after which `ClientBuilder::connect()` opened its own untimed
+connection. It cost a round trip and bounded nothing.
+
 ### Where the password comes from
 
 `password` and `password-command` are exclusive, and exactly one must

@@ -1254,15 +1254,10 @@ pub fn append_message(
     json: bool,
     debug: bool,
 ) -> Result<()> {
-    // `parse_flag_names` refuses an empty list outright (it exists to
-    // catch `flag add <selection>` with no flag named at all) -- but
-    // `--flag` here is optional, and no flags at creation is an
-    // ordinary, valid append, not an empty list of names to reject.
-    let flags = if flag_names.is_empty() {
-        Vec::new()
-    } else {
-        parse_flag_names(flag_names, true, false)?
-    };
+    // `--flag` is optional, and no flags at creation is an ordinary,
+    // valid append -- `parse_flag_names` returns an empty `Vec` for an
+    // empty list rather than refusing it, so this needs no special case.
+    let flags = parse_flag_names(flag_names, true, false)?;
     let internal_date: Option<DateTime<FixedOffset>> = match date {
         None => None,
         Some(d) => Some(DateTime::parse_from_rfc3339(d).map_err(|e| {
@@ -1578,6 +1573,14 @@ fn is_invisible(c: char) -> bool {
 /// The split is what keeps a mutation honest: without it,
 /// `flag add 5 -- '\Deleted' Trash` stores a keyword `Trash` on message
 /// 5 and leaves the Trash folder alone.
+///
+/// An empty `names` is not refused here: it is not a fact about
+/// parsing names, it is a precondition of the commands that need at
+/// least one (`flag add`/`tag add`, refused earlier and better by
+/// `split_args` in `main.rs`) and not of the one that does not
+/// (`append`'s optional `--flag`, for which an empty list is an
+/// ordinary append that sets no flags). An empty input returns an
+/// empty `Vec`.
 pub fn parse_flag_names(names: &[String], system: bool, wire_form: bool) -> Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     for name in names {
@@ -1742,9 +1745,6 @@ pub fn parse_flag_names(names: &[String], system: bool, wire_form: bool) -> Resu
         if !out.iter().any(|s| same_keyword(s, &wire)) {
             out.push(wire);
         }
-    }
-    if out.is_empty() {
-        bail!("no flag names given");
     }
     Ok(out)
 }
@@ -3125,7 +3125,19 @@ mod tests {
                 bad
             );
         }
-        assert!(parse_flag_names(&[], true, false).is_err());
+    }
+
+    // An empty list is not this function's call to refuse: it is a
+    // precondition of the commands that want one (`flag add`/`tag
+    // add`, enforced earlier by `split_args` in main.rs), not of
+    // `append`'s optional `--flag`. See `parse_flag_names`'s doc
+    // comment.
+    #[test]
+    fn parse_flag_names_accepts_empty_list() {
+        assert_eq!(
+            parse_flag_names(&[], true, false).unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

@@ -5,6 +5,12 @@ RELEASE		?= yes
 PREFIX		?= /usr/local
 BINDIR		?= $(PREFIX)/bin
 MANDIR		?= $(PREFIX)/share/man
+# Where each shell looks for a completion script on its own, same idea
+# as MANDIR: install puts one under each, generated fresh from the
+# binary rather than a file kept in the tree to go stale.
+BASHCOMPDIR	?= $(PREFIX)/share/bash-completion/completions
+ZSHCOMPDIR	?= $(PREFIX)/share/zsh/site-functions
+FISHCOMPDIR	?= $(PREFIX)/share/fish/vendor_completions.d
 DESTDIR		?=
 INSTALL		?= install
 MANDOC		?= mandoc
@@ -68,6 +74,9 @@ help:						## show this help (the default)
 	    PREFIX   '$(PREFIX)  (install prefix)' \
 	    BINDIR   '$(BINDIR)' \
 	    MANDIR   '$(MANDIR)  ($(MAN1PAGE) goes in man1 under it)' \
+	    BASHCOMPDIR '$(BASHCOMPDIR)' \
+	    ZSHCOMPDIR '$(ZSHCOMPDIR)' \
+	    FISHCOMPDIR '$(FISHCOMPDIR)' \
 	    DESTDIR  '$(DESTDIR)  (staging prefix for packaging)' \
 	    SCRIPTS  '$(SCRIPTS)  (shell helpers)' \
 	    MANSRC   '$(MANSRC)  (man page source)' \
@@ -140,6 +149,9 @@ options:					## print the configuration knobs and their defaults
 	    PREFIX   '/usr/local'   'install prefix' \
 	    BINDIR   '$$(PREFIX)/bin' 'where install puts the binary' \
 	    MANDIR   '$$(PREFIX)/share/man' 'where install puts the man page' \
+	    BASHCOMPDIR '$$(PREFIX)/share/bash-completion/completions' 'where install puts the bash completion' \
+	    ZSHCOMPDIR  '$$(PREFIX)/share/zsh/site-functions' 'where install puts the zsh completion' \
+	    FISHCOMPDIR '$$(PREFIX)/share/fish/vendor_completions.d' 'where install puts the fish completion' \
 	    DESTDIR  ''             'staging prefix, prepended to every install path'
 	@echo ''
 	@echo 'Runtime configuration is the JSON config file, not a build knob:'
@@ -158,12 +170,21 @@ distclean: clean				## clean, plus the generated documentation and the fetched t
 	rm -rf target/doc
 	rm -rf $(TESTS_TMP)
 
-install: build					## install the binary and the man page under PREFIX
+install: build					## install the binary, the man page and shell completions under PREFIX
 	$(INSTALL) -d $(DESTDIR)$(BINDIR)
 	$(INSTALL) -m 755 $(BIN) $(DESTDIR)$(BINDIR)/$(NAME)
 	$(INSTALL) -d $(DESTDIR)$(MANDIR)/man1
 	$(INSTALL) -m 644 $(MAN1) $(DESTDIR)$(MANDIR)/man1/$(MAN1PAGE)
+	$(INSTALL) -d $(DESTDIR)$(BASHCOMPDIR)
+	$(BIN) completion bash > $(DESTDIR)$(BASHCOMPDIR)/$(NAME)
+	$(INSTALL) -d $(DESTDIR)$(ZSHCOMPDIR)
+	$(BIN) completion zsh > $(DESTDIR)$(ZSHCOMPDIR)/_$(NAME)
+	$(INSTALL) -d $(DESTDIR)$(FISHCOMPDIR)
+	$(BIN) completion fish > $(DESTDIR)$(FISHCOMPDIR)/$(NAME).fish
 
 uninstall:					## remove what install put down
 	rm -f $(DESTDIR)$(BINDIR)/$(NAME)
 	rm -f $(DESTDIR)$(MANDIR)/man1/$(MAN1PAGE)
+	rm -f $(DESTDIR)$(BASHCOMPDIR)/$(NAME)
+	rm -f $(DESTDIR)$(ZSHCOMPDIR)/_$(NAME)
+	rm -f $(DESTDIR)$(FISHCOMPDIR)/$(NAME).fish

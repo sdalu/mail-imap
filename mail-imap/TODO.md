@@ -46,39 +46,29 @@ token from a command, the way it takes a password from one.
 
 ## 7. Smaller, still real
 
-- **No timeout on the session socket.**
-  `TcpStream::connect_timeout` (`src/imap/real.rs:86`) builds a
-  connection, sets `nodelay` on it, and drops it;
-  `ClientBuilder::connect()` (line 110) then opens its own, untimed.
-  A server that accepts and stalls hangs the CLI for good. The
-  pre-connect is also a wasted round trip to delete.
-- **No shell completions.** clap 4 is already a dependency;
-  `clap_complete` plus a `make install` hook is cheap, and `install`
-  already places the man page.
-- **Piping into `head` or `less` panics.** Rust ignores `SIGPIPE`, so
-  a closed pipe surfaces as a failed write: `read '*' | head` ends in
-  `failed printing to stdout: Broken pipe`. The fix is one line
-  restoring the default disposition at startup, and it wants `libc` as
-  a direct dependency — which is why it is a line here rather than
-  something folded into an unrelated commit.
-- **`parse_flag_names` refuses an empty list**, which is a precondition
-  of `flag add` / `tag add` rather than a fact about parsing names —
-  and one `split_args` already enforces earlier, with a better message.
-  It made `append --flag` optional awkward (the handler calls the
-  parser only when names were given), and a unit test pins the bail, so
-  moving it to the call sites that want it is a small change with its
-  own test to update. Worth doing on its own, not inside a feature.
 - **`info` advertises capabilities with no command behind them**
-  (`README.md:314`): `QUOTA`, `IDLE`. Either give them commands
-  (`quota`; a `watch`) or say in DESIGN.md that the line reports what
-  the *server* is, not what this tool will do with it.
+  (`README.md`): `QUOTA`, `IDLE`. Either give them commands (`quota`;
+  a `watch`) or say in DESIGN.md that the `advertises` line reports
+  what the *server* is, not what this tool will do with it. The second
+  is a paragraph and is probably the honest answer; the first is two
+  features nobody has asked for.
+- **The connect phase is still unbounded.** `timeout` covers a server
+  that accepts and then goes quiet, and cannot cover the dial or the
+  TLS handshake, which `ClientBuilder` owns — nor a stalled write,
+  since `SetReadTimeout` has no counterpart. Closing either means
+  patching the `imap` fork, which is a bigger decision than the fix:
+  the forks are rebased by hand and CHECKLIST.md wants that debt
+  shrinking. Worth doing only if a real account actually hangs there.
 
 ---
 
 Done and out of this list: the `SEARCH` charset declaration,
 `part save --all` / `-o -`, §3 (`folder delete` and
 `folder list --subscribed`), §4 (`copy` and `expunge`), §5 (`append`),
-§6 (`part strip`) and §1 (`read` showing the readable text). What they
+§6 (`part strip`), §1 (`read` showing the readable text), the
+`password-command` half of §2, and four of §7 — the session read
+timeout, SIGPIPE, shell completions, and `parse_flag_names` no longer
+refusing an empty list. What they
 left behind is recorded where it belongs rather than here: the untested
 charset fallback in DESIGN.md under *Declaring a charset on `SEARCH`*,
 why `fetch_part` is the trait's primitive under *MIME parsing*, where

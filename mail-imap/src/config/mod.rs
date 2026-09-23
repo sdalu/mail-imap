@@ -209,10 +209,21 @@ pub struct Config {
     /// may narrow it further, never widen it.
     #[serde(default, rename = "access-level", alias = "access_level")]
     pub access: AccessLevel,
+    /// Seconds of silence allowed on the session socket once it is
+    /// established, `0` for none. Bounds a server that accepts the
+    /// connection and then stalls mid-response; it does not bound the
+    /// connect itself (see `real.rs::establish_session`, where it is
+    /// applied, for why).
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
 }
 
 fn default_port() -> u16 {
     993
+}
+
+fn default_timeout() -> u64 {
+    30
 }
 
 fn default_ssl() -> bool {
@@ -327,6 +338,7 @@ impl Default for Config {
             mock: false,
             delimiter: None,
             access: AccessLevel::default(),
+            timeout: default_timeout(),
         }
     }
 }

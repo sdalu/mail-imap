@@ -29,6 +29,15 @@ chrono = "0.4"
 # from. It is the only operation here that destroys something, and the
 # digest is what makes that auditable after the fact.
 sha2 = "0.10"
+# One call, at startup: restore SIGPIPE to its default so that piping
+# into `head` or `less` ends the program quietly instead of panicking
+# on a failed write. Rust ignores SIGPIPE and there is no way to ask
+# for the default back without libc.
+libc = "0.2"
+# `completion <shell>` prints a completion script. clap already knows
+# the whole command surface, so this is the one place where generating
+# it beats writing it by hand and letting it go stale.
+clap_complete = "4"
 native-tls = "0.2"
 clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }

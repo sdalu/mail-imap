@@ -141,6 +141,13 @@ see
 Every command also takes the folder options
 .Fl f Ns / Ns Fl A .
 .Bl -tag -width Ds
+.It Cm completion Ar shell
+Print a shell completion script for
+.Ar shell
+.Pq Ic bash , zsh No or Ic fish
+on standard output, generated from the command surface itself so it
+cannot drift from the flags the binary takes.
+Needs neither a configuration file nor a server.
 .It Cm info
 What this run can do and what the server is: the access level in
 force, the hierarchy delimiter to build folder paths with, the
@@ -617,6 +624,17 @@ Exactly one of
 and
 .Ic password-command
 must be set.
+.It Ic timeout
+Seconds to wait on a server that has accepted the connection and then
+gone quiet.
+.Ql 0
+disables it.
+Default:
+.Ql 30 .
+It does not bound the connect or the TLS handshake, which the
+.Ic imap
+crate owns, nor a stalled write; a server that never accepts, or that
+stalls mid-handshake, still hangs.
 .It Ic password-command
 A command whose standard output is the password, run through
 .Xr sh 1

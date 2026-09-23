@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use std::process;
 
 mod cli;
@@ -336,6 +336,34 @@ enum Command {
         #[clap(subcommand)]
         action: TagAction,
     },
+    /// Print a shell completion script to stdout, generated from this
+    /// binary's own clap command so it cannot drift from what the CLI
+    /// actually accepts (`make install` places one for bash, zsh and
+    /// fish under PREFIX)
+    Completion {
+        /// Shell to generate the script for
+        shell: Shell,
+    },
+}
+
+/// The shells `completion` writes a script for. A small wrapper around
+/// `clap_complete::Shell` (which also offers PowerShell and Elvish)
+/// because only these three are supported here.
+#[derive(Copy, Clone, clap::ValueEnum)]
+enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl Shell {
+    fn generator(self) -> clap_complete::Shell {
+        match self {
+            Shell::Bash => clap_complete::Shell::Bash,
+            Shell::Zsh => clap_complete::Shell::Zsh,
+            Shell::Fish => clap_complete::Shell::Fish,
+        }
+    }
 }
 
 #[derive(clap::Subcommand)]
@@ -528,7 +556,33 @@ enum PartsAction {
 }
 
 fn main() {
+    // SAFETY: this is the first statement `main` runs -- before any
+    // thread exists and before this process has written a single byte
+    // -- so nothing else can be observing or racing the process-wide
+    // signal disposition it changes. Rust's runtime sets SIGPIPE to
+    // SIG_IGN at startup, which turns a write to a closed pipe
+    // (`mail-imap read '*' | head -2`) into an EPIPE `io::Error`
+    // instead of killing the process -- and that then surfaces as a
+    // panicking `.unwrap()`/`.expect()` somewhere down a print path,
+    // rather than the quiet, early exit every other Unix tool gives a
+    // reader that has stopped reading. Restoring SIG_DFL restores that
+    // quiet exit.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let args = Args::parse();
+
+    // `completion` builds its script from the clap `Command` alone --
+    // like `tag known` below, it needs no account, no server, and so
+    // no config, and is answered before one is loaded for the same
+    // reason.
+    if let Command::Completion { shell } = &args.command {
+        let mut cmd = Args::command();
+        let name = cmd.get_name().to_string();
+        clap_complete::generate(shell.generator(), &mut cmd, name, &mut std::io::stdout());
+        return;
+    }
 
     // `tag known` reads a table compiled into the binary: no account,
     // no server, and so no config either. Answering it before the
@@ -865,6 +919,12 @@ fn main() {
                 )
             }
         },
+        // Answered and returned before the config load above, the same
+        // way `tag known` is; unlike that one, `completion` is a whole
+        // top-level command rather than one arm nested inside another,
+        // so it still has to be named here for this match to stay
+        // exhaustive as `Command` grows.
+        Command::Completion { .. } => unreachable!("handled before the config was loaded"),
     };
 
     if let Err(e) = result {
