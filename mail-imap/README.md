@@ -1060,6 +1060,7 @@ password of `30s` stays the text `30s` rather than becoming a number.
 | `username`     | —          | Login user                                                                                                                |
 | `password`     | —          | Login password (use an app password for e.g. Gmail). Exactly one of this and `password-command`                           |
 | `password-command` | —      | A command whose output is the password; run through the shell, with exactly one trailing newline stripped                  |
+| `auth`         | `login`    | How to authenticate: `login`, or `xoauth2` for an OAuth 2 access token                                                     |
 | `timeout`      | `30`       | Seconds to wait on a silent server once connected; `0` disables it. It does not bound the connect itself — see below        |
 | `ssl`          | `true`     | Implicit TLS (typical for port 993)                                                                                       |
 | `starttls`     | `false`    | Upgrade a plain connection with STARTTLS (typical for port 143). Used when `ssl` is `false`.                              |
@@ -1266,6 +1267,43 @@ src/
 ```
 
 See `DESIGN.md` for details.
+
+## OAuth 2 (`auth = "xoauth2"`)
+
+Microsoft 365 has disabled basic authentication and Gmail wants an app
+password or a token, so `LOGIN` is no longer enough for the two largest
+providers. With `auth = "xoauth2"` the secret becomes an **OAuth 2
+access token** instead of a password — which means it goes in the same
+place a password would:
+
+```
+auth             = "xoauth2"
+username         = "you@example.com"
+password-command = "your-token-helper"
+```
+
+Acquiring the token is deliberately not this tool's job. The OAuth
+dance, the refresh token, the client secret: those belong to whatever
+you already use for them, and this reads a token the same way it reads
+a password — from a command. A token is short-lived, so
+`password-command` is the sensible form and a literal `password` is
+not.
+
+`info` reports which mechanism is in force on its `auth` line, and the
+server's advertised mechanisms appear on `advertises` (`AUTH=XOAUTH2`
+and friends). If the server does not advertise the one you asked for,
+the connection is refused before anything is sent, with the mechanisms
+it does offer named.
+
+**What is not proven.** The XOAUTH2 exchange is the one thing in this
+tool with no end-to-end test behind it: the throwaway server the suite
+uses advertises `AUTH=XOAUTH2` but cannot complete the exchange, and
+no real provider account is part of the test setup. The SASL payload
+is unit-tested byte for byte against the form Google and Microsoft
+document, and the capability gate and the error path are covered on
+the wire — but the handshake against a real provider is untested, and
+this note is here rather than in a commit message so that whoever
+first points it at Gmail knows they are the test.
 
 ## Timeouts
 

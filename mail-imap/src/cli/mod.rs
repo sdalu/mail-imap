@@ -508,6 +508,9 @@ struct ConfigInfo<'a> {
     /// `implicit`, `starttls` or `none`.
     tls: &'a str,
     insecure: bool,
+    /// How this run authenticates: `login` or `xoauth2`. Under
+    /// `xoauth2` the secret is an OAuth 2 access token.
+    auth: &'a str,
     username: &'a str,
 }
 
@@ -669,6 +672,7 @@ fn build_info<'a>(
                 "none"
             },
             insecure: config.insecure,
+            auth: config.auth.as_str(),
             username: &config.username,
         },
         access: AccessInfo {
@@ -773,6 +777,7 @@ fn print_info(i: &InfoOutput) {
             ""
         }
     );
+    println!("  auth        {}", i.config.auth);
 
     println!();
     println!("Access level: {}", i.access.effective);

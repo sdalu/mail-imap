@@ -624,6 +624,23 @@ Exactly one of
 and
 .Ic password-command
 must be set.
+.It Ic auth
+How to authenticate:
+.Ql login
+.Pq the default
+or
+.Ql xoauth2 ,
+where the secret is an OAuth 2 access token rather than a password.
+Under
+.Ql xoauth2
+the token is read from
+.Ic password
+or
+.Ic password-command
+like any other secret; acquiring it is not this program\(aqs job.
+The server must advertise
+.Ic AUTH=XOAUTH2 ,
+and the connection is refused before anything is sent if it does not.
 .It Ic timeout
 Seconds to wait on a server that has accepted the connection and then
 gone quiet.

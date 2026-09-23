@@ -11,6 +11,40 @@ use std::path::Path;
 /// it does. Nothing here is a security boundary — an IMAP account can
 /// be reached by any other client — it is a guard against *this* tool
 /// doing more than the account holder meant it to.
+/// How this tool proves who it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+pub enum AuthMethod {
+    /// `LOGIN` with a username and a password. What every server took
+    /// until recently, and what several large ones no longer do.
+    #[default]
+    #[serde(rename = "login")]
+    Login,
+    /// `AUTHENTICATE XOAUTH2`: the secret is an OAuth 2 access token
+    /// rather than a password. Google and Microsoft both speak this
+    /// one; it is not an IETF standard, which is why the name carries
+    /// a vendor X.
+    #[serde(rename = "xoauth2")]
+    XOAuth2,
+}
+
+impl AuthMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthMethod::Login => "login",
+            AuthMethod::XOAuth2 => "xoauth2",
+        }
+    }
+
+    /// The capability a server must advertise for this method, or
+    /// `None` where none is needed.
+    pub fn required_capability(self) -> Option<&'static str> {
+        match self {
+            AuthMethod::Login => None,
+            AuthMethod::XOAuth2 => Some("AUTH=XOAUTH2"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Default)]
 pub enum AccessLevel {
     /// Change nothing at all. Reads use `BODY.PEEK[]`, so even `\Seen`
@@ -216,6 +250,13 @@ pub struct Config {
     /// applied, for why).
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+
+    /// How to authenticate: `login` (default) or `xoauth2`. Under
+    /// `xoauth2` the secret — `password`, or whatever
+    /// `password-command` prints — is an OAuth 2 access token rather
+    /// than a password.
+    #[serde(default)]
+    pub auth: AuthMethod,
 }
 
 fn default_port() -> u16 {
@@ -339,6 +380,7 @@ impl Default for Config {
             delimiter: None,
             access: AccessLevel::default(),
             timeout: default_timeout(),
+            auth: AuthMethod::Login,
         }
     }
 }

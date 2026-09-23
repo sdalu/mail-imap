@@ -9,40 +9,28 @@ closing it.
 
 Ordered by how likely it is to bite.
 
-## 2. Authentication is `LOGIN` and nothing else
+## 2. OAUTHBEARER, and a real provider account
 
-*Half done.* `password-command` exists: the password can come from
-`pass`, `gpg`, a keyring or anything else that prints it, and the
-config need not hold it. What is left is the protocol half.
+*Mostly done.* `password-command` keeps the secret out of the config
+file, and `auth = "xoauth2"` covers the mechanism Google and Microsoft
+actually use. Two things are left, and neither is large.
 
-`establish_session` still calls `.login(user, password)`. There is no
-`AUTHENTICATE`, so no XOAUTH2, no OAUTHBEARER, no SASL. Microsoft 365
-has disabled basic auth; Gmail needs an app password. Between them
-that is most of the accounts this tool would be pointed at, and it is
-the reason this entry is still open.
+**OAUTHBEARER (RFC 7628) is not implemented.** It is the standardised
+form of the same idea, and XOAUTH2 is the vendor one that predates it.
+The shape is the same — an `Authenticator` returning a fixed string —
+but the string differs (`n,a=<user>,\x01host=<host>\x01port=<port>\x01auth=Bearer <token>\x01\x01`)
+and it needs the host and port, which `establish_session` has. Worth
+adding when something asks for it; nothing does today, and every extra
+mechanism is more surface with no test behind it.
 
-What exists to build on: the fork has `Client::authenticate` and the
-`Authenticator` trait (`../forks/rust-imap/src/client.rs:459`,
-`src/authenticator.rs`), which is exactly the shape XOAUTH2 needs —
-answer the server's challenge with
-`user=<user>\x01auth=Bearer <token>\x01\x01`, base64-encoded. And
-`password-command` already supplies the mechanism for getting a token
-from outside, so a `token-command` is the same machinery under another
-name rather than new machinery.
-
-**The obstacle is not difficulty, it is verification.** GreenMail does
-not speak XOAUTH2, so nothing in `tests/wire.rs` can cover the
-handshake — this would be the first thing here that ships without a
-gate behind it. The part that actually carries the bugs is the payload
-construction, and that *is* unit-testable against the RFC 7628 form.
-So: build it, test the payload exactly, and say plainly in DESIGN.md
-that the exchange itself is unproven against a real provider until
-someone runs it against one. Shipping that honestly is fine; shipping
-it looking tested is not.
-
-Note also that acquiring the token — the OAuth dance, refresh tokens,
-a client secret — is deliberately *not* this tool's job. It takes a
-token from a command, the way it takes a password from one.
+**The XOAUTH2 exchange has never run against a real provider.** This
+is the honest gap, recorded here as well as in DESIGN.md and the
+README: the suite's throwaway server advertises `AUTH=XOAUTH2` and
+then refuses the challenge flow, so the handshake is covered by
+nothing. The payload is unit-tested against the documented form and
+the capability gate is covered on the wire. What is missing is one run
+against Gmail or Microsoft 365, and it needs an account this tree does
+not have.
 
 ## 7. Smaller, still real
 

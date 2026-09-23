@@ -1337,3 +1337,50 @@ fn stripping_an_attachment_keeps_the_message_and_records_what_went() {
         before.flags
     );
 }
+
+/// What XOAUTH2 can and cannot be proven to do here.
+///
+/// GreenMail turned out to **advertise** `AUTH=XOAUTH2` and then
+/// refuse the RFC 3501 challenge flow ("Missing argument. Command
+/// should be `<tag> AUTHENTICATE <auth_type> *(CRLF base64)`") -- it
+/// wants the initial response inline, the RFC 4959 SASL-IR form, which
+/// the `imap` crate does not send. So this server can neither complete
+/// an XOAUTH2 exchange nor exercise the missing-capability refusal.
+///
+/// What it does prove: the capability gate lets an advertised
+/// mechanism through rather than refusing everything, and a failure
+/// past that point reaches the user wrapped in something they can act
+/// on instead of a bare protocol error. The successful exchange and
+/// the refusal branch are both unproven here, and DESIGN.md says so.
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn xoauth2_gets_past_the_capability_gate_and_reports_a_failure_usefully() {
+    let mut cfg = config();
+    cfg.auth = mail_imap::config::AuthMethod::XOAuth2;
+    let err = ImapClient::connect(&cfg, false)
+        .err()
+        .expect("GreenMail cannot actually complete an XOAUTH2 exchange");
+    let text = format!("{:#}", err);
+
+    // Not the capability refusal: GreenMail advertises AUTH=XOAUTH2,
+    // so the gate passed and the exchange was attempted. If this ever
+    // starts failing, check whether GreenMail stopped advertising it.
+    assert!(
+        !text.contains("does not advertise"),
+        "the gate should have passed -- GreenMail advertises AUTH=XOAUTH2: {}",
+        text
+    );
+    // And the user gets told what kind of secret this mechanism wants,
+    // which a bare "Bad Response" would not say.
+    assert!(
+        text.contains("access token"),
+        "the failure must explain what XOAUTH2 expects: {}",
+        text
+    );
+
+    // The same server with the default mechanism still connects, so
+    // the failure above is about the mechanism, not the server.
+    let mut plain = config();
+    plain.auth = mail_imap::config::AuthMethod::Login;
+    ImapClient::connect(&plain, false).expect("LOGIN must still work against this server");
+}

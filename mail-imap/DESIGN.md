@@ -910,6 +910,45 @@ The one exception is `--mock`, where no server is reached and the
 whole config is optional — and there `info` reports which file it
 actually read, or that it read none.
 
+### Authentication, and the one thing here with no gate behind it
+
+`auth` selects the mechanism: `login` (the default) or `xoauth2`.
+Under XOAUTH2 the secret is an OAuth 2 access token, and it arrives
+through exactly the machinery a password does — `password` or
+`password-command` — because a token is a short-lived secret fetched
+from somewhere else, which is what that machinery is for. Acquiring it
+(the OAuth dance, refresh tokens, a client secret) is deliberately not
+this tool's job.
+
+The capability a mechanism needs is asked of `AuthMethod`
+(`required_capability`) rather than spelled at the call site, so the
+mechanism and its requirement stay one fact — the same reason the
+access gates ask `AccessLevel` instead of comparing levels inline.
+
+The payload is fixed and unforgiving:
+`user=<user>\x01auth=Bearer <token>\x01\x01`, where `\x01` is one
+byte, handed back raw because the `imap` crate base64-encodes whatever
+the authenticator returns. Encoding it here too would send
+double-encoded rubbish that a server can only report as a generic
+failure. That is unit-tested byte for byte, including a count of the
+0x01 separators, because they are invisible in a string literal and a
+stray space would look identical in a diff.
+
+**And that is as far as the proof goes.** The XOAUTH2 *exchange* has no
+end-to-end test, and it is the only thing in this tree in that
+position. GreenMail turned out to advertise `AUTH=XOAUTH2` and then
+refuse the RFC 3501 challenge flow — it wants the initial response
+inline, the RFC 4959 SASL-IR form, which the `imap` crate does not
+send — so the throwaway server can neither complete an exchange nor
+exercise the missing-capability refusal. What `tests/wire.rs` does
+cover is that an advertised mechanism gets past the gate and that a
+failure past it reaches the user wrapped in something actionable
+rather than as a bare protocol error.
+
+So: the first person to point this at Gmail or Microsoft 365 is the
+test. That is written down in the README too, where a user will see it,
+rather than only here.
+
 ### Timeouts, and what they do not cover
 
 `timeout` (seconds, default 30, `0` to disable) is set on the session

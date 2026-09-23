@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{AuthMethod, Config};
 use crate::imap::mime;
 use crate::imap::{
     Permanent,
@@ -10,7 +10,7 @@ use chrono::{DateTime, FixedOffset};
 use imap::extensions::idle::SetReadTimeout;
 use imap::extensions::sort::{SortCharset, SortCriterion};
 use imap::extensions::thread::{ThreadAlgorithm, ThreadCharset};
-use imap::{Client, ClientBuilder, Connection, ConnectionMode, Session};
+use imap::{Authenticator, Client, ClientBuilder, Connection, ConnectionMode, Session};
 use imap_proto::NameAttribute;
 use imap::types::Flag;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -56,6 +56,32 @@ fn is_poisoned(e: &imap::Error) -> bool {
             | imap::Error::ConnectionLost
             | imap::Error::Io(_)
     )
+}
+
+/// XOAUTH2, as Google and Microsoft implement it.
+///
+/// The server sends an empty challenge and the client answers with one
+/// string; there is no negotiation to get wrong. The shape is fixed --
+/// `user=<user>^Aauth=Bearer <token>^A^A`, where `^A` is a single
+/// 0x01 byte -- and the `imap` crate base64-encodes what `process`
+/// returns, so this must hand back the raw bytes and not encode them
+/// itself.
+///
+/// This is the one thing here no test in this tree can prove end to
+/// end: GreenMail does not speak XOAUTH2, so `tests/wire.rs` can cover
+/// the refusal and not the exchange. The payload is what carries the
+/// bugs, though, and that is unit-tested against the form above.
+struct XOAuth2 {
+    user: String,
+    token: String,
+}
+
+impl Authenticator for XOAuth2 {
+    type Response = Vec<u8>;
+
+    fn process(&self, _challenge: &[u8]) -> Self::Response {
+        format!("user={}\x01auth=Bearer {}\x01\x01", self.user, self.token).into_bytes()
+    }
 }
 
 impl RealClient {
@@ -119,7 +145,7 @@ impl RealClient {
         // trait is also read-only -- there is no matching "set write
         // timeout" -- so a stalled write (a large `APPEND` to a server
         // that stopped reading, say) is not bounded by this either.
-        let client = if config.timeout == 0 {
+        let mut client = if config.timeout == 0 {
             client
         } else {
             let mut conn = client
@@ -148,10 +174,65 @@ impl RealClient {
             eprintln!("Logging in as '{}'...", config.username);
         }
 
-        let session = client
-            .login(config.username.as_str(), password.as_str())
-            .map_err(|(e, _)| e)
-            .with_context(|| format!("login as '{}' failed (check credentials / server)", config.username))?;
+        let session = match config.auth {
+            AuthMethod::Login => client
+                .login(config.username.as_str(), password.as_str())
+                .map_err(|(e, _)| e)
+                .with_context(|| {
+                    format!("login as '{}' failed (check credentials / server)", config.username)
+                })?,
+            AuthMethod::XOAuth2 => {
+                // Asked before the exchange, because a server that does
+                // not offer XOAUTH2 answers the AUTHENTICATE with a
+                // protocol error rather than anything a user could act
+                // on -- and the useful answer is which methods it does
+                // offer.
+                let caps = client
+                    .capabilities()
+                    .context("could not read the server's capabilities before authenticating")?;
+                // Asked of AuthMethod rather than spelled here, so the
+                // method and the capability it needs stay one fact.
+                let needed = config.auth.required_capability().unwrap_or("");
+                if !needed.is_empty() && !caps.has_str(needed) {
+                    // `capability_to_string` is already how this file
+                    // renders a capability, including AUTH= mechanisms.
+                    let offered: Vec<String> = caps
+                        .iter()
+                        .map(capability_to_string)
+                        .filter(|c| c.starts_with("AUTH="))
+                        .collect();
+                    bail!(
+                        "the server does not advertise {}, so 'auth = \"{}\"' cannot be used \
+                         with it{}. Set 'auth' back to \"login\", or point this at a server \
+                         that offers it",
+                        needed,
+                        config.auth.as_str(),
+                        if offered.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (it offers {})", offered.join(", "))
+                        }
+                    );
+                }
+                if debug {
+                    eprintln!("Authenticating as '{}' with XOAUTH2...", config.username);
+                }
+                client
+                    .authenticate("XOAUTH2", &XOAuth2 {
+                        user: config.username.clone(),
+                        token: password.clone(),
+                    })
+                    .map_err(|(e, _)| e)
+                    .with_context(|| {
+                        format!(
+                            "XOAUTH2 authentication as '{}' failed -- the secret is an OAuth 2 \
+                             access token here, not a password, and an expired token fails the \
+                             same way a wrong one does",
+                            config.username
+                        )
+                    })?
+            }
+        };
 
         Ok(session)
     }
@@ -1405,6 +1486,8 @@ fn format_address(addr: &imap_proto::types::Address) -> String {
 
 #[cfg(test)]
 mod tests {
+    use imap::Authenticator as _;
+    use super::XOAuth2;
     use super::{address_from_header, header_value, RealClient};
 
     #[test]
@@ -1451,6 +1534,43 @@ mod tests {
     // decode_rfc2047 moved to `mime.rs` (it belongs beside the MIME
     // parser, which now also needs it for `read`'s header summary) and
     // its tests moved with it.
+
+    #[test]
+    fn xoauth2_builds_the_exact_sasl_string_google_and_microsoft_expect() {
+        // The one part of XOAUTH2 this tree can prove. The form is
+        // fixed by Google's and Microsoft's documentation:
+        //   user=<user>^Aauth=Bearer <token>^A^A
+        // with ^A a single 0x01 byte, and NOT base64-encoded here --
+        // the `imap` crate encodes whatever `process` returns, so
+        // encoding it too would send double-encoded rubbish.
+        let a = XOAuth2 {
+            user: "alice@example.com".to_string(),
+            token: "ya29.a0Af".to_string(),
+        };
+        let got = a.process(b"");
+        assert_eq!(
+            got,
+            b"user=alice@example.com\x01auth=Bearer ya29.a0Af\x01\x01".to_vec()
+        );
+        // Spelled out byte by byte as well, because the separator is
+        // invisible in a string literal and a space or a newline
+        // slipping in would look identical in a diff.
+        assert_eq!(got.iter().filter(|b| **b == 0x01).count(), 3);
+        assert!(got.ends_with(&[0x01, 0x01]));
+        assert!(!got.contains(&b'\n'));
+    }
+
+    #[test]
+    fn xoauth2_answers_whatever_challenge_it_is_given() {
+        // The server's challenge is empty in practice, but the answer
+        // does not depend on it at all -- there is no negotiation to
+        // get wrong, and this pins that.
+        let a = XOAuth2 {
+            user: "u".to_string(),
+            token: "t".to_string(),
+        };
+        assert_eq!(a.process(b""), a.process(b"anything at all"));
+    }
 
     #[test]
     fn charset_prefixed_leaves_ascii_query_on_the_wire_unchanged() {
