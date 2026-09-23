@@ -457,6 +457,88 @@ fn sorting_goes_through_the_server_when_it_advertises_sort() {
     );
 }
 
+/// `date` and `arrival` are different orderings, on both paths.
+///
+/// This is the one thing GreenMail can prove that the mock cannot: the
+/// messages are delivered in one order and carry `Date:` headers in the
+/// reverse order, so a run that confused the two keys returns the list
+/// backwards rather than merely unsorted.
+///
+/// Both paths are covered from here. `date` alone is server-sortable,
+/// so it goes out as `UID SORT DATE`; adding `uid` -- which RFC 5256
+/// has no criterion for -- forces the same spec down the client-side
+/// fallback, which is where the two keys used to collapse into one.
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn sent_date_and_arrival_are_not_the_same_ordering() {
+    let mut c = client();
+    let token = unique("sentdate");
+    // Delivered first .. last; written last .. first.
+    for (suffix, sent) in [
+        ("first", "Thu, 17 Sep 2026 12:00:00 +0000"),
+        ("second", "Wed, 16 Sep 2026 12:00:00 +0000"),
+        ("third", "Tue, 15 Sep 2026 12:00:00 +0000"),
+    ] {
+        deliver_raw(&format!(
+            "From: alice@example.com\r\nTo: {}\r\nDate: {}\r\n\
+             Subject: {} {}\r\nContent-Type: text/plain\r\n\r\nbody\r\n",
+            RECIPIENT, sent, token, suffix
+        ));
+    }
+    let query = format!("HEADER SUBJECT \"{}\"", token);
+    let order = |c: &mut ImapClient, spec: &str| -> Vec<String> {
+        let spec = mail_imap::imap::parse_sort(spec).expect("parse");
+        c.search_folders(&["INBOX".to_string()], &query, 0, Some(&spec))
+            .expect("sorted search")
+            .iter()
+            .map(|h| h.subject.rsplit(' ').next().unwrap_or("").to_string())
+            .collect()
+    };
+
+    // The server's own SORT, which has always told the two apart.
+    assert_eq!(
+        order(&mut c, "arrival"),
+        vec!["first", "second", "third"],
+        "arrival order is delivery order"
+    );
+    assert_eq!(
+        order(&mut c, "date"),
+        vec!["third", "second", "first"],
+        "sent order is the reverse here, and UID SORT DATE must give it"
+    );
+
+    // The client-side fallback, forced by a `uid` key. This is the
+    // path that used to order `date` by the internaldate: before the
+    // fix it returned delivery order for both of these.
+    assert_eq!(
+        order(&mut c, "arrival,uid"),
+        vec!["first", "second", "third"],
+        "client-side arrival order is delivery order"
+    );
+    assert_eq!(
+        order(&mut c, "date,uid"),
+        vec!["third", "second", "first"],
+        "client-side `date` must read the Date: header, not the internaldate"
+    );
+
+    // And the metadata carries both, which is what makes that possible
+    // -- the sent date rides along in ENVELOPE, at no extra cost.
+    let spec = mail_imap::imap::parse_sort("uid").expect("parse");
+    let hits = c
+        .search_folders(&["INBOX".to_string()], &query, 0, Some(&spec))
+        .expect("search");
+    assert_eq!(hits.len(), 3);
+    for h in &hits {
+        assert!(h.date.is_some(), "no internaldate for {:?}", h.subject);
+        let sent = h.sent.as_deref().unwrap_or_else(|| panic!("no sent date for {:?}", h.subject));
+        assert!(
+            sent.contains("Sep 2026"),
+            "the sent date is the message's own Date: header, got {:?}",
+            sent
+        );
+    }
+}
+
 #[test]
 #[ignore = "needs an IMAP server: make tests-wire"]
 fn flags_can_be_set_and_cleared() {

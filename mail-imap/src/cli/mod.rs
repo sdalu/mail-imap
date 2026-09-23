@@ -2629,6 +2629,7 @@ mod tests {
             subject: "Hi".into(),
             from: "a@example.com".into(),
             date: Some("2026-09-20 12:00:00 +0000".into()),
+            sent: Some("Sun, 20 Sep 2026 11:00:00 +0000".into()),
             size: Some(120),
             flags: vec!["\\Seen".into()],
             parts: 2,
@@ -2651,6 +2652,11 @@ mod tests {
         assert_eq!(value["results"][0]["subject"], "Hi");
         assert_eq!(value["results"][0]["flags"][0], "\\Seen");
         assert_eq!(value["results"][0]["parts"], 2);
+        // Both dates, because they are two quantities and the text
+        // output prints only the arrival one: `-j` is where a caller
+        // that sorted by `date` can see what it sorted by.
+        assert_eq!(value["results"][0]["date"], "2026-09-20 12:00:00 +0000");
+        assert_eq!(value["results"][0]["sent"], "Sun, 20 Sep 2026 11:00:00 +0000");
     }
 
     #[test]
@@ -2662,6 +2668,7 @@ mod tests {
                 subject: "A".into(),
                 from: "a@example.com".into(),
                 date: None,
+                sent: None,
                 size: None,
                 flags: Vec::new(),
                 parts: 1,
@@ -2672,6 +2679,7 @@ mod tests {
                 subject: "B".into(),
                 from: "b@example.com".into(),
                 date: None,
+                sent: None,
                 size: None,
                 flags: Vec::new(),
                 parts: 1,

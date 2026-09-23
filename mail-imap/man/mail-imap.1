@@ -133,6 +133,21 @@ Overrides
 .Ic sort
 from the config.
 Default: most recent first.
+.Ic date
+and
+.Ic arrival
+are different orderings:
+.Ic date
+is the message's own
+.Ic Date :
+header, when it was sent, and
+.Ic arrival
+the mailbox's internaldate, when it got here.
+A message with no readable
+.Ic Date :
+header sorts first under
+.Ic date
+rather than borrowing its arrival date.
 .It Fl h , Fl -help
 Print help and exit.
 .It Fl V , Fl -version

@@ -107,6 +107,7 @@ cargo run -- --help
   Message-ID / References headers)
 - List unread emails of one or more folders
 - Sort search/unread results by uid/date/arrival/size/subject/from/to/cc
+  (`date` is when it was sent, `arrival` when it reached the mailbox)
   (`-S`/`--sort`): server-side `UID SORT` (RFC 5256) when the server
   advertises `SORT`, client-side sorting otherwise
 - Strip a part out of a message and keep the message (`part strip`):
@@ -945,7 +946,7 @@ Each command prints one compact JSON object to stdout:
 | `info`                                                   | `{"tool", "config", "access", "folders", "defaults", "server"}` — see [`info`](#info) for the fields of each                                                                                                                |
 | `folder list`                                            | `{"count", "folders": [{"name", "delimiter", "no_inferiors", "attrs"}]}` (`delimiter` is `null` for a mailbox reported with none; `attrs` carries `\Marked` and the RFC 6154 special uses)                                  |
 | `folder create` / `rename` / `subscribe` / `unsubscribe` | `{"action", "folder"}`, plus `"to"` for a `rename` and `"use"` for a `create` that declared a special use                                                                                                                   |
-| `search`                                                 | one folder: `{"folder", "query", "count", "results": [...]}`; several folders: `{"folders": [...], "query", "count", "results": [...]}`. Each result includes `"folder"` (its mailbox) and `"parts"` (number of MIME parts) |
+| `search`                                                 | one folder: `{"folder", "query", "count", "results": [...]}`; several folders: `{"folders": [...], "query", "count", "results": [...]}`. Each result includes `"folder"` (its mailbox), `"parts"` (number of MIME parts), `"date"` (when it arrived — the internaldate, and the one the text output prints) and `"sent"` (the message's own `Date:` header, `null` when it has none) |
 | `read`                                                   | one `{"folder", "uid", "content", "source"}` object per selected UID; `source` is `text`, `html`, `raw` or `none`, naming which part `content` came from                                                                    |
 | `count` / `status`                                       | `{"all", "counts": [{"name", "messages", "unseen", "recent", "uid_next", "uid_validity"}]}`                                                                                                                                 |
 | `uid`                                                    | one `{"folder", "count", "uids": [1, 2, ...]}` object per selected folder                                                                                                                                                   |
@@ -990,7 +991,12 @@ command.
   Comma-separated criteria (`uid`, `date`, `arrival`, `size`,
   `subject`, `from`, `to`, `cc`), first is primary, a `-` prefix makes
   one descending (`-date`, `subject,-size`). Overrides `sort` from the
-  config. Default: most recent first.
+  config. Default: most recent first. `date` and `arrival` are
+  different orderings: `date` is the message's own `Date:` header (when
+  it was *sent*), `arrival` the mailbox's internaldate (when it *got
+  here*), and a message written on Friday and delivered on Monday sorts
+  in two places. A message whose `Date:` is missing or unreadable sorts
+  first under `date` rather than borrowing its arrival date.
 - **`-M, --max <N>`** — cap search results for this run, overriding
   `max` from the config. `0` means no cap, which is the default.
 - **`-j, --json`** — one compact single-line JSON object per result on

@@ -55,7 +55,15 @@ pub struct SearchResult {
     pub folder: String,
     pub subject: String,
     pub from: String,
+    /// When the message ARRIVED: the mailbox's internaldate, as
+    /// `%Y-%m-%d %H:%M:%S %z`. This is the date `search` prints.
     pub date: Option<String>,
+    /// When the message was SENT: its own `Date:` header, verbatim and
+    /// so in RFC 5322 form, or `None` when it carries none the server
+    /// reported. A different quantity from `date` — a message written
+    /// on Friday and delivered on Monday has two — which is why
+    /// `--sort date` and `--sort arrival` need both to be distinct.
+    pub sent: Option<String>,
     pub size: Option<u32>,
     pub flags: Vec<String>,
     /// Number of MIME leaf parts of the message (0 when unknown).

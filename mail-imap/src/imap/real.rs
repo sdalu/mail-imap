@@ -738,6 +738,12 @@ impl RealClient {
         let date = f
             .internal_date()
             .map(|d| d.format("%Y-%m-%d %H:%M:%S %z").to_string());
+        // The sent date costs nothing extra: it is ENVELOPE's first
+        // field, and ENVELOPE is already in both fetch item sets.
+        let sent = env
+            .and_then(|e| e.date.as_ref())
+            .map(|d| bytes_to_string(d).trim().to_string())
+            .filter(|d| !d.is_empty());
         let flags: Vec<String> = f
             .flags()
             .iter()
@@ -750,6 +756,7 @@ impl RealClient {
             subject,
             from,
             date,
+            sent,
             size: f.size,
             flags,
             parts: f.bodystructure().map(count_leaf_parts).unwrap_or(0),
@@ -774,8 +781,14 @@ impl RealClient {
             .unwrap_or_else(|| "(unknown)".to_string());
         let date = f
             .internal_date()
-            .map(|d| d.format("%Y-%m-%d %H:%M:%S %z").to_string())
-            .or_else(|| header_value(raw, b"Date").map(|v| bytes_to_string(&v)));
+            .map(|d| d.format("%Y-%m-%d %H:%M:%S %z").to_string());
+        // `ITEMS_HEADERS` already asks for DATE. It used to stand in
+        // for a missing internaldate, which conflated the two: the
+        // arrival column would quietly show a sent date, and
+        // `--sort arrival` would order by it. It has its own field now.
+        let sent = header_value(raw, b"Date")
+            .map(|v| bytes_to_string(&v).trim().to_string())
+            .filter(|d| !d.is_empty());
         let flags: Vec<String> = f
             .flags()
             .iter()
@@ -788,6 +801,7 @@ impl RealClient {
             subject,
             from,
             date,
+            sent,
             size: f.size,
             flags,
             parts: 0,

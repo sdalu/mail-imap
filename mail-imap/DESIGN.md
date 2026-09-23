@@ -117,6 +117,31 @@ The spec is a comma-separated list of criteria, first = primary, with a
 `subject`, `from`, `to`, `cc` (`src/imap/sort.rs`). A `sort` config field
 provides a default; `-S` overrides it.
 
+**`date` and `arrival` are two quantities, and `SearchResult` carries
+both.** `date` is the message's own `Date:` header (`sent`), `arrival`
+is the mailbox's internaldate (`date`, and the one the text output
+prints). RFC 5256 makes them distinct `UID SORT` keys, so the
+server-side path always told them apart; the client-side fallback had
+only the internaldate and ordered both by it, which made `--sort date`
+silently mean `arrival` on every server without `SORT`. The sent date
+costs nothing to carry: it is `ENVELOPE`'s first field, so both fetch
+item sets already had it on the wire, and the last-resort per-message
+rung already asked for `DATE` in its `HEADER.FIELDS` — what was missing
+was a field to put it in.
+
+That rung used to let the `Date:` header stand in for a missing
+internaldate. It no longer does: a substitution like that is the same
+confusion one level down, and it would have shown a sent date in the
+arrival column and ordered `--sort arrival` by it.
+
+**A sent date that cannot be read sorts first, and borrows nothing.**
+Same rule as a missing internaldate. Falling back to the arrival date
+would place the message in an order neither quantity justifies, and
+silently — the failure this whole distinction exists to end. Unreadable
+means unreadable: the header is parsed as RFC 5322 (chrono's
+`parse_from_rfc2822`, which accepts the obsolete trailing zone comment,
+`-0700 (PDT)`), and anything else joins the missing ones at the front.
+
 Real backend: when a spec is given, the server advertises `SORT`
 (RFC 5256) and the spec is server-sortable (no `uid` key), the UID list
 comes from a single `UID SORT <criteria> UTF-8 <query>` — the cap is

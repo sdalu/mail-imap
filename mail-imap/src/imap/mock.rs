@@ -26,6 +26,37 @@ pub struct MockClient {
     moved: BTreeSet<(String, u32)>,
 }
 
+/// The `Date:` header each mock message carries, by UID.
+///
+/// Deliberately in none of the other orders the mock has: ascending by
+/// sent instant these are 3, 1, 5, 2, 4, while UID and arrival both
+/// ascend 1..5. A mock whose sent dates agreed with its arrival order
+/// could not show the difference between `--sort date` and `--sort
+/// arrival`, which is the whole of what separates those two keys.
+///
+/// The offsets differ too, so an ordering that compared the printed
+/// strings instead of the instants would get 5 and 2 wrong.
+const SENT: [(u32, &str); 5] = [
+    (1, "Tue, 15 Sep 2026 09:00:00 +0000"),
+    (2, "Fri, 18 Sep 2026 17:30:00 +0200"),
+    (3, "Mon, 14 Sep 2026 08:15:00 -0500"),
+    (4, "Sat, 19 Sep 2026 23:45:00 +0000"),
+    (5, "Wed, 16 Sep 2026 11:00:00 +0900"),
+];
+
+/// The internaldate the mock reports for a UID: distinct per message
+/// and ascending with the UID, which is how a real mailbox behaves.
+fn arrival(uid: u32) -> String {
+    format!("2026-09-20 12:{:02}:00 +0000", uid.min(59))
+}
+
+/// The `Date:` header for a UID, if the table has one.
+fn sent(uid: u32) -> Option<String> {
+    SENT.iter()
+        .find(|(u, _)| *u == uid)
+        .map(|(_, d)| (*d).to_string())
+}
+
 impl MockClient {
     pub fn connect(_config: &Config) -> Result<Self> {
         Ok(MockClient {
@@ -145,7 +176,8 @@ impl MockClient {
                 folder: folder.to_string(),
                 subject: subject.clone(),
                 from: from.clone(),
-                date: Some("2026-09-20 12:00:00 +0000".to_string()),
+                date: Some(arrival(*uid)),
+                sent: sent(*uid),
                 size: Some(120),
                 flags: self
                     .message_flags
@@ -497,6 +529,13 @@ impl ImapBackend for MockClient {
             "From: {}\r\nSubject: {}\r\nMIME-Version: 1.0\r\n",
             from, subject
         );
+        // The same Date: the search metadata reports. A mock whose raw
+        // bytes named a different sent date than its own search results
+        // would be two mocks, and `--sort date` could agree with one of
+        // them while disagreeing with what `read` shows.
+        if let Some(d) = sent(uid) {
+            msg.push_str(&format!("Date: {}\r\n", d));
+        }
         if parts.len() < 2 {
             msg.push_str("Content-Type: text/plain\r\n\r\n");
             msg.push_str(body.as_str());
