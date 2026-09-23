@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 /// The folders a command works on, as given on the command line:
 /// literal names, IMAP `LIST` patterns, or nothing at all (in which
 /// case the `folder` of the config is used).
-#[derive(Debug, Clone, Default)]
+/// `PartialEq` so a caller can check what was asked for against a spec
+/// built the public way (`FolderSpec::new`), rather than this having to
+/// expose the vector it keeps.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FolderSpec {
     patterns: Vec<String>,
 }

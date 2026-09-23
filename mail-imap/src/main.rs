@@ -105,6 +105,10 @@ impl Args {
         self.mock
     }
 
+    // Unkillable by mutation as the suite is run: the tests build with
+    // default features, where the arm above is the one compiled, so a
+    // mutant here changes nothing observable. `make check` lints this
+    // configuration; nothing tests it.
     #[cfg(not(feature = "mock"))]
     fn wants_mock(&self) -> bool {
         false
@@ -929,5 +933,119 @@ fn main() {
 
     if let Err(e) = result {
         fail(json, &format!("{:#}", e));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build the parsed arguments the way the binary gets them.
+    fn args(argv: &[&str]) -> Args {
+        let mut full = vec!["mail-imap"];
+        full.extend_from_slice(argv);
+        Args::parse_from(full)
+    }
+
+    /// `flag add 1 4 seen` is one list, split on "does this parse as a
+    /// selection?".
+    ///
+    /// DESIGN calls the split well-defined because `parse_flag_names`
+    /// refuses a name that would parse as a selection, so neither half
+    /// can be mistaken for the other -- but nothing tested the split
+    /// itself. It is in `main.rs`, which had no test module at all, and
+    /// mutation testing found the consequence: `split_args` could
+    /// return two empty lists, or a single invented name, and the suite
+    /// passed. Every `flag`/`tag` `add`/`remove` goes through it.
+    ///
+    /// Only the paths that return are exercised here: the refusals call
+    /// `fail`, which exits the process.
+    #[test]
+    fn selections_and_names_are_split_on_which_one_a_token_parses_as() {
+        let split = |argv: &[&str]| {
+            let owned: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
+            let (sels, names) = split_args(&owned, false);
+            (sels.len(), names)
+        };
+
+        // The documented shape: two selections, then one name.
+        assert_eq!(split(&["1", "4", "seen"]), (2, vec!["seen".to_string()]));
+        // One of each.
+        assert_eq!(split(&["5", "flagged"]), (1, vec!["flagged".to_string()]));
+        // Several names after one selection.
+        assert_eq!(
+            split(&["1-9", "seen", "flagged"]),
+            (1, vec!["seen".to_string(), "flagged".to_string()])
+        );
+        // Selections of every shape the grammar has, and a name that
+        // could never be one.
+        assert_eq!(
+            split(&["Archive::3", "last:2", "*", "invoice"]),
+            (3, vec!["invoice".to_string()])
+        );
+    }
+
+    /// `-f` and `-A` land in one list of patterns.
+    ///
+    /// `folder_spec` could be replaced with `FolderSpec::default()` --
+    /// an empty spec, which means "the config's folder" -- so every
+    /// `-f` and `-A` on the command line would be silently ignored and
+    /// every command would run against INBOX instead.
+    #[test]
+    fn the_folders_asked_for_on_the_command_line_reach_the_spec() {
+        assert!(!folder_spec(&args(&["info"])).is_given(), "nothing asked for");
+
+        let spec = |argv: &[&str]| folder_spec(&args(argv));
+        let asked = |names: &[&str]| FolderSpec::new(names.iter().map(|s| (*s).to_string()).collect());
+
+        let one = spec(&["-f", "Archive", "info"]);
+        assert!(one.is_given());
+        assert_eq!(one, asked(&["Archive"]));
+
+        // Repeatable and comma-separated mean the same thing.
+        assert_eq!(
+            spec(&["-f", "INBOX,Archive", "-f", "Sent", "info"]),
+            asked(&["INBOX", "Archive", "Sent"])
+        );
+
+        // `-A` is exactly `-f '*'`, and joins whatever `-f` gave.
+        assert_eq!(spec(&["-A", "info"]), asked(&["*"]));
+        assert_eq!(spec(&["-f", "Archive", "-A", "info"]), asked(&["Archive", "*"]));
+    }
+
+    /// A selection reaches the command as the messages it names.
+    ///
+    /// `Sel::resolve` could return an empty list and the suite passed:
+    /// every command would then act on no messages at all while
+    /// reporting success. Only the returning path is exercised -- the
+    /// empty and unparseable ones call `fail`, which exits.
+    #[test]
+    fn a_selection_resolves_to_the_messages_it_names() {
+        let sel = |tokens: &[&str]| Sel {
+            selection: tokens.iter().map(|s| (*s).to_string()).collect(),
+        };
+        let one = sel(&["5"]).resolve(false);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].resolve(None).expect("a bare UID needs no list"), vec![5]);
+
+        // Several tokens stay several selections, in the order given:
+        // each may name its own folder, so they cannot be merged.
+        let many = sel(&["Archive::1-3", "7", "Sent::9"]).resolve(false);
+        assert_eq!(many.len(), 3);
+        assert_eq!(many[0].folder.as_deref(), Some("Archive"));
+        assert_eq!(many[1].folder, None);
+        assert_eq!(many[2].folder.as_deref(), Some("Sent"));
+    }
+
+    /// `--mock` is asked for, or it is not.
+    ///
+    /// Forcing it `true` makes every run use the mock backend -- a
+    /// build that never touches the account it was pointed at, and
+    /// reports success for work it did not do.
+    #[test]
+    fn the_mock_backend_is_used_only_when_asked_for() {
+        assert!(!args(&["info"]).wants_mock(), "the real backend by default");
+        #[cfg(feature = "mock")]
+        assert!(args(&["--mock", "info"]).wants_mock());
     }
 }
