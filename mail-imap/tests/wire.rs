@@ -174,8 +174,8 @@ fn append_raw(message: &str) {
 }
 
 /// The exact bytes `BODY[]` returns for one UID in INBOX, over a raw
-/// connection of its own -- not through `ImapClient::get_email`, which
-/// rebuilds its own summary text and would hide the very thing a
+/// connection of its own -- not through `ImapClient::read_message`,
+/// which renders the message and would hide the very thing a
 /// line-ending check needs to see.
 fn fetch_raw_body(uid: u32) -> Vec<u8> {
     let cfg = config();
@@ -376,8 +376,8 @@ fn reading_a_message_does_not_mark_it_seen() {
         before
     );
 
-    let body = c.get_email("INBOX", uid).expect("read");
-    assert!(body.contains("body number 0"), "body not returned");
+    let rendered = c.read_message("INBOX", uid, false).expect("read");
+    assert!(rendered.body.contains("body number 0"), "body not returned");
 
     let after = c.message_flags("INBOX", uid).expect("FETCH FLAGS");
     assert!(
@@ -653,8 +653,12 @@ fn an_appended_message_can_be_found_by_search_and_read_back() {
     assert_eq!(hits.len(), 1, "the appended message was not found by search");
     assert_eq!(hits[0].uid, uid, "the reported UID does not match what search found");
 
-    let body = c.get_email("INBOX", uid).expect("read");
-    assert!(body.contains("appended body"), "body not returned: {}", body);
+    let rendered = c.read_message("INBOX", uid, false).expect("read");
+    assert!(
+        rendered.body.contains("appended body"),
+        "body not returned: {}",
+        rendered.body
+    );
 
     let flags = c.message_flags("INBOX", uid).expect("flags");
     assert!(
@@ -673,8 +677,8 @@ fn a_lone_lf_is_normalized_to_crlf_before_appending() {
     // server while every local check still shows the message as fine.
     // `ImapClient::append_message` normalizes a lone LF to CRLF before
     // sending; this reads the message back over a raw socket (see
-    // `fetch_raw_body`'s own doc comment for why not `get_email`) and
-    // checks every line ending it actually got is CRLF, not LF alone.
+    // `fetch_raw_body`'s own doc comment for why not `read_message`)
+    // and checks every line ending it actually got is CRLF, not LF alone.
     let mut c = client();
     let token = unique("crlf");
     let lf_only = format!(
@@ -931,6 +935,68 @@ fn mime_parts_are_listed_and_saved_from_the_real_message() {
 
 #[test]
 #[ignore = "needs an IMAP server: make tests-wire"]
+fn reading_a_multipart_message_shows_the_text_not_the_mime() {
+    // TODO.md section 1, stated as a test: `read` used to hand back
+    // BODY.PEEK[] verbatim for a multipart message -- boundary lines
+    // and base64, the least readable thing the tool could produce.
+    // This is that defect against a real server's MIME framing, not
+    // just the mock's.
+    let mut c = client();
+    let token = unique("readmime");
+    deliver_raw(&format!(
+        "From: alice@example.com\r\n\
+         To: {}\r\n\
+         Subject: {}\r\n\
+         Content-Type: multipart/mixed; boundary=WIREBOUND2\r\n\
+         \r\n\
+         --WIREBOUND2\r\n\
+         Content-Type: text/plain\r\n\
+         \r\n\
+         the readable body\r\n\
+         --WIREBOUND2\r\n\
+         Content-Type: application/pdf\r\n\
+         Content-Disposition: attachment; filename=\"report.pdf\"\r\n\
+         Content-Transfer-Encoding: base64\r\n\
+         \r\n\
+         SGVsbG8=\r\n\
+         --WIREBOUND2--\r\n",
+        RECIPIENT, token
+    ));
+    let uids = uids_for(&mut c, &token);
+    assert_eq!(uids.len(), 1);
+    let uid = uids[0];
+
+    let rendered = c.read_message("INBOX", uid, false).expect("read");
+    assert!(
+        rendered.body.contains("the readable body"),
+        "{}",
+        rendered.body
+    );
+    let text = rendered.to_text();
+    assert!(
+        !text.contains("SGVsbG8="),
+        "a base64 line leaked into the readable text: {}",
+        text
+    );
+    assert!(
+        !text.contains("WIREBOUND2"),
+        "a MIME boundary leaked into the readable text: {}",
+        text
+    );
+    assert!(
+        text.contains("report.pdf"),
+        "the attachment should still be named: {}",
+        text
+    );
+
+    // `--raw` is still the escape hatch: the same message, unparsed.
+    let raw = c.read_message("INBOX", uid, true).expect("raw read");
+    assert_eq!(raw.source, "raw");
+    assert!(raw.to_text().contains("WIREBOUND2"), "{}", raw.to_text());
+}
+
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
 fn a_reply_chain_is_threaded_from_the_headers() {
     let mut c = client();
     let token = unique("thread");
@@ -1004,7 +1070,7 @@ fn readonly_changes_nothing_on_a_real_server() {
     assert!(err.to_string().contains("readonly"), "{}", err);
 
     // ... and reading still works, without marking anything seen.
-    assert!(ro.get_email("INBOX", uid).is_ok());
+    assert!(ro.read_message("INBOX", uid, false).is_ok());
     let flags = ro.message_flags("INBOX", uid).expect("flags");
     assert!(!flags.iter().any(|f| f.eq_ignore_ascii_case("\\Flagged")));
     assert!(!flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen")));
@@ -1053,8 +1119,8 @@ fn probe(c: &mut ImapClient, g: &Ground) -> Vec<Probe> {
         // to read.
         ("message_flags: present uid", c.message_flags(&g.folder, g.uid).is_ok()),
         ("message_flags: absent uid", c.message_flags(&g.folder, g.absent_uid).is_ok()),
-        ("get_email: present uid", c.get_email(&g.folder, g.uid).is_ok()),
-        ("get_email: absent uid", c.get_email(&g.folder, g.absent_uid).is_ok()),
+        ("read_message: present uid", c.read_message(&g.folder, g.uid, false).is_ok()),
+        ("read_message: absent uid", c.read_message(&g.folder, g.absent_uid, false).is_ok()),
         ("list_parts: present uid", c.list_parts(&g.folder, g.uid).is_ok()),
         ("list_parts: absent uid", c.list_parts(&g.folder, g.absent_uid).is_ok()),
         ("thread_uids: present uid", c.thread_uids(&g.folder, g.uid).is_ok()),

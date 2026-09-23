@@ -214,8 +214,21 @@ Most recent first unless
 is given.
 Results are capped by
 .Fl M Ns / Ns Ic max .
-.It Cm read Ar selection No ...
-Read the selected email(s).
+.It Cm read Oo Fl -raw Oc Ar selection No ...
+Read the selected email(s): a short header summary, then the message\(aqs
+readable text \(em its
+.Ic text/plain
+part, or its
+.Ic text/html
+part with the tags stripped \(em followed by a list of its attachments.
+A message with neither says what it holds and points at
+.Cm part list
+rather than printing base64.
+.Fl -raw
+prints the MIME body verbatim instead, and no attachment list.
+The header summary is read from the message\(aqs own headers, not from
+the server\(aqs
+.Ic ENVELOPE .
 .It Cm count
 Message counts and status
 .Pq Ic STATUS

@@ -238,9 +238,17 @@ enum Command {
         /// IMAP search query
         query: String,
     },
-    /// Read email(s) by message selection
-    #[clap(after_help = SELECTION_HELP)]
+    /// Read email(s) by message selection: the header summary, then
+    /// the readable text -- text/plain if there is one, else text/html
+    /// with its tags stripped, else a note naming what the message
+    /// holds -- and a brief listing of anything else it carries
     Read {
+        /// Show the message the way it always printed here: the header
+        /// summary followed by the exact fetched bytes, unparsed --
+        /// for a caller already parsing that shape, or a message this
+        /// tool's MIME parser cannot make sense of
+        #[clap(long = "raw")]
+        raw: bool,
         #[clap(flatten)]
         sel: Sel,
     },
@@ -633,12 +641,13 @@ fn main() {
         Command::Search { query } => {
             cli::search_emails(&config, query, &folder_spec(&args), json, debug)
         }
-        Command::Read { sel } => {
+        Command::Read { raw, sel } => {
             let selections = sel.resolve(json);
             cli::read_emails(
                 &config,
                 &folder_spec(&args),
                 &selections,
+                *raw,
                 json,
                 debug,
             )

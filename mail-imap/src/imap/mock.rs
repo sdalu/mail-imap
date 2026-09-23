@@ -223,19 +223,6 @@ impl ImapBackend for MockClient {
         Ok(out)
     }
 
-    fn get_email(&mut self, folder: &str, uid: u32) -> Result<String> {
-        self.require_folder(folder)?;
-        let (_, subject, from, body) = self
-            .messages
-            .iter()
-            .find(|(u, _, _, _)| *u == uid)
-            .ok_or_else(|| anyhow::anyhow!("no email with UID {} (mock)", uid))?;
-        Ok(format!(
-            "Subject: {}\nFrom: {}\nDate: 2026-09-20 12:00:00 +0000\n\n{}\n",
-            subject, from, body
-        ))
-    }
-
     fn mailbox_counts(&mut self, folder: Option<&str>) -> Result<Vec<Mailbox>> {
         let inbox_messages = self.messages.len() as u32;
         let counts: Vec<Mailbox> = self

@@ -96,7 +96,9 @@ cargo run -- --help
   query carrying a non-ASCII term is sent as `CHARSET UTF-8`, falling
   back to the bare form on a server that refuses it
 - Read email(s) by message selection: `[FOLDER::]UIDS`, with lists, ranges
-  and `*` for every message
+  and `*` for every message — showing the message's **readable text**
+  (the `text/plain` part, or `text/html` with its tags stripped) and a
+  list of its attachments, with `--raw` for the verbatim MIME body
 - Show message counts / status of mailboxes (IMAP `STATUS`)
 - List the message UIDs of the selected folder(s)
 - List the message UIDs of the thread(s) containing given message
@@ -164,7 +166,7 @@ takes the folder flags `-f`/`-A`; see [Folder selection](#folder-selection).
 | `folder unsubscribe` | `folder unsubscribe <FOLDER>`                     | Unsubscribe from a mailbox (needs `restructure`)                                                                                                                                |
 | `folder delete`      | `folder delete <FOLDER> [--force]`                | Delete a mailbox and everything in it. INBOX is refused at every level; a mailbox holding messages is refused without `--force` (needs `full`)                                  |
 | `search`             | `search <QUERY>`                                  | Search emails with any IMAP `SEARCH` query in the selected folder(s); most recent first unless `-S`                                                                             |
-| `read`               | `read <SELECTION...>`                             | Read the selected email(s)                                                                                                                                                      |
+| `read`               | `read [--raw] <SELECTION...>`                     | Read the selected email(s): the readable text, then a list of the attachments. `--raw` prints the message's MIME body verbatim instead                                          |
 | `count`              | `count`                                           | Message counts / status of the selected folder(s), or every mailbox if none is given (alias: `status`)                                                                          |
 | `uid`                | `uid`                                             | List the message UIDs of the selected folder(s), one block per folder                                                                                                           |
 | `thread`             | `thread <SELECTION...>`                           | List the UIDs of every message in the thread(s) containing the selected message(s)                                                                                              |
@@ -940,7 +942,7 @@ Each command prints one compact JSON object to stdout:
 | `folder list`                                            | `{"count", "folders": [{"name", "delimiter", "no_inferiors", "attrs"}]}` (`delimiter` is `null` for a mailbox reported with none; `attrs` carries `\Marked` and the RFC 6154 special uses)                                  |
 | `folder create` / `rename` / `subscribe` / `unsubscribe` | `{"action", "folder"}`, plus `"to"` for a `rename` and `"use"` for a `create` that declared a special use                                                                                                                   |
 | `search`                                                 | one folder: `{"folder", "query", "count", "results": [...]}`; several folders: `{"folders": [...], "query", "count", "results": [...]}`. Each result includes `"folder"` (its mailbox) and `"parts"` (number of MIME parts) |
-| `read`                                                   | one `{"folder", "uid", "content"}` object per selected UID                                                                                                                                                                  |
+| `read`                                                   | one `{"folder", "uid", "content", "source"}` object per selected UID; `source` is `text`, `html`, `raw` or `none`, naming which part `content` came from                                                                    |
 | `count` / `status`                                       | `{"all", "counts": [{"name", "messages", "unseen", "recent", "uid_next", "uid_validity"}]}`                                                                                                                                 |
 | `uid`                                                    | one `{"folder", "count", "uids": [1, 2, ...]}` object per selected folder                                                                                                                                                   |
 | `thread`                                                 | one `{"folder", "uid", "count", "uids": [1, 2, ...]}` object per selected message (all UIDs of the thread containing `uid`, ascending, `uid` included)                                                                      |

@@ -9,25 +9,6 @@ closing it.
 
 Ordered by how likely it is to bite.
 
-## 1. `read` returns the raw MIME body
-
-`get_email` builds a short header summary and then appends
-`BODY.PEEK[]` verbatim (`src/imap/real.rs:714`). For a multipart
-message that is boundary lines and base64 — the command an
-AI caller reaches for first returns the least readable thing the tool
-produces.
-
-The parser to fix it is already here: `src/imap/mime.rs` has
-`parse_message` and `Part::decoded()`, wired only into `part list` and
-`part save` (`src/imap/real.rs:822,846`). What is missing is a `read`
-that picks the `text/plain` leaf, falls back to `text/html` with the
-tags stripped, and keeps today's behaviour under `--raw`.
-
-Decide, when it is written, what JSON carries: text output may show
-less than JSON but never something different (DESIGN.md, *Output*), so
-`content` cannot quietly become the decoded text while the raw body
-disappears.
-
 ## 2. Authentication is `LOGIN` and nothing else
 
 `establish_session` calls `.login(user, password)`
@@ -58,6 +39,12 @@ knowing about any of them.
 - **No shell completions.** clap 4 is already a dependency;
   `clap_complete` plus a `make install` hook is cheap, and `install`
   already places the man page.
+- **Piping into `head` or `less` panics.** Rust ignores `SIGPIPE`, so
+  a closed pipe surfaces as a failed write: `read '*' | head` ends in
+  `failed printing to stdout: Broken pipe`. The fix is one line
+  restoring the default disposition at startup, and it wants `libc` as
+  a direct dependency — which is why it is a line here rather than
+  something folded into an unrelated commit.
 - **`parse_flag_names` refuses an empty list**, which is a precondition
   of `flag add` / `tag add` rather than a fact about parsing names —
   and one `split_args` already enforces earlier, with a better message.
@@ -74,8 +61,8 @@ knowing about any of them.
 
 Done and out of this list: the `SEARCH` charset declaration,
 `part save --all` / `-o -`, §3 (`folder delete` and
-`folder list --subscribed`), §4 (`copy` and `expunge`), §5 (`append`)
-and §6 (`part strip`). What they
+`folder list --subscribed`), §4 (`copy` and `expunge`), §5 (`append`),
+§6 (`part strip`) and §1 (`read` showing the readable text). What they
 left behind is recorded where it belongs rather than here: the untested
 charset fallback in DESIGN.md under *Declaring a charset on `SEARCH`*,
 why `fetch_part` is the trait's primitive under *MIME parsing*, where
@@ -83,7 +70,8 @@ the line falls between `restructure` and `full` under *Access level*,
 why `expunge` never marks `\Deleted` itself under *Copying and
 expunging*, why a lone LF is normalised before an `append` under
 *Putting a message in*, and why `part strip` writes before it deletes
-under *Stripping a part*.
+under *Stripping a part*, and why the message renderer sits in one
+place rather than in each backend under *Reading a message*.
 
 The numbers of what remains do not close up as entries leave: §1, §2
 and §7 keep the numbers they were given. Nothing cites another entry

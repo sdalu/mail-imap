@@ -47,7 +47,7 @@ operation body can be shared by a `with_backend!` macro.
 | `folder rename`                                       | `RENAME <from> <to>` (INBOX refused outright, at every access level)                                                                                                                                                                                                                                                                |
 | `folder subscribe` / `folder unsubscribe`             | `SUBSCRIBE <name>` / `UNSUBSCRIBE <name>`                                                                                                                                                                                                                                                                                           |
 | `search` / `unread`                                   | per folder: `SELECT` + (`UID SORT <crit> UTF-8 <query>` when `--sort` is given and `SORT` is advertised, else `UID SEARCH <query>`) + batched `UID FETCH` (envelope/flags/date/size/`BODYSTRUCTURE`); folders are searched in order and the results aggregated                                                                      |
-| `read`                                                | `SELECT` + `UID FETCH <uid> (UID ENVELOPE FLAGS INTERNALDATE BODY.PEEK[])`                                                                                                                                                                                                                                                          |
+| `read`                                                | `SELECT` + `UID FETCH <uid> (UID FLAGS INTERNALDATE BODY.PEEK[])` — no `ENVELOPE`: the headers are read from the message itself                                                                                                                                                                                                                                                          |
 | `count` / `status`                                    | `LIST "" *` + `STATUS <folder> (MESSAGES UNSEEN RECENT UIDNEXT UIDVALIDITY)` per mailbox (or one folder when given)                                                                                                                                                                                                                 |
 | `uid`                                                 | per selected folder: `SELECT` + `UID SEARCH ALL`                                                                                                                                                                                                                                                                                    |
 | `thread`                                              | per selected message: `SELECT` + `CAPABILITY`; if `THREAD=REFERENCES` is advertised: one `UID THREAD REFERENCES UTF-8 ALL` (server-side tree, flattened). Otherwise: `UID SEARCH ALL` + batched `UID FETCH <uids> (UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])`, then client-side union-find over Message-IDs |
@@ -458,6 +458,53 @@ outweigh a few hundred bytes of attachment. That is correct, and it is
 not what the command is for — the wire test uses a 4000-byte
 attachment precisely so that it asserts the space is actually
 reclaimed, which a toy fixture would have quietly failed to do.
+
+### Reading a message (`read`)
+
+`read` used to print a short header summary and then the raw
+`BODY.PEEK[]` — which for a multipart message is boundary lines and
+base64, the least readable thing this tool produced, from the command
+an agent reaches for first.
+
+**The rendering lives in one place, and it is not a backend.**
+`ImapClient::read_message` fetches the raw message (`fetch_raw_message`)
+and hands it to `mime::render_message`; `ImapBackend::get_email` is
+gone. Before, each backend rendered its own summary, so the mock and a
+real server produced their text by different code and could drift apart
+without anything noticing. Now there is one renderer and the backends
+only supply bytes.
+
+Dropping `ENVELOPE` from the fetch came with that, and is a gain rather
+than a compromise: the old path asked the server's ENVELOPE for the
+headers and carried a fallback ladder for servers whose ENVELOPE the
+parser could not read. Reading the headers out of the message never
+needs that question asked.
+
+What it shows, in order of preference: the `text/plain` leaf; else the
+`text/html` leaf with its tags stripped; else a note naming what the
+message holds and pointing at `part list` and `part save` — never a
+wall of base64. Every other leaf is listed afterwards as an attachment
+line, so one command says what is in the message.
+
+**The HTML stripper is deliberately poor.** Tags out, half a dozen
+entities decoded, blank lines collapsed. It is not a renderer, it must
+not grow into one, and the comment above it says so — the failure mode
+here is a well-meaning improvement that turns a fallback into a
+half-finished browser.
+
+`--raw` restores the previous behaviour: the header summary, then the
+body verbatim, and no attachment list. One difference from the old
+output is worth stating rather than implying byte-identity — the
+summary's `From`/`To`/`Subject`/`Date` are now read from the message's
+own headers rather than reconstructed from the server's `ENVELOPE`, so
+an address the server re-spelled will be spelled the way the message
+spells it. The body under `--raw` is byte for byte what it always was.
+
+JSON follows the same mode rather than a different one, per the rule in
+*Output* that text may show less than JSON but never something
+different: `content` is the same body the text shows, and a `source`
+field (`text`, `html`, `raw`, `none`) says which leaf it came from, so
+a caller knows what it was given.
 
 ### Passive read-only behaviour
 

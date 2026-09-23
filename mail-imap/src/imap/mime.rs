@@ -1,4 +1,5 @@
-//! Minimal MIME message parser, and the one writer this tree has.
+//! Minimal MIME message parser, the one writer this tree has, and the
+//! one renderer `read` uses.
 //!
 //! The parser is what is needed to enumerate the parts of a message and
 //! extract one part's bytes: header parsing (content-type,
@@ -9,6 +10,12 @@
 //! replaced by stubs, for `part strip` (TODO.md section 6). It does not
 //! add parts, promote a single-part message to multipart, or talk to a
 //! server -- bytes in, bytes out.
+//!
+//! The renderer is [`render_message`] (TODO.md section 1): given the
+//! exact bytes a `FETCH BODY.PEEK[]` returned, it produces what `read`
+//! shows -- the header summary and a readable body -- from raw bytes
+//! alone, so `real.rs` and `mock.rs` never build that text themselves
+//! and cannot drift apart doing it.
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, FixedOffset};
@@ -22,6 +29,11 @@ pub struct Part {
     /// File name from `Content-Disposition: filename` or the `name=`
     /// parameter of `Content-Type`, if present.
     pub filename: Option<String>,
+    /// `charset=` parameter of `Content-Type`, lower-cased, if present.
+    /// `None` means the part did not declare one -- [`render_message`]
+    /// treats that the same as an unrecognized charset, a lossy UTF-8
+    /// reading, rather than an error.
+    pub charset: Option<String>,
     /// `Content-Transfer-Encoding`, lower-cased (defaults to `7bit`).
     pub encoding: String,
     /// The part body, still in its transfer-encoded form.
@@ -81,10 +93,12 @@ fn parse_at_depth(bytes: &[u8], depth: usize) -> Result<Part> {
         .unwrap_or_else(|| "7bit".to_string());
     let filename = disposition_filename(&headers)
         .or_else(|| param_value(&params, "name").map(str::to_string));
+    let charset = param_value(&params, "charset").map(str::to_ascii_lowercase);
 
     let mut part = Part {
         content_type: main,
         filename,
+        charset,
         encoding,
         body: body.to_vec(),
         children: Vec::new(),
@@ -740,6 +754,416 @@ fn splice_message_headers(msg: &[u8], extra: &[u8]) -> Vec<u8> {
     out
 }
 
+// ---------------------------------------------------------------------
+// RFC 2047 encoded words, and the charset registry both it and the
+// renderer's body decoding share.
+// ---------------------------------------------------------------------
+
+/// Decode RFC 2047 encoded-words wherever they appear in a header value
+/// (e.g. `=?utf-8?Q?Votre=20facture?=`). Plain (unencoded) text is kept
+/// as-is.
+pub(crate) fn decode_rfc2047(input: String) -> String {
+    if !input.contains("=?") {
+        return input;
+    }
+    let s = input.as_str();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < s.len() {
+        if s[i..].starts_with("=?") {
+            if let Some((decoded, consumed)) = try_decode_encoded_word(&s[i..]) {
+                out.push_str(&decoded);
+                i += consumed;
+                continue;
+            }
+        }
+        let ch_len = s[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        out.push_str(&s[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
+}
+
+/// Attempt to parse an RFC 2047 encoded word of the form `=?charset?enc?data?=`
+/// at the start of `s`. Returns the decoded value and the number of bytes consumed.
+fn try_decode_encoded_word(s: &str) -> Option<(String, usize)> {
+    // Layout: =?charset?enc?data?=
+    let after_prefix = s.strip_prefix("=?")?; // charset?enc?data?=
+    let q1 = after_prefix.find('?')?;
+    let charset = &after_prefix[..q1];
+    if charset.is_empty() || q1 == 0 {
+        return None;
+    }
+    let after_q1 = &after_prefix[q1 + 1..]; // enc?data?=
+    let enc = *after_q1.as_bytes().first()?;
+    if !matches!(enc, b'B' | b'b' | b'Q' | b'q') {
+        return None;
+    }
+    let after_enc = after_q1.get(1..)?; // ?data?=
+    if !after_enc.starts_with('?') {
+        return None;
+    }
+    let data_and_term = after_enc.get(1..)?; // data?=
+    let q2 = data_and_term.find('?')?;
+    let data = &data_and_term[..q2];
+    let tail = &data_and_term[q2 + 1..];
+    if !tail.starts_with('=') || data.contains('?') {
+        return None;
+    }
+    // =?(2) + charset(q1) + ?(1) + enc(1) + ?(1) + data + ?(1) + =(1)
+    let word_len = 2 + q1 + 1 + 1 + 1 + data.len() + 1 + 1;
+    let decoded = decode_data(data, enc, charset)?;
+    Some((decoded, word_len))
+}
+
+fn decode_data(data: &str, enc: u8, charset: &str) -> Option<String> {
+    let bytes: Vec<u8> = match enc {
+        b'B' | b'b' => {
+            let trimmed: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+            let pad = (4 - (trimmed.len() % 4)) % 4;
+            let padded = format!("{}{}", trimmed, "=".repeat(pad));
+            base64::decode(padded).ok()?
+        }
+        b'Q' | b'q' => {
+            let q = data.replace('_', " ");
+            let mut buf = Vec::new();
+            let b = q.as_bytes();
+            let mut i = 0;
+            while i < b.len() {
+                if b[i] == b'=' && i + 2 < b.len() {
+                    let hi = (b[i + 1] as char).to_digit(16)?;
+                    let lo = (b[i + 2] as char).to_digit(16)?;
+                    buf.push((hi * 16 + lo) as u8);
+                    i += 3;
+                } else {
+                    buf.push(b[i]);
+                    i += 1;
+                }
+            }
+            buf
+        }
+        _ => return None,
+    };
+    Some(decode_charset_bytes(bytes, charset))
+}
+
+/// The two charsets this tool decodes honestly -- UTF-8 and ISO-8859-1
+/// (and its common aliases) -- plus the fallback for everything else:
+/// a lossy UTF-8 reading rather than an error. Shared by RFC 2047
+/// encoded words above and by [`render_message`]'s body decoding below,
+/// so there is one registry of what "decode per charset" means here,
+/// not two that could disagree on a name like `windows-1252`.
+fn decode_charset_bytes(bytes: Vec<u8>, charset: &str) -> String {
+    match charset.to_lowercase().as_str() {
+        "utf-8" | "utf8" => String::from_utf8_lossy(&bytes).to_string(),
+        "iso-8859-1" | "latin1" | "latin-1" | "windows-1252" => bytes
+            .iter()
+            .map(|b| *b as char)
+            .collect::<String>(),
+        _ => String::from_utf8_lossy(&bytes).to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Renderer: `read`'s text half (TODO.md section 1).
+// ---------------------------------------------------------------------
+
+/// What `read` shows for one message, built once from the exact bytes a
+/// `FETCH BODY.PEEK[]` returned, its flags and its `INTERNALDATE`.
+///
+/// [`render_message`] is the only place that builds this: `real.rs` and
+/// `mock.rs` both hand it the same raw ingredients through
+/// `ImapClient::read_message`, and neither renders anything of its own.
+#[derive(Debug, Clone)]
+pub struct RenderedMessage {
+    pub subject: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub date: Option<String>,
+    pub internal_date: Option<String>,
+    pub flags: Vec<String>,
+    /// The readable body: the decoded `text/plain` leaf, the decoded
+    /// `text/html` leaf with its tags stripped, the message's raw bytes
+    /// under `--raw`, or a note naming what the message holds when
+    /// there is neither a text nor an html leaf to show.
+    pub body: String,
+    /// Which leaf `body` came from: `"text"`, `"html"`, `"raw"` or
+    /// `"none"` -- so a JSON caller knows what it got without having to
+    /// guess from the text.
+    pub source: &'static str,
+    /// Every leaf other than the one `body` was built from: what `read`
+    /// lists briefly after the body so a reader knows what else the
+    /// message carries without a second command. Always empty under
+    /// `--raw`, which shows nothing but the header summary and the raw
+    /// bytes -- exactly what this tool has always printed under that
+    /// flag.
+    pub attachments: Vec<super::PartInfo>,
+}
+
+impl RenderedMessage {
+    /// The text `read` prints for this message: the header summary in
+    /// the order it has always used, a blank line, the body, and --
+    /// everywhere but `--raw` -- a short attachment listing. Under
+    /// `--raw` this is exactly the header summary followed by the exact
+    /// bytes the server sent, which is the whole point of the flag.
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        if let Some(v) = &self.subject {
+            out.push_str(&format!("Subject: {}\n", v));
+        }
+        if let Some(v) = &self.from {
+            out.push_str(&format!("From: {}\n", v));
+        }
+        if let Some(v) = &self.to {
+            out.push_str(&format!("To: {}\n", v));
+        }
+        if let Some(v) = &self.date {
+            out.push_str(&format!("Date: {}\n", v));
+        }
+        if let Some(v) = &self.internal_date {
+            out.push_str(&format!("InternalDate: {}\n", v));
+        }
+        if !self.flags.is_empty() {
+            out.push_str(&format!("Flags: {}\n", self.flags.join(", ")));
+        }
+        out.push('\n');
+        out.push_str(&self.body);
+
+        if self.source != "raw" && !self.attachments.is_empty() {
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("\nAttachments:\n");
+            for a in &self.attachments {
+                out.push_str(&format!(
+                    "  {}. {}{} ({} byte{})\n",
+                    a.part,
+                    a.content_type,
+                    a.filename
+                        .as_deref()
+                        .map(|f| format!(" {}", f))
+                        .unwrap_or_default(),
+                    a.size,
+                    if a.size == 1 { "" } else { "s" },
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// Render `bytes` (a message's exact `BODY.PEEK[]` bytes) into what
+/// `read` shows: the header summary this tool has always printed, then
+/// a body a person can actually read -- `text/plain` first, `text/html`
+/// with its tags stripped if there is no plain part, or a note naming
+/// what the message holds if there is neither.
+///
+/// `raw` restores the original behaviour exactly: the same header
+/// summary, followed by `bytes` completely unparsed. That path never
+/// calls [`parse_message`] at all, on purpose -- `--raw` is the escape
+/// hatch for a message this parser cannot make sense of, so it must not
+/// gain a new way to fail.
+///
+/// `flags` and `internal_date` come from the `FETCH`, not from the
+/// message bytes -- IMAP tracks them outside the message itself, so
+/// nothing here parses them out of a header.
+pub fn render_message(
+    bytes: &[u8],
+    flags: &[String],
+    internal_date: Option<DateTime<FixedOffset>>,
+    raw: bool,
+) -> Result<RenderedMessage> {
+    let (raw_headers, _) = split_headers_and_body(bytes);
+    let headers = parse_headers(raw_headers);
+    let subject = header_value(&headers, "subject").map(|v| decode_rfc2047(v.to_string()));
+    let from = header_value(&headers, "from").map(|v| decode_rfc2047(v.to_string()));
+    let to = header_value(&headers, "to").map(|v| decode_rfc2047(v.to_string()));
+    let date = header_value(&headers, "date").map(|v| v.to_string());
+    let internal_date = internal_date.map(|d| d.format("%Y-%m-%d %H:%M:%S %z").to_string());
+    let flags = flags.to_vec();
+
+    if raw {
+        return Ok(RenderedMessage {
+            subject,
+            from,
+            to,
+            date,
+            internal_date,
+            flags,
+            body: String::from_utf8_lossy(bytes).to_string(),
+            source: "raw",
+            attachments: Vec::new(),
+        });
+    }
+
+    let root = parse_message(bytes).context(
+        "parsing the message's MIME structure to show its text (try 'read --raw' to see \
+         it unparsed)",
+    )?;
+    let leaves = root.leaves();
+
+    let text_idx = leaves.iter().position(|p| p.content_type == "text/plain");
+    let html_idx = if text_idx.is_none() {
+        leaves.iter().position(|p| p.content_type == "text/html")
+    } else {
+        None
+    };
+
+    let (body, source, used) = if let Some(i) = text_idx {
+        let decoded = leaves[i]
+            .decoded()
+            .with_context(|| format!("decoding part {} (text/plain) to show it", i + 1))?;
+        let charset = leaves[i].charset.as_deref().unwrap_or("");
+        (decode_charset_bytes(decoded, charset), "text", Some(i))
+    } else if let Some(i) = html_idx {
+        let decoded = leaves[i]
+            .decoded()
+            .with_context(|| format!("decoding part {} (text/html) to show it", i + 1))?;
+        let charset = leaves[i].charset.as_deref().unwrap_or("");
+        let html = decode_charset_bytes(decoded, charset);
+        (strip_html(&html), "html", Some(i))
+    } else {
+        let kinds: Vec<&str> = leaves.iter().map(|p| p.content_type.as_str()).collect();
+        (
+            format!(
+                "This message has no text/plain or text/html part to show. It holds {} \
+                 part{} ({}); see 'part list' and 'part save' to look at them.",
+                leaves.len(),
+                if leaves.len() == 1 { "" } else { "s" },
+                kinds.join(", "),
+            ),
+            "none",
+            None,
+        )
+    };
+
+    let mut attachments = Vec::with_capacity(leaves.len().saturating_sub(1));
+    for (i, p) in leaves.iter().enumerate() {
+        if Some(i) == used {
+            continue;
+        }
+        let size = p
+            .decoded()
+            .with_context(|| format!("decoding part {} to size it for the attachment list", i + 1))?
+            .len() as u64;
+        attachments.push(super::PartInfo {
+            part: (i + 1) as u32,
+            content_type: p.content_type.clone(),
+            filename: p.filename.clone(),
+            size,
+        });
+    }
+
+    Ok(RenderedMessage {
+        subject,
+        from,
+        to,
+        date,
+        internal_date,
+        flags,
+        body,
+        source,
+        attachments,
+    })
+}
+
+/// Strip an HTML body down to text, for a message with no `text/plain`
+/// part.
+///
+/// Deliberately modest, and must stay that way: it drops tags, turns a
+/// handful of block-level ones into a line break so paragraphs do not
+/// run together, decodes the common entities (`&amp;` `&lt;` `&gt;`
+/// `&quot;` `&#39;` `&nbsp;`), and collapses the blank lines that
+/// leaves. It is not a renderer -- no tables, no CSS, no layout -- and
+/// the next improvement here is not "make it smarter"; a message that
+/// needs more than this to be readable is what `part save` and an
+/// actual mail client are for.
+pub fn strip_html(html: &str) -> String {
+    let mut out = String::new();
+    let mut chars = html.chars();
+    // The name of the element currently being skipped whole (`script`
+    // or `style`), so their content -- JS and CSS, never meant to be
+    // read as text -- does not show up as noise in the body.
+    let mut skipping: Option<String> = None;
+
+    while let Some(c) = chars.next() {
+        if c != '<' {
+            if skipping.is_none() {
+                out.push(c);
+            }
+            continue;
+        }
+        let mut tag = String::new();
+        for c2 in chars.by_ref() {
+            if c2 == '>' {
+                break;
+            }
+            tag.push(c2);
+        }
+        let tag_lc = tag.to_ascii_lowercase();
+        let closing = tag_lc.starts_with('/');
+        let name: String = tag_lc
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        match &skipping {
+            Some(open) => {
+                if closing && &name == open {
+                    skipping = None;
+                }
+            }
+            None => {
+                if !closing && matches!(name.as_str(), "script" | "style") {
+                    skipping = Some(name);
+                } else if matches!(
+                    name.as_str(),
+                    "br" | "p" | "div" | "tr" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                ) {
+                    out.push('\n');
+                }
+            }
+        }
+    }
+
+    collapse_blank_lines(&decode_html_entities(&out))
+}
+
+/// The handful of entities a plain-text reading of HTML actually needs.
+/// `&amp;` is decoded last, so a source that escaped a literal
+/// ampersand followed by e.g. `lt;` (`&amp;lt;`) comes back as the text
+/// `&lt;`, not as a `<` that was never there.
+fn decode_html_entities(s: &str) -> String {
+    s.replace("&nbsp;", " ")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// Trim trailing whitespace from every line, collapse two or more blank
+/// lines in a row into one, and drop leading/trailing blank lines --
+/// the shape tag-dropping leaves behind, not a layout decision.
+fn collapse_blank_lines(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut blank_run = false;
+    for line in s.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            if blank_run {
+                continue;
+            }
+            blank_run = true;
+        } else {
+            blank_run = false;
+        }
+        out.push_str(trimmed);
+        out.push('\n');
+    }
+    out.trim_matches('\n').to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1155,6 +1579,263 @@ mod tests {
             "Content-Type header itself was rewritten, not just described in the stub body: {}",
             text
         );
+    }
+
+    // -------------------------------------------------------------
+    // RFC 2047
+    // -------------------------------------------------------------
+
+    #[test]
+    fn plain_string_unchanged() {
+        assert_eq!(decode_rfc2047("Hello there".into()), "Hello there");
+    }
+
+    #[test]
+    fn q_encoding_utf8() {
+        assert_eq!(
+            decode_rfc2047("=?utf-8?Q?Votre=20facture?=".into()),
+            "Votre facture"
+        );
+    }
+
+    #[test]
+    fn q_encoding_with_underscore() {
+        // In Q encoding, '_' means a space.
+        assert_eq!(
+            decode_rfc2047("=?utf-8?Q?bonjour_le_monde?=".into()),
+            "bonjour le monde"
+        );
+    }
+
+    #[test]
+    fn b_encoding_utf8() {
+        // "Renouvellement" base64-encoded.
+        let b64 = base64::encode("Renouvellement".as_bytes());
+        let word = format!("=?utf-8?B?{}?=", b64);
+        assert_eq!(decode_rfc2047(word), "Renouvellement");
+    }
+
+    #[test]
+    fn latin1_charset() {
+        // é is 0xE9 in iso-8859-1, so Q-encode it as =E9.
+        assert_eq!(
+            decode_rfc2047("=?iso-8859-1?Q?caf=E9?=".into()),
+            "café"
+        );
+    }
+
+    #[test]
+    fn mixed_text_and_encoded_word() {
+        assert_eq!(
+            decode_rfc2047("Re: =?utf-8?Q?Votre=20facture?=".into()),
+            "Re: Votre facture"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // Renderer: render_message (TODO.md section 1)
+    // -------------------------------------------------------------
+
+    fn crlf(s: &str) -> Vec<u8> {
+        s.replace('\n', "\r\n").into_bytes()
+    }
+
+    #[test]
+    fn plain_text_message_is_shown_as_is() {
+        let msg = crlf(
+            "From: alice@example.com\n\
+             To: bob@example.com\n\
+             Subject: Hi\n\
+             Date: Wed, 23 Sep 2026 00:00:00 +0200\n\
+             Content-Type: text/plain\n\
+             \n\
+             hello there\n",
+        );
+        let r = render_message(&msg, &[], None, false).expect("render");
+        assert_eq!(r.subject.as_deref(), Some("Hi"));
+        assert_eq!(r.from.as_deref(), Some("alice@example.com"));
+        assert_eq!(r.to.as_deref(), Some("bob@example.com"));
+        assert_eq!(r.source, "text");
+        assert!(r.body.contains("hello there"));
+        assert!(r.attachments.is_empty());
+    }
+
+    #[test]
+    fn multipart_alternative_prefers_text_plain() {
+        let msg = crlf(
+            "Subject: Alt\n\
+             Content-Type: multipart/alternative; boundary=A\n\
+             \n\
+             --A\n\
+             Content-Type: text/plain\n\
+             \n\
+             plain wins\n\
+             --A\n\
+             Content-Type: text/html\n\
+             \n\
+             <p>html loses</p>\n\
+             --A--\n",
+        );
+        let r = render_message(&msg, &[], None, false).expect("render");
+        assert_eq!(r.source, "text");
+        assert!(r.body.contains("plain wins"));
+        assert!(!r.body.contains("html loses"));
+        // The html alternative is not the leaf shown, so it is listed
+        // as the one other part of the message.
+        assert_eq!(r.attachments.len(), 1);
+        assert_eq!(r.attachments[0].content_type, "text/html");
+    }
+
+    #[test]
+    fn html_only_message_is_stripped_to_text() {
+        let msg = crlf(
+            "Subject: Html\n\
+             Content-Type: text/html\n\
+             \n\
+             <p>Hello <b>world</b></p><p>Second para</p>\n",
+        );
+        let r = render_message(&msg, &[], None, false).expect("render");
+        assert_eq!(r.source, "html");
+        assert!(r.body.contains("Hello world"), "{}", r.body);
+        assert!(r.body.contains("Second para"), "{}", r.body);
+        assert!(!r.body.contains('<'), "a tag leaked through: {}", r.body);
+        assert!(r.attachments.is_empty());
+    }
+
+    #[test]
+    fn attachment_only_message_names_what_it_holds() {
+        let msg = crlf(
+            "Subject: Just a file\n\
+             Content-Type: application/pdf; name=report.pdf\n\
+             Content-Transfer-Encoding: base64\n\
+             \n\
+             SGVsbG8=\n",
+        );
+        let r = render_message(&msg, &[], None, false).expect("render");
+        assert_eq!(r.source, "none");
+        assert!(r.body.contains("part list"), "{}", r.body);
+        assert!(r.body.contains("part save"), "{}", r.body);
+        assert!(!r.body.contains("SGVsbG8="), "raw base64 leaked: {}", r.body);
+        // The sole part is what the note is about, not a second
+        // "attachment" alongside it -- it is the whole message.
+        assert_eq!(r.attachments.len(), 1);
+        assert_eq!(r.attachments[0].content_type, "application/pdf");
+    }
+
+    #[test]
+    fn a_declared_charset_is_honestly_decoded() {
+        // é is 0xE9 in iso-8859-1.
+        let msg = b"Subject: Charset\r\nContent-Type: text/plain; charset=iso-8859-1\r\n\r\ncaf\xE9\r\n".to_vec();
+        let r = render_message(&msg, &[], None, false).expect("render");
+        assert_eq!(r.source, "text");
+        assert!(r.body.contains("café"), "{:?}", r.body);
+    }
+
+    #[test]
+    fn nested_multipart_finds_the_text_leaf_and_lists_the_rest() {
+        let msg = crlf(
+            "Subject: Nested\n\
+             Content-Type: multipart/mixed; boundary=OUT\n\
+             \n\
+             --OUT\n\
+             Content-Type: multipart/alternative; boundary=IN\n\
+             \n\
+             --IN\n\
+             Content-Type: text/plain\n\
+             \n\
+             the text\n\
+             --IN\n\
+             Content-Type: text/html\n\
+             \n\
+             <p>the html</p>\n\
+             --IN--\n\
+             --OUT\n\
+             Content-Type: application/zip\n\
+             Content-Disposition: attachment; filename=stuff.zip\n\
+             \n\
+             zipped\n\
+             --OUT--\n",
+        );
+        let r = render_message(&msg, &[], None, false).expect("render");
+        assert_eq!(r.source, "text");
+        assert!(r.body.contains("the text"));
+        // Everything but the shown leaf: the html alternative and the
+        // real attachment, in document order.
+        assert_eq!(r.attachments.len(), 2);
+        assert_eq!(r.attachments[0].content_type, "text/html");
+        assert_eq!(r.attachments[1].content_type, "application/zip");
+        assert_eq!(r.attachments[1].filename.as_deref(), Some("stuff.zip"));
+    }
+
+    #[test]
+    fn raw_mode_never_parses_mime_and_restores_the_old_shape() {
+        // A message this parser cannot make sense of at all (no
+        // boundary line for a declared multipart) must still work
+        // under --raw: that is the whole point of the flag.
+        let msg = b"Subject: Broken\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\nno boundary line here".to_vec();
+        let r = render_message(&msg, &["\\Seen".to_string()], None, true).expect("raw must not parse MIME");
+        assert_eq!(r.source, "raw");
+        assert!(r.attachments.is_empty());
+        assert_eq!(r.flags, vec!["\\Seen".to_string()]);
+        assert!(r.body.contains("no boundary line here"));
+        // And the header summary line order matches what this tool has
+        // always printed.
+        let text = r.to_text();
+        let subject_pos = text.find("Subject:").unwrap();
+        let blank_pos = text.find("\n\n").unwrap();
+        assert!(subject_pos < blank_pos);
+    }
+
+    #[test]
+    fn to_text_lists_attachments_only_outside_raw_mode() {
+        let msg = crlf(
+            "Subject: With attachment\n\
+             Content-Type: multipart/mixed; boundary=B\n\
+             \n\
+             --B\n\
+             Content-Type: text/plain\n\
+             \n\
+             body text\n\
+             --B\n\
+             Content-Type: application/pdf\n\
+             Content-Disposition: attachment; filename=doc.pdf\n\
+             Content-Transfer-Encoding: base64\n\
+             \n\
+             SGVsbG8=\n\
+             --B--\n",
+        );
+        let rendered = render_message(&msg, &[], None, false).expect("render");
+        let text = rendered.to_text();
+        assert!(text.contains("Attachments:"), "{}", text);
+        assert!(text.contains("doc.pdf"), "{}", text);
+
+        let raw = render_message(&msg, &[], None, true).expect("render raw");
+        let raw_text = raw.to_text();
+        assert!(!raw_text.contains("Attachments:"), "{}", raw_text);
+    }
+
+    // -------------------------------------------------------------
+    // strip_html
+    // -------------------------------------------------------------
+
+    #[test]
+    fn strip_html_drops_tags_and_decodes_common_entities() {
+        let out = strip_html("<p>Ben &amp; Jerry&#39;s &lt;3 &quot;ice&quot;&nbsp;cream</p>");
+        assert_eq!(out, "Ben & Jerry's <3 \"ice\" cream");
+    }
+
+    #[test]
+    fn strip_html_drops_script_and_style_content() {
+        let out = strip_html(
+            "<style>p{color:red}</style><p>real text</p><script>alert(1)</script>",
+        );
+        assert_eq!(out, "real text");
+    }
+
+    #[test]
+    fn strip_html_collapses_blank_lines() {
+        let out = strip_html("<p>one</p><p>two</p><p></p><p></p><p>three</p>");
+        assert_eq!(out, "one\n\ntwo\n\nthree");
     }
 }
 

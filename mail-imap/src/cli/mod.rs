@@ -172,6 +172,9 @@ struct ReadOutput<'a> {
     folder: &'a str,
     uid: u32,
     content: &'a str,
+    /// Which leaf `content`'s body came from: `"text"`, `"html"`,
+    /// `"raw"` or `"none"` -- see `mime::render_message`.
+    source: &'a str,
 }
 
 #[derive(Serialize)]
@@ -1307,6 +1310,7 @@ pub fn read_emails(
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
+    raw: bool,
     json: bool,
     debug: bool,
 ) -> Result<()> {
@@ -1318,12 +1322,14 @@ pub fn read_emails(
     }
 
     for (i, (folder, uid)) in messages.iter().enumerate() {
-        let content = client.get_email(folder, *uid)?;
+        let rendered = client.read_message(folder, *uid, raw)?;
+        let content = rendered.to_text();
         if json {
             emit_json(&ReadOutput {
                 folder,
                 uid: *uid,
                 content: &content,
+                source: rendered.source,
             })?;
         } else {
             if messages.len() > 1 && i > 0 {

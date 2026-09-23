@@ -180,7 +180,6 @@ pub trait ImapBackend {
         max_results: usize,
         sort: Option<&SortCriteria>,
     ) -> Result<Vec<SearchResult>>;
-    fn get_email(&mut self, folder: &str, uid: u32) -> Result<String>;
     /// Per-mailbox counters via `STATUS`. `folder = None` means all
     /// selectable mailboxes of the account.
     fn mailbox_counts(&mut self, folder: Option<&str>) -> Result<Vec<Mailbox>>;
@@ -540,6 +539,23 @@ impl ImapClient {
         Ok(())
     }
 
+    /// What `read` shows for one message: the raw bytes fetched once
+    /// via [`ImapBackend::fetch_raw_message`], rendered by
+    /// [`mime::render_message`] -- the one renderer both backends
+    /// share, so the same bytes read the same whether the mock or a
+    /// real server answered the `FETCH`. Neither `real.rs` nor
+    /// `mock.rs` builds this text itself any more.
+    ///
+    /// `raw` restores the tool's original behaviour: the header
+    /// summary followed by the exact bytes the server sent, with no
+    /// MIME parsing at all -- see [`mime::render_message`] for why that
+    /// path must not depend on the parser succeeding.
+    pub fn read_message(&mut self, folder: &str, uid: u32, raw: bool) -> Result<mime::RenderedMessage> {
+        let raw_msg = self.fetch_raw_message(folder, uid)?;
+        mime::render_message(&raw_msg.bytes, &raw_msg.flags, raw_msg.internal_date, raw)
+            .with_context(|| format!("rendering UID {} in '{}'", uid, folder))
+    }
+
     /// Refuse deleting a mailbox unless the access level is `full`.
     /// `restructure` is not enough on purpose: creating and renaming
     /// leave every message where it was, but deleting a mailbox loses
@@ -710,13 +726,6 @@ impl ImapBackend for ImapClient {
             Backend::Real(c) => c.search_folders(folders, query, max_results, sort),
             #[cfg(feature = "mock")]
             Backend::Mock(c) => c.search_folders(folders, query, max_results, sort),
-        }
-    }
-    fn get_email(&mut self, folder: &str, uid: u32) -> Result<String> {
-        match &mut self.backend {
-            Backend::Real(c) => c.get_email(folder, uid),
-            #[cfg(feature = "mock")]
-            Backend::Mock(c) => c.get_email(folder, uid),
         }
     }
     fn mailbox_counts(&mut self, folder: Option<&str>) -> Result<Vec<Mailbox>> {

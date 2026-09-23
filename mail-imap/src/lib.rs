@@ -39,7 +39,7 @@ mod tests {
         // Clearing is a change too.
         assert!(client.store_flags("INBOX", &[1], &[], &seen).is_err());
         // ... but reading is not.
-        assert!(client.get_email("INBOX", 1).is_ok());
+        assert!(client.read_message("INBOX", 1, false).is_ok());
         assert!(client.message_flags("INBOX", 1).is_ok());
     }
 
@@ -224,15 +224,15 @@ mod tests {
     #[test]
     fn read_known_uid() {
         let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
-        let content = client.get_email("INBOX", 1).expect("read");
-        assert!(content.contains("Welcome aboard"));
-        assert!(content.contains("Hello, this is message 1."));
+        let rendered = client.read_message("INBOX", 1, false).expect("read");
+        assert!(rendered.to_text().contains("Welcome aboard"));
+        assert!(rendered.body.contains("Hello, this is message 1."));
     }
 
     #[test]
     fn read_unknown_uid_fails() {
         let mut client = ImapClient::connect(&mock_config(), false).expect("connect");
-        assert!(client.get_email("INBOX", 999).is_err());
+        assert!(client.read_message("INBOX", 999, false).is_err());
     }
 
     #[test]
