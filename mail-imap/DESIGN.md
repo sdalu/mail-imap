@@ -244,6 +244,21 @@ countermeasures (`src/imap/real.rs`):
 - if a hard error still strikes mid-search, the results collected so far
   are reported with a warning instead of being thrown away.
 
+**What covers this, and how.** `tests/replay.rs` is a scripted socket
+rather than a server: it speaks enough IMAP to be searched, and answers
+the ENVELOPE fetches badly on purpose, which is the one thing a real
+server cannot be asked to do. It walks the ladder down to the header
+rung and proves the message still arrives, with the two dates still
+distinct and `\Recent` still dropped. Both doors into the narrowing are
+scripted, because they differ where it matters: a *well-formed response
+that is not a FETCH* is `Error::Unexpected` and narrows on one
+connection, while a *refused ENVELOPE* poisons the stream, so
+`attempt_fetch` reconnects and retries the same items before accepting
+that narrowing is needed — the rungs are walked twice over, once per
+connection. That second route is the only cover in this tree for
+reconnect-and-still-broken. Neither is reachable from GreenMail, and
+both run offline in `make tests`.
+
 ### Declaring a charset on `SEARCH`
 
 RFC 3501 lets a `SEARCH` carry an optional `CHARSET` before its keys,
@@ -1315,10 +1330,17 @@ mock backend (no network). What it proves, and where:
   and header-value reading (case-insensitivity, folded continuations,
   raw 8-bit bytes kept)
 
+- `fetch_chunk`'s degradation ladder, against a scripted socket that
+  answers badly on purpose — both doors into the narrowing, the header
+  rung's rebuilt metadata, and the reconnect a refused ENVELOPE costs
+  (`tests/replay.rs`; see *Resilience*, above)
+
 Two things the suite does **not** prove, and they are the two that
-break in practice: nothing in it fails because `src/imap/real.rs` sent
-the wrong thing to a server, and nothing in it drives `src/main.rs`, so
-a broken argument shape passes it. Both gates are in `CHECKLIST.md`.
+break in practice: almost nothing in it fails because
+`src/imap/real.rs` sent the wrong thing to a server — `tests/replay.rs`
+is the exception, and it covers one ladder, not the backend — and
+nothing in it drives `src/main.rs`, so a broken argument shape passes
+it. Both gates are in `CHECKLIST.md`.
 
 To exercise the real backend manually:
 

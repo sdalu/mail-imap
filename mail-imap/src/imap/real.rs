@@ -768,16 +768,12 @@ impl RealClient {
     /// `BODY.PEEK[HEADER.FIELDS ...]` fetch, which carries raw bytes that
     /// are never parsed as quoted strings.
     ///
-    /// **Nothing in either suite reaches this.** It is the last rung of
-    /// `fetch_chunk`'s ladder, taken only when a server sends an
-    /// ENVELOPE the parser refuses twice over, and GreenMail cannot be
-    /// made to send one -- so the mock never calls it and the wire
-    /// tests never get here either. Mutation testing says so plainly:
-    /// inverting either filter below survives the whole suite, run
-    /// against a live server. Reaching it needs a fixture that replays
-    /// recorded bytes rather than a server, which is a bigger thing
-    /// than this function. Read the changes here rather than trusting
-    /// a green run.
+    /// Reached by `tests/replay.rs`, and by nothing else: it is the
+    /// last rung of `fetch_chunk`'s ladder, and GreenMail cannot be
+    /// asked to send a response its own parser refuses. The mock never
+    /// calls it either. So the cover here is a scripted socket rather
+    /// than a server -- which is worth knowing before trusting a green
+    /// wire run about a change to this function.
     fn fetch_to_result_from_headers(
         &self,
         f: &imap::types::Fetch<'_>,

@@ -32,6 +32,18 @@ Gate: `make check && make tests`
   (`../forks/rust-imap`, `../forks/tokio-imap/imap-proto`), carrying
   RFC 5256 THREAD/SORT support that upstream has not released. A
   checkout without `../forks` does not build.
+- **`tests/replay.rs` is a scripted socket, not a server.** It speaks
+  just enough IMAP to walk the real backend down `fetch_chunk`'s
+  degradation ladder -- answering badly on purpose, which no real
+  server can be asked to do -- so the last rung
+  (`fetch_to_result_from_headers`) is covered offline. It needs no
+  server and is not `#[ignore]`d. One trap if you extend it: serve each
+  connection on its own thread. A refused ENVELOPE poisons the stream
+  and the client reconnects, and a single-threaded script never accepts
+  that second connection -- the client then blocks reading a greeting
+  that never comes, which `timeout` does not bound (the connect phase
+  is unbounded, see TODO.md), so it hangs for good and looks exactly
+  like a defect in the code under test.
 - **`make tests` proves the mock backend, not the wire.** It never
   opens a socket, so nothing in it can fail because
   `src/imap/real.rs` sends the wrong thing. `make tests-wire` is the

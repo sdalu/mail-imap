@@ -120,11 +120,10 @@ about a minute a mutant — and it is the only way to ask this file the
 question. Measured that way, both of `fetch_to_result`'s filters die.
 Three survivors are standing, and none of them is a test gap:
 
-- **`fetch_to_result_from_headers`, both filters.** Nothing reaches
-  the function at all: it is the rung taken only when a server sends
-  an ENVELOPE the parser refuses twice over, and GreenMail cannot be
-  made to send one. Now said above the code as well. Closing it needs
-  a fixture that replays recorded bytes instead of a server.
+- ~~**`fetch_to_result_from_headers`, both filters.**~~ Closed:
+  `tests/replay.rs` scripts a socket that answers badly on purpose and
+  walks the client down to that rung, so the function is now covered
+  offline and both mutants die under the plain `cargo mutants` runner.
 - **`unstated` in `permanent_flags`.** Dropping the field leaves
   `false`, which is what `permanent_flags.is_empty()` returns on any
   server that states its PERMANENTFLAGS — and GreenMail always does.
