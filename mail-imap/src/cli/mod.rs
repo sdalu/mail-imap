@@ -1113,6 +1113,12 @@ pub fn move_messages(
     let mut client = ImapClient::connect(config, debug)?;
     let groups = selection_groups(&mut client, spec, config, selections)?;
 
+    // Same guard `flag`/`tag` have had since the `tag junk` defect:
+    // UID MOVE ignores a UID that is not there and answers OK, so
+    // without this the tool reports having filed a message that never
+    // existed.
+    check_uids_exist(&mut client, &groups, "UID MOVE")?;
+
     for group in &groups {
         client.move_messages(&group.folder, &group.uids, to)?;
         if json {
@@ -1156,6 +1162,8 @@ pub fn copy_messages(
 ) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
     let groups = selection_groups(&mut client, spec, config, selections)?;
+
+    check_uids_exist(&mut client, &groups, "UID COPY")?;
 
     for group in &groups {
         client.copy_messages(&group.folder, &group.uids, to)?;
@@ -1205,6 +1213,11 @@ pub fn expunge_messages(
 ) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
     let groups = selection_groups(&mut client, spec, config, selections)?;
+
+    // Checked before the \Deleted test below, so that a UID which is
+    // simply absent says so, rather than being told it is not marked
+    // \Deleted and to go and mark it.
+    check_uids_exist(&mut client, &groups, "UID EXPUNGE")?;
 
     for group in &groups {
         let removed = client.expunge_messages(&group.folder, &group.uids)?;
@@ -1764,7 +1777,7 @@ pub fn parse_flag_names(names: &[String], system: bool, wire_form: bool) -> Resu
 /// group inside the mutation loop. Inside it, a bad UID in the second
 /// folder aborts with "nothing was changed" after the first folder was
 /// already changed -- the one thing the message promises did not happen.
-fn check_uids_exist(client: &mut ImapClient, groups: &[Group]) -> Result<()> {
+fn check_uids_exist(client: &mut ImapClient, groups: &[Group], wire: &str) -> Result<()> {
     for group in groups {
         let existing = client.folder_uids(&group.folder)?;
         let missing: Vec<String> = group
@@ -1775,10 +1788,11 @@ fn check_uids_exist(client: &mut ImapClient, groups: &[Group]) -> Result<()> {
             .collect();
         if !missing.is_empty() {
             bail!(
-                "no message with UID {} in '{}' (UID STORE would ignore it silently, \
+                "no message with UID {} in '{}' ({} would ignore it silently, \
                  so nothing was changed)",
                 missing.join(", "),
-                group.folder
+                group.folder,
+                wire
             );
         }
     }
@@ -1829,7 +1843,7 @@ pub fn change_flags(
             );
         }
     }
-    check_uids_exist(&mut client, &groups)?;
+    check_uids_exist(&mut client, &groups, "UID STORE")?;
 
     for group in &groups {
         if debug {
@@ -1924,7 +1938,7 @@ pub fn set_junk(
     // `tag junk` mutates exactly as `tag add` does, so it owes the same
     // check: without it a typo'd UID is reported as a successful
     // marking, because UID STORE ignores it in silence.
-    check_uids_exist(&mut client, &groups)?;
+    check_uids_exist(&mut client, &groups, "UID STORE")?;
 
     for (group, add) in groups.iter().zip(&writes) {
         let remove: Vec<String> = other.iter().map(|s| s.to_string()).collect();
@@ -2430,12 +2444,12 @@ mod tests {
             Group { folder: "INBOX".to_string(), uids: vec![1] },
             Group { folder: "Trash".to_string(), uids: vec![99999] },
         ];
-        let err = check_uids_exist(&mut client, &groups)
+        let err = check_uids_exist(&mut client, &groups, "UID STORE")
             .expect_err("a UID that is not there must stop the command");
         assert!(err.to_string().contains("99999"), "{}", err);
         assert!(err.to_string().contains("Trash"), "{}", err);
         let fine = vec![Group { folder: "INBOX".to_string(), uids: vec![1, 2] }];
-        assert!(check_uids_exist(&mut client, &fine).is_ok());
+        assert!(check_uids_exist(&mut client, &fine, "UID STORE").is_ok());
     }
 
     #[test]

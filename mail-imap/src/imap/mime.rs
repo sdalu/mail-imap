@@ -856,9 +856,52 @@ fn decode_data(data: &str, enc: u8, charset: &str) -> Option<String> {
 fn decode_charset_bytes(bytes: Vec<u8>, charset: &str) -> String {
     match charset.to_lowercase().as_str() {
         "utf-8" | "utf8" => String::from_utf8_lossy(&bytes).to_string(),
-        "iso-8859-1" | "latin1" | "latin-1" | "windows-1252" => bytes
+        "iso-8859-1" | "latin1" | "latin-1" => bytes
             .iter()
             .map(|b| *b as char)
+            .collect::<String>(),
+        // NOT an alias of ISO-8859-1, though it is nearly one. The two
+        // agree everywhere except 0x80-0x9F, where Latin-1 has C1
+        // control characters and windows-1252 has the punctuation
+        // Outlook actually emits: curly quotes, en and em dashes, the
+        // ellipsis, the bullet. Treating it as Latin-1 renders a
+        // perfectly ordinary Outlook message's quotation marks as
+        // control characters -- a corruption that looks like a bug in
+        // the sender rather than in the reader.
+        "windows-1252" | "cp1252" => bytes
+            .iter()
+            .map(|b| match b {
+                0x80 => '\u{20AC}', // €
+                0x82 => '\u{201A}',
+                0x83 => '\u{0192}',
+                0x84 => '\u{201E}',
+                0x85 => '\u{2026}', // …
+                0x86 => '\u{2020}',
+                0x87 => '\u{2021}',
+                0x88 => '\u{02C6}',
+                0x89 => '\u{2030}',
+                0x8A => '\u{0160}',
+                0x8B => '\u{2039}',
+                0x8C => '\u{0152}',
+                0x8E => '\u{017D}',
+                0x91 => '\u{2018}', // ‘
+                0x92 => '\u{2019}', // ’
+                0x93 => '\u{201C}', // “
+                0x94 => '\u{201D}', // ”
+                0x95 => '\u{2022}', // •
+                0x96 => '\u{2013}', // –
+                0x97 => '\u{2014}', // —
+                0x98 => '\u{02DC}',
+                0x99 => '\u{2122}', // ™
+                0x9A => '\u{0161}',
+                0x9B => '\u{203A}',
+                0x9C => '\u{0153}',
+                0x9E => '\u{017E}',
+                0x9F => '\u{0178}',
+                // 0x81, 0x8D, 0x8F, 0x90 and 0x9D are unassigned in
+                // cp1252; everything else matches Latin-1.
+                other => *other as char,
+            })
             .collect::<String>(),
         _ => String::from_utf8_lossy(&bytes).to_string(),
     }
@@ -1042,10 +1085,16 @@ pub fn render_message(
         if Some(i) == used {
             continue;
         }
+        // A part whose declared encoding does not match its bytes must
+        // not take the whole message down with it. This loop only wants
+        // a size for a listing line, and the readable body is already
+        // decoded and in hand -- failing here would mean `read` showing
+        // NOTHING because one attachment from a broken sender could not
+        // be decoded. Fall back to what it occupies as it stands.
         let size = p
             .decoded()
-            .with_context(|| format!("decoding part {} to size it for the attachment list", i + 1))?
-            .len() as u64;
+            .map(|d| d.len() as u64)
+            .unwrap_or_else(|_| p.body.len() as u64);
         attachments.push(super::PartInfo {
             part: (i + 1) as u32,
             content_type: p.content_type.clone(),
@@ -1093,10 +1142,28 @@ pub fn strip_html(html: &str) -> String {
             }
             continue;
         }
+        // A `>` inside a quoted attribute value does not end the tag.
+        // Without this the scanner stops early and everything up to the
+        // real `>` is emitted as body text -- so
+        // `<div onclick="if(x>5)return;">Hello` renders as
+        // `5)return;">Hello`, which is text the message never
+        // contained. Fabricating content is worse than dropping it.
         let mut tag = String::new();
+        let mut quote: Option<char> = None;
         for c2 in chars.by_ref() {
-            if c2 == '>' {
-                break;
+            match quote {
+                Some(q) => {
+                    if c2 == q {
+                        quote = None;
+                    }
+                }
+                None => {
+                    if c2 == '"' || c2 == '\'' {
+                        quote = Some(c2);
+                    } else if c2 == '>' {
+                        break;
+                    }
+                }
             }
             tag.push(c2);
         }
@@ -1367,6 +1434,49 @@ mod tests {
 
     fn a_date() -> DateTime<FixedOffset> {
         DateTime::parse_from_rfc3339("2026-09-22T18:40:11+02:00").expect("fixture")
+    }
+
+    #[test]
+    fn one_undecodable_attachment_does_not_blank_the_whole_message() {
+        // A part whose declared encoding does not match its bytes is
+        // ordinary in real mail. Sizing it for the attachment list used
+        // to fail the entire render, so `read` showed nothing at all --
+        // not even the text part sitting decoded in hand.
+        let msg = b"Subject: test\r\n\
+             Content-Type: multipart/mixed; boundary=B\r\n\r\n\
+             --B\r\nContent-Type: text/plain\r\n\r\nHello, this is readable.\r\n\
+             --B\r\nContent-Type: application/pdf\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\nThis is not valid base64!!!\r\n\
+             --B--\r\n";
+        let r = render_message(msg, &[], None, false).expect("a broken attachment must not fail the render");
+        assert_eq!(r.source, "text");
+        assert!(r.body.contains("Hello, this is readable."), "{}", r.body);
+        assert_eq!(r.attachments.len(), 1, "and it is still listed");
+    }
+
+    #[test]
+    fn strip_html_does_not_end_a_tag_at_a_quoted_angle_bracket() {
+        // The scanner used to stop at the first '>', so everything up
+        // to the real one became body text: `5)return;">Hello`. Text
+        // the message never contained is worse than text dropped.
+        assert_eq!(
+            strip_html(r#"<div onclick="if(x>5)return;">Hello</div>"#),
+            "Hello"
+        );
+        assert_eq!(strip_html(r#"<a title='a > b'>link</a>"#), "link");
+    }
+
+    #[test]
+    fn windows_1252_is_not_latin1_where_they_differ() {
+        // 0x91-0x94 are curly quotes in cp1252 and C1 controls in
+        // Latin-1. Outlook emits them constantly.
+        let bytes = vec![0x93, b'h', b'i', 0x94, 0x85, 0x97];
+        assert_eq!(decode_charset_bytes(bytes.clone(), "windows-1252"), "\u{201C}hi\u{201D}\u{2026}\u{2014}");
+        // ... and Latin-1 still means Latin-1.
+        assert_eq!(
+            decode_charset_bytes(bytes, "iso-8859-1"),
+            "\u{93}hi\u{94}\u{85}\u{97}"
+        );
     }
 
     #[test]

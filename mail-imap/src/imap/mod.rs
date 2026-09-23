@@ -561,6 +561,34 @@ impl ImapClient {
     /// leave every message where it was, but deleting a mailbox loses
     /// it and everything in it, so it gets its own, stricter check
     /// rather than sharing `check_folder_change`'s.
+    /// `APPEND` bytes exactly as given: no line-ending normalisation,
+    /// no shape check.
+    ///
+    /// For content that came off the wire and is going back onto it.
+    /// [`ImapBackend::append_message`] is the other door, for content
+    /// from a file or stdin, and it normalises lone LFs to CRLF before
+    /// arriving here — which is right for a file written on this host
+    /// and **wrong** for a message from a server: a surviving part of a
+    /// `part strip` may legitimately contain a bare LF inside its own
+    /// body, and rewriting it would break the one promise that command
+    /// makes, that everything it did not strip comes back byte for
+    /// byte.
+    pub fn append_exact(
+        &mut self,
+        folder: &str,
+        content: &[u8],
+        flags: &[String],
+        internal_date: Option<DateTime<FixedOffset>>,
+    ) -> Result<Option<u32>> {
+        self.check_append()?;
+        check_mailbox_name(folder, "append")?;
+        match &mut self.backend {
+            Backend::Real(c) => c.append_message(folder, content, flags, internal_date),
+            #[cfg(feature = "mock")]
+            Backend::Mock(c) => c.append_message(folder, content, flags, internal_date),
+        }
+    }
+
     /// Rewrite a message without the named parts: fetch it, rebuild it
     /// with each one replaced by a stub recording what was there,
     /// `APPEND` the result, and remove the original.
@@ -593,7 +621,7 @@ impl ImapClient {
             .with_context(|| format!("rebuilding UID {} in '{}' without those parts", uid, folder))?;
 
         let new_uid = self
-            .append_message(folder, &rebuilt, &original.flags, original.internal_date)
+            .append_exact(folder, &rebuilt, &original.flags, original.internal_date)
             .with_context(|| {
                 format!(
                     "appending the rewritten UID {} to '{}' (nothing was removed: the                      original is untouched)",
@@ -834,18 +862,17 @@ impl ImapBackend for ImapClient {
         flags: &[String],
         internal_date: Option<DateTime<FixedOffset>>,
     ) -> Result<Option<u32>> {
-        self.check_append()?;
-        check_mailbox_name(folder, "append")?;
         // Normalized and shape-checked here, once, so neither backend
         // has to repeat it and a wire test calling this directly (not
         // through the CLI) still exercises it.
+        //
+        // Both belong to content that came from OUTSIDE a server -- a
+        // file or stdin, which is what `append` takes. Content that
+        // came off the wire is already CRLF and already a message, and
+        // must not be put through either: see `append_exact`.
         let content = normalize_line_endings(content);
         check_rfc5322_shape(&content)?;
-        match &mut self.backend {
-            Backend::Real(c) => c.append_message(folder, &content, flags, internal_date),
-            #[cfg(feature = "mock")]
-            Backend::Mock(c) => c.append_message(folder, &content, flags, internal_date),
-        }
+        self.append_exact(folder, &content, flags, internal_date)
     }
     fn fetch_raw_message(&mut self, folder: &str, uid: u32) -> Result<RawMessage> {
         match &mut self.backend {

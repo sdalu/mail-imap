@@ -391,6 +391,13 @@ rather than a unit test asserting the normaliser against itself.
 blank line — and refused here if it has none. A server refuses garbage
 too, in language considerably less useful.
 
+`windows-1252` is decoded as itself rather than as ISO-8859-1. The two
+agree everywhere except `0x80`–`0x9F`, where Latin-1 has C1 controls
+and cp1252 has the punctuation Outlook actually emits — curly quotes,
+dashes, the ellipsis. Aliasing them turns an ordinary message's
+quotation marks into control characters, which reads as the sender's
+fault rather than the reader's.
+
 `--date` is ISO 8601 and sets the internaldate. Without it, nothing is
 sent and the server's own default (the moment of the append) applies.
 It is deliberately not read from the message's `Date:` header: that is
@@ -442,6 +449,18 @@ be lost silently otherwise: the mail is still present, merely unread
 again, or dated the day it was tidied. An archive dated by when it was
 tidied has no history left.
 
+**The rebuilt message is appended exactly as built.** `strip_part` uses
+`ImapClient::append_exact`, not the `append_message` the `append`
+command uses, and the difference is the whole byte-for-byte promise.
+`append_message` normalises lone LFs to CRLF, which is right for a file
+read off this host and wrong for bytes that came from a server: a
+surviving part may legitimately carry a bare LF inside its own body,
+and normalising it rewrites content nobody asked to touch. Composing
+the two was the obvious thing to do and it was wrong — the promise was
+false for several commits before a review caught it, and the wire test
+that now guards it uses a survivor with embedded bare LFs, because the
+earlier single-line fixture could not tell the bug from the fix.
+
 **The part is replaced, not removed**, which is what keeps part numbers
 stable — a `part list` taken before the strip still describes the
 message. The stub names the file, its type, its decoded size and its
@@ -483,7 +502,23 @@ needs that question asked.
 What it shows, in order of preference: the `text/plain` leaf; else the
 `text/html` leaf with its tags stripped; else a note naming what the
 message holds and pointing at `part list` and `part save` — never a
-wall of base64. Every other leaf is listed afterwards as an attachment
+wall of base64.
+
+**A part that will not decode does not take the message with it.** The
+attachment list needs each leaf's size, and asking for it used to mean
+decoding every leaf — so one attachment whose declared encoding did not
+match its bytes failed the whole render, and `read` showed nothing at
+all, including the text part already decoded and in hand. Real mail is
+full of mislabelled attachments; the size now falls back to what the
+part occupies as it stands. `part list` had the same defect and the
+same fix.
+
+**The HTML stripper tracks quotes**, which is the one piece of
+tokenising it cannot do without: a `>` inside a quoted attribute would
+otherwise end the tag early and emit the rest as body text, so
+`<div onclick="if(x>5)return;">Hello` rendered as `5)return;">Hello`.
+Text the message never contained is a worse failure than text dropped,
+and it is the failure a reader cannot detect. Every other leaf is listed afterwards as an attachment
 line, so one command says what is in the message.
 
 **The HTML stripper is deliberately poor.** Tags out, half a dozen

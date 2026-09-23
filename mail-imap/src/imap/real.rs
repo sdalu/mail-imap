@@ -935,7 +935,11 @@ impl ImapBackend for RealClient {
                     part: (i + 1) as u32,
                     content_type: p.content_type.clone(),
                     filename: p.filename.clone(),
-                    size: p.decoded()?.len() as u64,
+                    // Undecodable parts still get listed, with the
+                    // size they occupy encoded: `part list` exists to
+                    // say what is in a message, and one broken
+                    // attachment must not hide the rest.
+                    size: p.decoded().map(|d| d.len() as u64).unwrap_or(p.body.len() as u64),
                 })
             })
             .collect()
@@ -1130,15 +1134,37 @@ impl ImapBackend for RealClient {
             );
         }
         const BATCH: usize = 50;
+        // What has already gone is carried into the error, because it
+        // cannot be carried into the result: a failure part-way through
+        // still destroyed everything before it, and an error naming
+        // only the batch that failed reads as though nothing happened.
+        // That is the one thing a caller must not be left believing
+        // about a command that removes mail for good.
+        let mut removed: Vec<u32> = Vec::new();
         for chunk in eligible.chunks(BATCH) {
             let list = chunk
                 .iter()
                 .map(|u| u.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            self.session
-                .uid_expunge(&list)
-                .with_context(|| format!("UID EXPUNGE {} in '{}'", list, folder))?;
+            self.session.uid_expunge(&list).with_context(|| {
+                if removed.is_empty() {
+                    format!("UID EXPUNGE {} in '{}' (nothing was removed)", list, folder)
+                } else {
+                    format!(
+                        "UID EXPUNGE {} in '{}' -- and {} message(s) were ALREADY removed                          before this failed, permanently: UIDs {}",
+                        list,
+                        folder,
+                        removed.len(),
+                        removed
+                            .iter()
+                            .map(|u| u.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                }
+            })?;
+            removed.extend_from_slice(chunk);
         }
         Ok(eligible)
     }

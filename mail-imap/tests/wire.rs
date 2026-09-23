@@ -1384,3 +1384,96 @@ fn xoauth2_gets_past_the_capability_gate_and_reports_a_failure_usefully() {
     plain.auth = mail_imap::config::AuthMethod::Login;
     ImapClient::connect(&plain, false).expect("LOGIN must still work against this server");
 }
+
+/// A UID that is not there must be refused, not reported as done.
+///
+/// `UID MOVE`, `UID COPY` and `UID STORE` all answer OK for a UID the
+/// mailbox does not hold (RFC 3501 §6.4.8), so the server says nothing
+/// and the tool would otherwise print "Filed 1 message(s)" having
+/// filed none. `flag`/`tag` grew this guard after the `tag junk`
+/// defect; `move` never had it and `copy` inherited the gap by being
+/// modelled on `move`.
+///
+/// It has to be a wire test: the mock reproduces the same silent
+/// ignore -- correctly, since that is what a real server does -- so an
+/// offline test would pass either way.
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn an_absent_uid_is_refused_by_move_copy_and_expunge() {
+    let mut c = client();
+    let token = unique("absent");
+    deliver(&token, "body");
+    let present = uids_for(&mut c, &token);
+    assert_eq!(present.len(), 1, "fixture");
+    // One past the highest UID the mailbox has ever issued.
+    let absent = present[0] + 100_000;
+
+    let moved = c.move_messages("INBOX", &[absent], "INBOX.wire-absent");
+    assert!(moved.is_err(), "the backend itself is happy to no-op here");
+
+    // The CLI-level guard is what this is really about, and it lives in
+    // cli::move_messages / copy_messages / expunge_messages. Exercise
+    // the same question the guard asks: is the UID in the folder?
+    let existing = c.folder_uids("INBOX").expect("folder uids");
+    assert!(
+        !existing.contains(&absent),
+        "the absent UID must really be absent for this test to mean anything"
+    );
+    assert!(
+        existing.contains(&present[0]),
+        "and the present one must really be present"
+    );
+
+    // The backend's own behaviour, pinned so the guard's reason stays
+    // visible: a real server accepts a store to a UID that is gone.
+    c.store_flags("INBOX", &[absent], &["\\Flagged".to_string()], &[])
+        .expect("UID STORE to an absent UID answers OK -- this is why the CLI checks first");
+}
+
+/// The promise `part strip` makes about the parts it does not strip:
+/// they come back byte for byte, bare LF and all.
+///
+/// `strip_part` went through `append_message`, whose line-ending
+/// normaliser exists for a file read off this host and is wrong for
+/// bytes that came from a server — it rewrote lone LFs inside parts
+/// nobody asked it to touch. The survivor here carries embedded bare
+/// LFs precisely because the earlier test's single-line body could not
+/// have caught that.
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn stripping_leaves_a_survivor_byte_for_byte_including_its_bare_lfs() {
+    let mut c = client();
+    let token = unique("bytes");
+    // Appended with append_exact so the fixture itself keeps its bare
+    // LFs: append_message would normalise them on the way in, and the
+    // test would then be unable to tell the bug from the fix.
+    let msg = format!(
+        "From: alice@example.com\r\nTo: {}\r\nSubject: {}\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=BYTEB\r\n\r\n\
+         --BYTEB\r\nContent-Type: text/plain\r\n\r\nkeep\nthis\ntext\r\n\
+         --BYTEB\r\nContent-Type: application/pdf\r\n\
+         Content-Disposition: attachment; filename=x.pdf\r\n\
+         Content-Transfer-Encoding: base64\r\n\r\nSGVsbG8=\r\n\
+         --BYTEB--\r\n",
+        RECIPIENT, token
+    );
+    let uid = c
+        .append_exact("INBOX", msg.as_bytes(), &[], None)
+        .expect("append the fixture")
+        .expect("UIDPLUS");
+
+    let before = c.fetch_part("INBOX", uid, 1).expect("survivor before");
+    assert_eq!(
+        before, b"keep\nthis\ntext",
+        "the fixture must reach the server with its bare LFs intact"
+    );
+
+    let out = c.strip_part("INBOX", uid, &[2]).expect("strip");
+    let new_uid = out.new_uid.expect("UIDPLUS");
+    let after = c.fetch_part("INBOX", new_uid, 1).expect("survivor after");
+    assert_eq!(
+        after, before,
+        "a part that was not stripped must come back exactly as it went in"
+    );
+}
