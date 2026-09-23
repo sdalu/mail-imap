@@ -674,16 +674,16 @@ The server must advertise
 .Ic AUTH=XOAUTH2 ,
 and the connection is refused before anything is sent if it does not.
 .It Ic timeout
-Seconds to wait on a server that has accepted the connection and then
-gone quiet.
+Seconds to wait on the server: the dial, the TLS or STARTTLS
+handshake, the greeting, a response that stops half way, and a write
+the server has stopped reading.
 .Ql 0
 disables it.
 Default:
 .Ql 30 .
-It does not bound the connect or the TLS handshake, which the
-.Ic imap
-crate owns, nor a stalled write; a server that never accepts, or that
-stalls mid-handshake, still hangs.
+Resolving the name is not bounded \(em
+.Xr getaddrinfo 3
+takes no timeout of its own \(em so a hung resolver hangs the run.
 .It Ic password-command
 A command whose standard output is the password, run through
 .Xr sh 1
@@ -747,6 +747,12 @@ The key is also read as
 .Ic access_level .
 Default
 .Ic organize .
+.It Ic mock
+Answer from the in-memory mock backend instead of connecting.
+Development builds only: a released binary carries no mock and refuses
+the command rather than reaching for the configured account.
+Default
+.Ic false .
 .El
 .Ss Several accounts in one file
 A top-level block is a
@@ -831,7 +837,7 @@ $ mail-imap -c incal.conf info
 .Pp
 List folders, then read one message:
 .Bd -literal -offset indent
-$ mail-imap -c incal.conf folder
+$ mail-imap -c incal.conf folder list
 $ mail-imap -c incal.conf -f INBOX read 12345
 .Ed
 .Pp

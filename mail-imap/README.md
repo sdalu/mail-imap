@@ -45,9 +45,11 @@ config parser is a C library compiled from source as part of the
 build and linked statically, so the finished binary has no runtime
 dependency on it.
 
-The `imap` and `imap-proto` crates are local forks under `../forks`,
-carrying RFC 5256 `THREAD`/`SORT` support that upstream has not
-released; a checkout without them does not build.
+The `imap` and `imap-proto` crates are local forks under `../forks`.
+They carry two things upstream has not released: RFC 5256 `THREAD`
+(upstream has `SORT` already) and `ClientBuilder::timeout`, without
+which nothing can bound the connect phase. A checkout without them
+does not build.
 
 The `Makefile` is the interface (`make` alone, or `make help`, prints
 what it does):
@@ -58,15 +60,17 @@ what it does):
 | `make check`     | Preflight, running none of the project's code: clippy with warnings denied, the release number written only in `Cargo.toml`, and `man/mail-imap.1` well-formed mdoc |
 | `make build`     | Build the binary (`RELEASE=no` for a debug build, which is also the one that keeps `--mock`; release is the default and omits it)                                |
 | `make tests`     | The whole suite: `tests-unit` (cargo test) then `tests-examples` (every documented command line, run against the in-memory backend a development build carries) |
+| `make tests-wire`| The wire checks: starts a throwaway GreenMail, runs `tests/wire.rs` against it, stops it. Deliberately not part of `make tests`, which opens no socket            |
 | `make doc`       | Generate the API documentation (`cargo doc --no-deps`)                                                                                                          |
-| `make install`   | Install the binary under `BINDIR` and `man/mail-imap.1` under `MANDIR` (`DESTDIR` stages both)                                                                      |
+| `make install`   | Install the binary under `BINDIR`, `man/mail-imap.1` under `MANDIR`, and a generated completion script under each of `BASHCOMPDIR`, `ZSHCOMPDIR`, `FISHCOMPDIR` (`DESTDIR` stages them all) |
 | `make uninstall` | Remove what `install` put down                                                                                                                                  |
-| `make clean`     | Remove what a build here made (`cargo clean`)                                                                                                                   |
+| `make clean`     | Remove what a build here made: `cargo clean`, the mutation-testing output, and the test server's scratch. `distclean` also drops the generated docs and the fetched GreenMail jar |
 | `make options`   | Print the build knobs and their defaults                                                                                                                        |
 
 Build knobs: `RELEASE` (`yes`), `PREFIX` (`/usr/local`), `BINDIR`
-(`$PREFIX/bin`), `MANDIR` (`$PREFIX/share/man`), `DESTDIR` (empty),
-`CARGO`. `make help` prints each with its current value.
+(`$PREFIX/bin`), `MANDIR` (`$PREFIX/share/man`), `BASHCOMPDIR` /
+`ZSHCOMPDIR` / `FISHCOMPDIR`, `DESTDIR` (empty), `CARGO`. `make help`
+prints each with its current value.
 
 `cargo` commands still work directly:
 
@@ -147,7 +151,8 @@ cargo run -- --help
   (`r=c3=a9gie` → "régie")
 - JSON output mode (`-j`) for programmatic use
 - Configuration in UCL (a JSON superset, so JSON configs keep working)
-- RFC 2047 subject decoding (UTF-8, Latin-1, B & Q encodings)
+- RFC 2047 subject decoding (UTF-8, Latin-1, windows-1252, B & Q
+  encodings)
 
 ## Usage
 
@@ -222,57 +227,30 @@ A selection names messages, and optionally the folder to find them in:
         └───── the folder. Without one, -f applies (or the config)
 ```
 
-The whole grammar, in EBNF:
+The commands are the [Commands](#commands) table above; what that table
+cannot show is the shape of the options and of the message arguments,
+which is this:
 
 ```text
 invocation  = "mail-imap" , { option } , command ;
 
                           (* options are global: they may appear before
                              or after the command, in any order *)
-option      = ( "-c" | "--config" ) , path
+option      = ( "-p" | "--profile" ) , name
+            | ( "-c" | "--config" ) , path
             | ( "-f" | "--folder" ) , pattern , { "," , pattern }
             | ( "-A" | "--all-folders" )
             | "--access-level" , level
             | ( "-M" | "--max" ) , number
             | ( "-S" | "--sort" ) , sort-spec
             | "-j" | "--json" | "-d" | "--debug"
+            | "--mock"                  (* development builds only *)
             | "-h" | "--help" | "-V" | "--version" ;
 
-command =
-              (* what this run can do, and what the server is *)
-              "info"
-
-              (* mailboxes *)
-            | "folder"
-            | "folder" , "create" , folder ,
-                       [ "--use" , special-use , [ "--wire" ] ]
-            | "folder" , "rename" , folder , folder
-            | "folder" , ( "subscribe" | "unsubscribe" ) , folder
-            | "count" | "status"        (* one command, two names *)
-            | "uid"
-
-              (* finding messages *)
-            | "search" , imap-query
-            | "unread"
-            | "thread" , selection , { selection }
-
-              (* reading them *)
-            | "read" , selection , { selection }
-            | "part" , "list" , selection , { selection }
-            | "part" , "save" , selection , part-number ,
-                       [ ( "-o" | "--out" ) , path ]
-
-              (* changing them: each needs an access-level *)
-            | "move" , selection , { selection } , folder
-            | "flag" , "list" , [ "--wire" ] , selection , { selection }
-            | "flag" , ( "add" | "remove" ) , [ "--wire" ] , flag-args
-            | "tag" , "known"           (* needs no server *)
-            | "tag" , ( "junk" | "notjunk" ) , selection , { selection }
-            | "tag" , "list" , [ "--wire" ] , selection , { selection }
-            | "tag" , ( "add" | "remove" ) , [ "--wire" ] , tag-args ;
-
-               (* no separator: a name that would read as a selection
-                  is refused, so the two cannot be confused *)
+               (* `flag` and `tag` `add`/`remove` take selections and
+                  names in one list, with no separator: a name that
+                  would read as a selection is refused, so the two
+                  cannot be confused *)
 flag-args   = selection , { selection } , flag , { flag } ;
 tag-args    = selection , { selection } , keyword , { keyword } ;
 
@@ -299,11 +277,7 @@ flag        = "seen" | "answered" | "flagged" | "deleted" | "draft" ;
                              "\Seen", "\Answered", ... *)
 keyword     = atom ;   (* non-ASCII is encoded to modified UTF-7     *)
 level       = "readonly" | "organize" | "restructure" | "full" ;
-special-use = "all" | "archive" | "drafts" | "flagged"
-            | "junk" | "sent" | "trash" ;
-                          (* case-free, and needing no shell quoting,
-                             as the flags are. With --wire, the form a
-                             listing prints: "\Archive", "\Junk", ... *)
+command     = one row of the Commands table above ;
 ```
 
 ### info
@@ -318,6 +292,7 @@ $ mail-imap -c incal.conf info
 mail-imap 0.4.0 (real backend)
   config      incal.conf
   account     user@example.com@imap.example.com:993 (implicit TLS)
+  auth        login
 
 Access level: organize
   set and clear flags and tags        yes
@@ -380,7 +355,8 @@ What each block is for:
 ```json
 {"tool":{"name":"mail-imap","version":"0.4.0","backend":"real"},
  "config":{"path":"incal.conf","server":"imap.example.com","port":993,
-           "tls":"implicit","insecure":false,"username":"user@example.com"},
+           "tls":"implicit","insecure":false,"auth":"login",
+           "username":"user@example.com"},
  "access":{"effective":"organize","configured":"organize",
            "may":{"store_flags":true,"move_messages":true,
                   "copy_messages":true,"change_folders":false,
@@ -396,7 +372,10 @@ What each block is for:
 ```
 
 (shown wrapped; the real output is one line). `config.path` is `null`
-when no config file was read.
+when no config file was read, and `config.profile` appears only when
+the config names profiles — the text output prints that line on the
+same condition, since "profile (none)" on every single-account config
+is noise on the common case.
 
 ### Message selections
 
@@ -945,7 +924,7 @@ Each command prints one compact JSON object to stdout:
 | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `info`                                                   | `{"tool", "config", "access", "folders", "defaults", "server"}` — see [`info`](#info) for the fields of each                                                                                                                |
 | `folder list`                                            | `{"count", "folders": [{"name", "delimiter", "no_inferiors", "attrs"}]}` (`delimiter` is `null` for a mailbox reported with none; `attrs` carries `\Marked` and the RFC 6154 special uses)                                  |
-| `folder create` / `rename` / `subscribe` / `unsubscribe` | `{"action", "folder"}`, plus `"to"` for a `rename` and `"use"` for a `create` that declared a special use                                                                                                                   |
+| `folder create` / `rename` / `subscribe` / `unsubscribe` / `delete` | `{"action", "folder"}`, plus `"to"` for a `rename` and `"use"` for a `create` that declared a special use                                                                                               |
 | `search`                                                 | one folder: `{"folder", "query", "count", "results": [...]}`; several folders: `{"folders": [...], "query", "count", "results": [...]}`. Each result includes `"folder"` (its mailbox), `"parts"` (number of MIME parts), `"date"` (when it arrived — the internaldate) and `"sent"` (the message's own `Date:` header, `null` when it has none). Both are always present, whichever one the text output shows |
 | `read`                                                   | one `{"folder", "uid", "content", "source"}` object per selected UID; `source` is `text`, `html`, `raw` or `none`, naming which part `content` came from                                                                    |
 | `count` / `status`                                       | `{"all", "counts": [{"name", "messages", "unseen", "recent", "uid_next", "uid_validity"}]}`                                                                                                                                 |
@@ -954,8 +933,11 @@ Each command prints one compact JSON object to stdout:
 | `unread`                                                 | same shape as `search` (query fixed to `UNSEEN`, folder(s) + part counts included)                                                                                                                                          |
 | `part list`                                              | one `{"folder", "uid", "count", "parts": [{"part", "content_type", "filename", "size"}]}` per selected UID                                                                                                                  |
 | `part save`                                              | `{"folder", "uid", "part", "file", "size"}`; with `--all`, one such object per saved part                                                                                                                                   |
-| `move`                                                   | one `{"folder", "to", "count", "uids": [...]}` object per selected folder (`folder` is where the messages came from, `to` where they went)                                                                                  |
-| `flag list` / `tag list`                                 | one `{"folder", "uid", "count", "flags": [...]}` per selected UID (`\Recent` omitted; `tag list` keeps keywords only)                                                                                                       |
+| `move` / `copy`                                          | one `{"folder", "to", "count", "uids": [...]}` object per selected folder (`folder` is where the messages came from, `to` where they went)                                                                                  |
+| `expunge`                                                | one `{"folder", "count", "uids": [...]}` object per selected folder, carrying what was actually removed — the subset already marked `\Deleted`, not what was asked for                                                      |
+| `append`                                                 | `{"folder", "bytes", "flags", "uid"}`; `uid` is `null` on a server without `UIDPLUS`, which cannot say which UID it created                                                                                                 |
+| `part strip`                                             | `{"folder", "old_uid", "new_uid", "bytes_before", "bytes_after", "stripped": [{"part", "content_type", "filename", "size", "sha256"}]}`                                                                                      |
+| `flag list` / `tag list`                                 | one `{"folder", "uid", "count", "flags": [...]}` per selected UID (`\Recent` omitted; `tag list` keeps keywords only), plus `"junk"` (`junk`, `not-junk` or `contradictory`) when the message carries a spelling of either  |
 | `flag add` / `flag remove` / `tag add` / `tag remove`    | one `{"folder", "count", "uids": [...], "added": [...], "removed": [...]}` object per selected folder (`added` populated by add, `removed` by remove)                                                                       |
 | `tag junk` / `tag notjunk`                               | the shape of `tag add` — one object per selected folder, `added` carrying every spelling set and `removed` every spelling cleared                                                                                           |
 | `tag known`                                              | `{"count", "registered": [{"keyword", "means"}], "well_known": [{"keyword", "means"}]}`                                                                                                                                     |
@@ -1010,6 +992,10 @@ command.
   access level in force, which threading and sort paths were taken, and
   the commands as they go out. The capability list is not repeated here
   — [`info`](#info) reports it on its `advertises` line.
+- **`--mock`** — answer from the in-memory mock backend instead of
+  connecting, with no config needed. Development builds only
+  (`make build RELEASE=no`): the released binary carries no mock and
+  rejects the flag outright.
 - **`-h, --help`** — print help and exit. Also on every subcommand
   (`mail-imap flag add --help`).
 - **`-V, --version`** — print the version and exit.
@@ -1076,7 +1062,7 @@ password of `30s` stays the text `30s` rather than becoming a number.
 | `password`     | —          | Login password (use an app password for e.g. Gmail). Exactly one of this and `password-command`                           |
 | `password-command` | —      | A command whose output is the password; run through the shell, with exactly one trailing newline stripped                  |
 | `auth`         | `login`    | How to authenticate: `login`, or `xoauth2` for an OAuth 2 access token                                                     |
-| `timeout`      | `30`       | Seconds to wait on a silent server once connected; `0` disables it. It does not bound the connect itself — see below        |
+| `timeout`      | `30`       | Seconds to wait on the server, the connect and handshake included; `0` disables it. See [Timeouts](#timeouts)              |
 | `ssl`          | `true`     | Implicit TLS (typical for port 993)                                                                                       |
 | `starttls`     | `false`    | Upgrade a plain connection with STARTTLS (typical for port 143). Used when `ssl` is `false`.                              |
 | `insecure`     | `false`    | Accept invalid TLS certificates (self-signed local servers)                                                               |
@@ -1085,6 +1071,7 @@ password of `30s` stays the text `30s` rather than becoming a number.
 | `sort`         | `null`     | Default sort spec for `search`/`unread` (same format as `-S/--sort`); overridden by `-S` on the command line              |
 | `delimiter`    | `null`     | The hierarchy delimiter `info` reports, overriding the server's own answer. Advisory only: nothing rewrites a folder name |
 | `access-level` | `organize` | How much this tool may change: `readonly`, `organize`, `restructure` or `full` — see [Access level](#access-level)        |
+| `mock`         | `false`    | Answer from the in-memory mock backend instead of connecting. Development builds only: a released binary carries no mock and refuses the command rather than reaching for the account |
 
 ### Several accounts in one file
 
@@ -1238,10 +1225,12 @@ reachable. [DESIGN.md](DESIGN.md#testing) lists it in full.
 
 `scripts/check-examples.sh` is the second half: it extracts every `mail-imap`
 command line these documents print, replays it against `--mock`, and
-fails if the CLI rejects one. The Rust suite calls the `cli::`
-functions directly, so an argument shape broken in `src/main.rs` passes
-it — this is what catches that, and it is why an example that stops
-working is a build failure rather than a surprise for a reader.
+fails if the CLI rejects one. The Rust suite mostly calls the `cli::`
+functions directly — `src/main.rs`'s own tests pin a handful of
+argument shapes, and everything else about the command line passes it
+— so this is what catches a broken shape, and it is why an example
+that stops working is a build failure rather than a surprise for a
+reader.
 
 `make tests-wire` is the third part, and the only one that opens a
 socket. It fetches a GreenMail jar into `tests-tmp/`, starts it on
@@ -1325,19 +1314,20 @@ first points it at Gmail knows they are the test.
 
 ## Timeouts
 
-`timeout` (default 30 seconds, `0` to disable) bounds a server that
-accepts the connection and then goes quiet mid-response — the hang
-that otherwise lasts for ever.
+`timeout` (default 30 seconds, `0` to disable) bounds every part of a
+conversation with the server: the dial, the TLS or STARTTLS handshake,
+the greeting, a server that accepts and then goes quiet mid-response,
+and — because the bound is set on the socket rather than on each read —
+a stalled *write*, such as a large `append` to a server that stopped
+reading.
 
-It is worth being exact about what it does **not** cover, because the
-gap is not obvious. It does not bound the connect or the TLS handshake:
-the `imap` crate's `ClientBuilder` owns the dial and hands back an
-already-established client, with no hook for a caller to time that
-part. And the trait it uses is read-only, so a stalled *write* — a
-large `append` to a server that stopped reading — is not bounded
-either. A server that never accepts, or that stalls mid-handshake,
-still hangs. Closing those needs a change in the `imap` fork rather
-than here.
+Bounding the connect phase took a patch to the `imap` fork
+(`ClientBuilder::timeout`), because all of it happens before a `Client`
+exists to set a timeout on; until that landed, a server that accepted
+and then said nothing hung the tool for good.
+
+One gap is left and cannot be closed here: resolving the name.
+`getaddrinfo` takes no timeout, so a resolver that hangs hangs the run.
 
 ## Shell completions
 

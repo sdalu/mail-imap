@@ -24,14 +24,15 @@ Without a folder a selection means the -f folder (or \
 #[derive(Parser)]
 #[clap(name = "mail-imap", version = env!("CARGO_PKG_VERSION"), author = "AI Assistant")]
 struct Args {
-    /// Configuration file path (or set MAIL_IMAP_CONFIG)
     /// Profile to use from a config that names several accounts.
     /// Without it the config's `default = "..."` decides; a config
     /// with no profiles needs neither
     #[clap(short = 'p', long = "profile", global = true, value_name = "NAME")]
     profile: Option<String>,
 
-    #[clap(short = 'c', long = "config")]
+    /// Configuration file path (or set MAIL_IMAP_CONFIG). The file
+    /// must exist: a path given here is an answer, not a candidate
+    #[clap(short = 'c', long = "config", global = true, value_name = "PATH")]
     config_file: Option<String>,
 
     /// Folder(s) to operate on: a name, or an IMAP LIST pattern
@@ -1048,6 +1049,28 @@ mod tests {
         assert_eq!(many[0].folder.as_deref(), Some("Archive"));
         assert_eq!(many[1].folder, None);
         assert_eq!(many[2].folder.as_deref(), Some("Sent"));
+    }
+
+    /// Every option is global, `-c` included.
+    ///
+    /// README, the man page and the EBNF all say an option may be
+    /// written before or after the command; `-c` alone was declared
+    /// without `global = true`, so `info -c file.conf` was a clap
+    /// usage error while `-p` beside it worked either way. Nothing
+    /// caught it: `check-examples.sh` replays the documents, and every
+    /// example in them happens to put `-c` first.
+    #[test]
+    fn a_global_option_is_accepted_on_either_side_of_the_command() {
+        let config = |argv: &[&str]| args(argv).config_file;
+        assert_eq!(config(&["-c", "a.conf", "info"]).as_deref(), Some("a.conf"));
+        assert_eq!(config(&["info", "-c", "a.conf"]).as_deref(), Some("a.conf"));
+        // Under a subcommand of a subcommand too, which is where a
+        // non-global option is refused most confusingly.
+        assert_eq!(
+            config(&["folder", "list", "--config", "a.conf"]).as_deref(),
+            Some("a.conf")
+        );
+        assert_eq!(args(&["info", "-p", "work"]).profile.as_deref(), Some("work"));
     }
 
     /// `--mock` is asked for, or it is not.

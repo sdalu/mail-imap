@@ -121,19 +121,27 @@ while IFS='	' read -r f args; do
 	# untracked `uid1_part1` in the repository after every `make
 	# tests` -- litter that makes `git status` dirty for a check that
 	# is supposed to change nothing.
-	out=$(printf '%s %s\n' "$BIN" "$args" | (cd "$work" && sh) 2>&1 || true)
+	if out=$(printf '%s %s\n' "$BIN" "$args" | (cd "$work" && sh) 2>&1); then
+		status=0
+	else
+		status=$?
+	fi
 	checked=$((checked + 1))
 
-	case $out in
-	*"unexpected argument"* | *"unrecognized subcommand"* | \
-	*"invalid value"* | *"required arguments"* | \
-	*"unexpected value"* | *"error: the following"*)
+	# Clap exits 2 when it will not parse a line, and nothing else in
+	# this tool does -- its own failures exit 1 and are fine here (no
+	# such UID, unknown folder: the mock account is not the account
+	# the examples were written against).  This used to match clap's
+	# error strings instead, and missed the one shape that prints no
+	# error at all: a command line missing its subcommand. `mail-imap
+	# folder` stood in the man page for several releases, printing
+	# help and exiting 2, and passed this check every time.
+	if [ "$status" -eq 2 ]; then
 		failed=$((failed + 1))
 		echo "$f: the CLI refuses a documented command line:" >&2
 		echo "    mail-imap $args" >&2
 		printf '%s\n' "$out" | sed -n '1,2p' | sed 's/^/    /' >&2
-		;;
-	esac
+	fi
 done < "$work/lines"
 
 if [ "$checked" -eq 0 ]; then

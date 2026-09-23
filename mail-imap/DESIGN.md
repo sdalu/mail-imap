@@ -24,18 +24,27 @@ if config.mock { MockClient::connect(cfg) } else { RealClient::connect(cfg) }
 
 ## Real backend (`real.rs`)
 
-Uses the `imap` crate (v2.4) over `std::net::TcpStream` + `native-tls`.
+Uses the `imap` crate — the fork under `../forks/rust-imap`, a 3.0
+alpha — over `native-tls`.
 
 ### Connection
-1. Resolve the host and `TcpStream::connect_timeout` (10 s).
-2. Branch on config:
-   - `ssl: true` → implicit TLS via `TlsConnector::connect` (port 993 style).
-   - `ssl: false, starttls: true` → plain connect then `Client::secure` (STARTTLS).
-   - otherwise → plain TCP.
-3. `read_greeting` then `login(username, password)`.
+1. `ClientBuilder::new(server, port)`, with the mode taken from the
+   config: `ConnectionMode::Tls` for `ssl` (implicit TLS, port 993
+   style), `ConnectionMode::StartTls` for `starttls` on a plain
+   connection, else `ConnectionMode::Plaintext`. `insecure` adds
+   `danger_skip_tls_verify`.
+2. `builder.timeout(config.timeout)` unless it is `0`, which is what
+   bounds the dial, the handshake and the greeting — see
+   [Timeouts](#timeouts-and-the-one-thing-they-do-not-cover).
+3. `builder.connect()` dials and consumes the greeting, so there is no
+   `read_greeting` to call; the read timeout is then set on the
+   connection taken back with `into_inner()`, and `login` or
+   `authenticate` follows (see
+   [Authentication](#authentication-and-the-one-thing-here-with-no-gate-behind-it)).
 
-The session is stored as either a TLS or plain variant in an enum so a single
-operation body can be shared by a `with_backend!` macro.
+The session is one `Session<Connection>` whichever transport was
+chosen: `Connection` is the crate's `Box<dyn ImapConnection>`, so
+nothing here branches on TLS versus plain after the connect.
 
 ### Operations
 
@@ -45,17 +54,21 @@ operation body can be shared by a `with_backend!` macro.
 | `folder list`                                         | `LIST "" *` (non-`\Noselect` names)                                                                                                                                                                                                                                                                                                 |
 | `folder create`                                       | `CREATE <name>`, or `CREATE "<name>" (USE (<attr>))` (RFC 6154) when `--use` is given — and only when `CREATE-SPECIAL-USE` is advertised, else refused before anything is sent. `--use` takes a bare word (`archive`), or the atom with `--wire`                                                                                    |
 | `folder rename`                                       | `RENAME <from> <to>` (INBOX refused outright, at every access level)                                                                                                                                                                                                                                                                |
+| `folder delete`                                       | `STATUS <name> (MESSAGES)` first unless `--force`, so a mailbox that still holds mail is refused rather than emptied by surprise, then `DELETE <name>` (INBOX refused outright, at every access level)                                                                                                                                |
 | `folder subscribe` / `folder unsubscribe`             | `SUBSCRIBE <name>` / `UNSUBSCRIBE <name>`                                                                                                                                                                                                                                                                                           |
-| `search` / `unread`                                   | per folder: `SELECT` + (`UID SORT <crit> UTF-8 <query>` when `--sort` is given and `SORT` is advertised, else `UID SEARCH <query>`) + batched `UID FETCH` (envelope/flags/date/size/`BODYSTRUCTURE`); folders are searched in order and the results aggregated                                                                      |
+| `search` / `unread`                                   | per folder: `SELECT` + (`UID SORT <crit> UTF-8 <query>` when `--sort` is given and `SORT` is advertised, else `UID SEARCH <query>`; `unread` is this path with the query fixed to `UNSEEN`) + batched `UID FETCH` (envelope/flags/date/size/`BODYSTRUCTURE`); folders are searched in order and the results aggregated                                                                      |
 | `read`                                                | `SELECT` + `UID FETCH <uid> (UID FLAGS INTERNALDATE BODY.PEEK[])` — no `ENVELOPE`: the headers are read from the message itself                                                                                                                                                                                                                                                          |
 | `count` / `status`                                    | `LIST "" *` + `STATUS <folder> (MESSAGES UNSEEN RECENT UIDNEXT UIDVALIDITY)` per mailbox (or one folder when given)                                                                                                                                                                                                                 |
 | `uid`                                                 | per selected folder: `SELECT` + `UID SEARCH ALL`                                                                                                                                                                                                                                                                                    |
 | `thread`                                              | per selected message: `SELECT` + `CAPABILITY`; if `THREAD=REFERENCES` is advertised: one `UID THREAD REFERENCES UTF-8 ALL` (server-side tree, flattened). Otherwise: `UID SEARCH ALL` + batched `UID FETCH <uids> (UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID REFERENCES IN-REPLY-TO)])`, then client-side union-find over Message-IDs |
-| `unread`                                              | `SELECT` + `UID SEARCH UNSEEN` + batched `UID FETCH` (same path as `search`)                                                                                                                                                                                                                                                        |
 | `part list`                                           | per selected message: `SELECT` + `UID FETCH <uid> (UID BODY.PEEK[])`, then MIME part enumeration locally                                                                                                                                                                                                                            |
-| `part save`                                           | same fetch, then the selected part is CTE-decoded and written to a file                                                                                                                                                                                                                                                             |
+| `part save`                                           | same fetch, then the selected part is CTE-decoded and written to a file, to stdout (`-o -`), or, with `--all`, every part into a directory                                                                                                                                                                                           |
 | `flag list` / `tag list`                              | per selected message: `SELECT` + `UID FETCH <uid> (UID FLAGS)`                                                                                                                                                                                                                                                                      |
 | `move`                                                | per selected folder: `SELECT` + `UID MOVE <uids> <target>` (RFC 6851) when `MOVE` is advertised, else `UID COPY` + `UID STORE +FLAGS (\Deleted)` + `UID EXPUNGE` (RFC 4315); a server with neither is refused                                                                                                                       |
+| `copy`                                                | per selected folder: `SELECT` + `UID COPY <uids> <target>`, per batch of 50. No fallback is needed and none exists: nothing is removed                                                                                                                                                                                               |
+| `expunge`                                             | per selected folder: `SELECT` + `UID FETCH <uids> (UID FLAGS)` to find which are already `\Deleted`, then `UID EXPUNGE <those>` (RFC 4315) per batch of 50; a server without `UIDPLUS` is refused rather than served a plain `EXPUNGE`                                                                                                |
+| `append`                                              | `APPEND <folder> [(<flags>)] [<internaldate>] {<literal>}` (RFC 3501 §6.3.11) — no `SELECT`, since the command names its own destination. The new UID comes back only from a server with `UIDPLUS`                                                                                                                                    |
+| `part strip`                                          | `SELECT` + `UID FETCH <uid> (UID FLAGS INTERNALDATE BODY.PEEK[])`, then the rebuilt message goes back with `APPEND` (flags and internaldate carried over) and the original leaves with `UID STORE +FLAGS (\Deleted)` + `UID EXPUNGE` — write first, delete last                                                                        |
 | `flag add` / `flag remove` / `tag add` / `tag remove` | per selected folder: `SELECT` + `UID STORE <uids> +FLAGS (...)` / `-FLAGS (...)` per batch of 50                                                                                                                                                                                                                                    |
 
 IMAP can only search the selected mailbox, so `search`/`unread` iterate over
@@ -175,8 +188,9 @@ advertised. Fetched FETCH responses arrive in sequence order, so the
 final result order is restored from the computed UID order on every
 path.
 
-The `imap` fork (`forks/rust-imap`, `extensions/sort.rs`) provides
-`Session::uid_sort` and the `SortCriterion`/`SortCharset` types.
+`Session::uid_sort` and the `SortCriterion`/`SortCharset` types come
+from the `imap` crate's own `extensions/sort.rs`; `SORT` is the half of
+RFC 5256 the fork did not have to add.
 
 ### Part counts in search results
 
@@ -231,15 +245,10 @@ characters there; the `imap` crate turns such a line into a fabricated
 with "Bye Response: no explanation given" unless it is caught. `RealClient`
 countermeasures (`src/imap/real.rs`):
 
-- **the connect phase is bounded by `timeout` as well**, which took a
-  patch to the `imap` fork (`ClientBuilder::timeout`): the dial, the
-  TLS handshake, the STARTTLS exchange and the greeting all happen
-  before a `Client` exists to set a timeout on, so a server that
-  accepted and then said nothing hung the tool for good. The fork
-  applies the bound to the socket rather than to each step, which also
-  bounds the session's *writes* — `SetReadTimeout` has no counterpart,
-  so a stalled `APPEND` had nothing to stop it. What remains unbounded
-  is name resolution: `getaddrinfo` takes no timeout;
+- a hang is bounded rather than waited out: `timeout` covers the
+  connect phase as well as the session, so a server that accepts and
+  says nothing costs seconds rather than the run — see
+  [Timeouts](#timeouts-and-the-one-thing-they-do-not-cover);
 - `attempt_fetch` recognizes connection-poisoning errors (`Bye`,
   `TagMismatch`, `ConnectionLost`, `Io`), re-establishes the session
   (`reconnect`) and retries once;
@@ -973,8 +982,10 @@ the bytes go from the fetch to stdout.
 ### RFC 2047 subject decoding
 ENVELOPE subjects may be encoded-words (e.g. `=?utf-8?Q?Votre=20facture?=`).
 `decode_rfc2047` finds each well-formed encoded word in the value and decodes
-it (UTF-8, ISO-8859-1/Latin-1, `B` and `Q` encodings, padding restored for
-base64). Plain text is left untouched.
+it (`B` and `Q` encodings, padding restored for base64), through the same
+charset reader the bodies use: UTF-8, ISO-8859-1/Latin-1 and
+windows-1252 by name, anything else read as UTF-8 lossily rather than
+refused. Plain text is left untouched.
 
 ### Comparing keywords, in both places that do it
 
@@ -1151,31 +1162,34 @@ So `QUOTA` appearing there is not a promise of a `quota` command, and
 `IDLE` is not a promise of a `watch`. If either is ever built, it joins
 the lines above rather than changing what `advertises` means.
 
-### Timeouts, and what they do not cover
+### Timeouts, and the one thing they do not cover
 
-`timeout` (seconds, default 30, `0` to disable) is set on the session
-after it is established, and the route in is worth recording because it
-is not obvious: `Session` and `Client` have no timeout of their own,
-only the boxed `Connection` they hold does, via `SetReadTimeout`. So
+`timeout` (seconds, default 30, `0` to disable) reaches the connection
+by two routes, because one of them cannot reach far enough.
+
+**Before the client exists**, `ClientBuilder::timeout` applies it to
+the socket, which is what bounds the dial, the TLS or STARTTLS
+handshake and the greeting — everything that happens before there is a
+`Client` to set anything on. That hook is a patch carried by the fork;
+without it a server that accepted and then said nothing hung the tool
+for good, and no amount of care on this side could have stopped it.
+Because it is a socket option rather than a per-read one, it also
+bounds a stalled **write** — a large `append` to a server that stopped
+reading — which `SetReadTimeout`, having no counterpart, never could.
+
+**After it exists**, the read timeout is set again on the connection
+itself, and the route in is worth recording because it is not obvious:
+`Session` and `Client` have no timeout of their own, only the boxed
+`Connection` they hold does, via `SetReadTimeout`. So
 `establish_session` takes the connection back with
-`Client::into_inner()`, sets the timeout on it, and re-wraps it with
-`Client::new()` — without a second `read_greeting()`, since
-`ClientBuilder::connect()` has already consumed the greeting.
+`Client::into_inner()`, sets it, and re-wraps with `Client::new()` —
+without a second `read_greeting()`, since `ClientBuilder::connect()`
+has already consumed the greeting. This second pass matters for a
+connection this code did not open.
 
-What it bounds is a server that accepts and then goes quiet
-mid-response. Three things it does not bound, all stated in the code
-beside it rather than left to be discovered:
-
-- **the connect**, and for TLS the handshake, which `ClientBuilder`
-  owns and hands back already finished;
-- **a stalled write** — `SetReadTimeout` is read-only and has no
-  counterpart, so a large `append` to a server that stopped reading
-  hangs;
-- **a server that never accepts at all.**
-
-Closing those means patching the fork, which is a bigger decision than
-this fix: the forks are rebased by hand and CHECKLIST.md wants that
-debt shrinking rather than growing.
+What is left unbounded is **resolving the name**: `getaddrinfo` takes
+no timeout, so a resolver that hangs hangs the run. Nothing in the
+fork can close that one either.
 
 The dead pre-connect this replaced is worth a sentence, because it
 looked like a timeout and was not: `establish_session` built a
@@ -1238,7 +1252,8 @@ unknown argument and `--help` does not offer it, while
 `scripts/check-examples.sh` and QUICKSTART's worked example all use.
 
 A build without it does not silently fall back to a real server when a
-config says `mock = true`: it refuses to start. `--mock` means *do not
+config says `mock = true`: it refuses the command, naming the flag and
+the build that carries it. `--mock` means *do not
 touch my account*, and quietly touching it is the worst available
 reading of that flag.
 
@@ -1339,6 +1354,12 @@ mock backend (no network). What it proves, and where:
   and header-value reading (case-insensitivity, folded continuations,
   raw 8-bit bytes kept)
 
+- the argument shapes `src/main.rs` owns rather than delegates: the
+  selection/name split `flag`/`tag` rest on, the folders `-f`/`-A` ask
+  for, a selection resolving to the messages it names, `--mock` being
+  asked for rather than assumed, and every global option being taken on
+  either side of the command — `src/main.rs`
+
 - `fetch_chunk`'s degradation ladder, against a scripted socket that
   answers badly on purpose — both doors into the narrowing, the header
   rung's rebuilt metadata, and the reconnect a refused ENVELOPE costs
@@ -1348,13 +1369,14 @@ Two things the suite does **not** prove, and they are the two that
 break in practice: almost nothing in it fails because
 `src/imap/real.rs` sent the wrong thing to a server — `tests/replay.rs`
 is the exception, and it covers one ladder, not the backend — and
-nothing in it drives `src/main.rs`, so a broken argument shape passes
-it. Both gates are in `CHECKLIST.md`.
+almost nothing drives `src/main.rs`, so a broken argument shape passes
+it unless it is one of the few that file's own tests pin. Both gates
+are in `CHECKLIST.md`.
 
 To exercise the real backend manually:
 
 ```bash
-cargo run --release -- -c incal.conf folder
+cargo run --release -- -c incal.conf folder list
 cargo run --release -- -c incal.conf -f INBOX search "SINCE 01-Jan-2026"
 ```
 

@@ -30,9 +30,10 @@ Gate: `make check && make tests`
 
 - **The `imap` and `imap-proto` dependencies are local forks**
   (`../forks/rust-imap`, `../forks/tokio-imap/imap-proto`), carrying
-  RFC 5256 THREAD/SORT support that upstream has not released, and now
-  `ClientBuilder::timeout` as well — without which nothing can bound
-  the connect phase, because it all happens before a `Client` exists.
+  RFC 5256 THREAD support that upstream has not released (`SORT` it
+  already has), and `ClientBuilder::timeout` — without which nothing
+  can bound the connect phase, because it all happens before a
+  `Client` exists.
   A checkout without `../forks` does not build.
 - **`tests/replay.rs` is a scripted socket, not a server.** It speaks
   just enough IMAP to walk the real backend down `fetch_chunk`'s
@@ -61,13 +62,16 @@ Gate: `make check && make tests`
   MIME over the wire, threading. What they still do not cover is a
   *real* account's quirks (the degradation ladders in `fetch_chunk`
   exist for servers GreenMail is not) — see CHECKLIST.md.
-- **The Rust suite does not drive the CLI surface.** It calls the
+- **The Rust suite barely drives the CLI surface.** It calls the
   `cli::` functions, so an argument shape broken in `src/main.rs`
-  passes it. `make tests` therefore also runs `scripts/check-examples.sh`,
-  which replays every command line the documents print against
-  `--mock` and fails on a clap usage error. That covers the
-  *documented* shapes only: a shape nobody wrote down is still
-  unchecked, so run `--mock` invocations of what you changed.
+  passes it — except for the few `src/main.rs`'s own test module pins
+  (the selection/name split, the folder spec, that a global option is
+  taken on either side of the command). `make tests` therefore also
+  runs `scripts/check-examples.sh`, which replays every command line
+  the documents print against `--mock` and fails on a clap usage
+  error. That covers the *documented* shapes only: a shape nobody
+  wrote down is still unchecked, so run `--mock` invocations of what
+  you changed.
 - **The mock is behind a default-on `mock` cargo feature, and the
   release build turns it off** (`F_yes = --no-default-features` in the
   Makefile). So `make build` produces a binary where `--mock` is an

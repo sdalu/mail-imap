@@ -52,6 +52,13 @@ this morning is a claim, not a fact.
 - [ ] `man/mail-imap.1` — a command, flag or config field changes in three
       places or none: the README table, the man page, and `--help`.
       `make check` proves the page parses, not that it is true.
+- [ ] **Read `--help` itself**, for the binary and for anything this
+      round touched (`mail-imap <command> --help`). It is the third
+      place above and the one nobody opens: a clap doc comment sits in
+      `src/main.rs` where it reads as a comment rather than as output,
+      so `-p/--profile` shipped carrying `--config`'s description while
+      `--config` had none at all, and nothing — clippy, the suite,
+      `scripts/check-examples.sh` — has an opinion about help text.
 - [ ] `QUICKSTART.md` — do its commands still run? Every one of them is
       meant to be runnable as written, most under `--mock`.
 - [ ] **A documented `search` query is checked by nothing.**
@@ -139,10 +146,6 @@ about a minute a mutant — and it is the only way to ask this file the
 question. Measured that way, both of `fetch_to_result`'s filters die.
 Three survivors are standing, and none of them is a test gap:
 
-- ~~**`fetch_to_result_from_headers`, both filters.**~~ Closed:
-  `tests/replay.rs` scripts a socket that answers badly on purpose and
-  walks the client down to that rung, so the function is now covered
-  offline and both mutants die under the plain `cargo mutants` runner.
 - **`unstated` in `permanent_flags`.** Dropping the field leaves
   `false`, which is what `permanent_flags.is_empty()` returns on any
   server that states its PERMANENTFLAGS — and GreenMail always does.
