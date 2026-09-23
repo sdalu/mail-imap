@@ -86,6 +86,35 @@ this morning is a claim, not a fact.
       re-reading the comment over the code you changed is the only
       thing that does.
 
+## Mutation testing
+
+Not every round, but worth a pass when a round adds a lot of new logic
+— it answers the question the suite cannot ask itself: *would these
+tests notice if the code stopped being right?*
+
+    cargo mutants --file src/imap/mime.rs --in-place -F '<functions>'
+
+`--in-place` is required here (CLAUDE.md says why). Commit first: the
+run mutates the working tree and restores it, so `git checkout --
+mail-imap/src` is the recovery if it is interrupted. Nothing else may
+touch the tree while it runs, readers included — the files on disk are
+deliberately broken for the duration.
+
+**Do not chase 100%.** A surviving mutant is one of two things, and
+they want opposite answers:
+
+- a **test gap** — the code has behaviour nothing asserts. Write the
+  assertion. The shape to look for is a test asserting *presence*
+  (`len()`, `contains`) where the thing that matters is a *value*: a
+  mutant turning `i + 1` into `i` survived `attachments.len() == 1`
+  and would have renumbered every part.
+- an **equivalent mutant** — no input distinguishes it, so no test
+  can. `decode_charset_bytes`'s `"utf-8"` arm does exactly what its
+  fallback does; `rewrite_part`'s depth guard cannot fire because
+  `parse_message` rejects the same bytes first. Both are documented in
+  the code as unkillable, which is the deliverable — the next person
+  should not spend an afternoon rediscovering it.
+
 ## Dependencies
 
 - [ ] **Has upstream taken the THREAD support yet?** `imap` and

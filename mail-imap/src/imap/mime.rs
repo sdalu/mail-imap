@@ -503,6 +503,15 @@ pub fn strip_parts(
 /// delimiter lines and epilogue bytes it was given -- so a subtree with
 /// nothing to strip in it reconstructs to the exact bytes it started
 /// from.
+/// Rebuild one part, recursing into a multipart's children.
+///
+/// Its `MAX_DEPTH` guard below is defence in depth and **cannot fire
+/// through `strip_parts`**: that entry point calls `parse_message`
+/// first, whose identical guard rejects the same bytes before this is
+/// reached. So a mutation of `depth + 1` here survives every test, and
+/// correctly -- there is no input that distinguishes it. Kept anyway,
+/// because a future caller reaching `rewrite_part` directly would have
+/// no other protection.
 fn rewrite_part(
     raw: &[u8],
     depth: usize,
@@ -1434,6 +1443,170 @@ mod tests {
 
     fn a_date() -> DateTime<FixedOffset> {
         DateTime::parse_from_rfc3339("2026-09-22T18:40:11+02:00").expect("fixture")
+    }
+
+    #[test]
+    fn stripping_refuses_a_message_nested_past_the_depth_guard() {
+        // `rewrite_part` recurses, and a mutant turning `depth + 1`
+        // into `depth * 1` survived -- depth never rises, MAX_DEPTH
+        // never trips, and a deeply nested message recurses until the
+        // stack goes. The parser has a guard and so does the rewriter;
+        // only the parser's was ever tested.
+        let mut msg = String::from("Subject: deep\r\n");
+        let depth = MAX_DEPTH + 6;
+        for i in 0..depth {
+            msg.push_str(&format!(
+                "Content-Type: multipart/mixed; boundary=B{}\r\n\r\n--B{}\r\n",
+                i, i
+            ));
+        }
+        msg.push_str("Content-Type: text/plain\r\n\r\nbottom\r\n");
+        for i in (0..depth).rev() {
+            msg.push_str(&format!("--B{}--\r\n", i));
+        }
+        // Either the parse or the rewrite refuses; what must NOT happen
+        // is unbounded recursion.
+        assert!(
+            strip_parts(msg.as_bytes(), &[1], a_date()).is_err(),
+            "a message nested past the guard must be refused, not recursed into"
+        );
+    }
+
+    #[test]
+    fn attachment_part_numbers_are_the_ones_part_save_takes() {
+        // `len() == 1` was all this asserted, and a mutant turning
+        // `i + 1` into `i` survived it -- which would hand every
+        // attachment a part number one too low, and those numbers are
+        // exactly what `part save` and `part strip` are given.
+        let msg = b"Subject: t\r\n\
+             Content-Type: multipart/mixed; boundary=B\r\n\r\n\
+             --B\r\nContent-Type: text/plain\r\n\r\nbody\r\n\
+             --B\r\nContent-Type: application/pdf\r\n\
+             Content-Disposition: attachment; filename=a.pdf\r\n\r\nAAA\r\n\
+             --B\r\nContent-Type: image/png\r\n\
+             Content-Disposition: attachment; filename=b.png\r\n\r\nBBB\r\n\
+             --B--\r\n";
+        let r = render_message(msg, &[], None, false).expect("render");
+        assert_eq!(
+            r.attachments.iter().map(|a| a.part).collect::<Vec<_>>(),
+            vec![2, 3],
+            "parts are numbered from 1 over the leaves, and part 1 is the body shown"
+        );
+    }
+
+    #[test]
+    fn raw_output_carries_no_attachment_list_and_flags_appear_only_when_present() {
+        let msg = b"Subject: t\r\n\
+             Content-Type: multipart/mixed; boundary=B\r\n\r\n\
+             --B\r\nContent-Type: text/plain\r\n\r\nbody\r\n\
+             --B\r\nContent-Type: application/pdf\r\n\
+             Content-Disposition: attachment; filename=a.pdf\r\n\r\nAAA\r\n\
+             --B--\r\n";
+        // --raw is the "give me what the server gave you" mode: the
+        // attachment list is this tool talking, and must not appear.
+        let raw = render_message(msg, &[], None, true).expect("render raw").to_text();
+        assert!(!raw.contains("Attachments:"), "{}", raw);
+        let cooked = render_message(msg, &[], None, false).expect("render").to_text();
+        assert!(cooked.contains("Attachments:"), "{}", cooked);
+
+        // The Flags line is printed when there ARE flags and omitted
+        // when there are none -- not the other way round.
+        assert!(!cooked.contains("Flags:"), "{}", cooked);
+        let some = render_message(msg, &["\\Seen".to_string()], None, false)
+            .expect("render")
+            .to_text();
+        assert!(some.contains("Flags: \\Seen"), "{}", some);
+    }
+
+    #[test]
+    fn a_folded_header_stays_within_its_line_limit_and_parses_back() {
+        // Nothing asserted where `fold_header` folds -- the round trip
+        // only looked for substrings, which hold however the line is
+        // broken. Ten mutants in its arithmetic survived that.
+        let fields = vec![
+            "part=3".to_string(),
+            "type=\"application/pdf\"".to_string(),
+            "filename=\"a-rather-long-invoice-name-2026-01.pdf\"".to_string(),
+            "size=4194304".to_string(),
+            "sha256=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_string(),
+            "date=\"Tue, 22 Sep 2026 18:40:11 +0200\"".to_string(),
+        ];
+        let folded = fold_header("X-Mail-Imap-Stripped", &fields);
+
+        assert!(folded.contains("\r\n"), "this input is long enough to need folding");
+        for line in folded.split("\r\n") {
+            assert!(
+                line.len() <= 78,
+                "a folded line must stay within the limit, got {}: {:?}",
+                line.len(),
+                line
+            );
+        }
+        for cont in folded.split("\r\n").skip(1) {
+            assert!(
+                cont.starts_with(' ') || cont.starts_with('\t'),
+                "an RFC 5322 continuation begins with whitespace: {:?}",
+                cont
+            );
+        }
+        // An upper bound alone is satisfied by folding after every
+        // single field, so assert the other side too: it packs what
+        // fits. With six short-ish fields and a 78-column limit, some
+        // line must carry more than one of them.
+        assert!(
+            folded
+                .split("\r\n")
+                .any(|l| l.matches(';').count() >= 1 && l.len() > 40),
+            "folding must pack fields that fit, not break after each: {:?}",
+            folded
+        );
+
+        let unfolded: String = folded.split("\r\n").map(str::trim).collect::<Vec<_>>().join(" ");
+        for f in &fields {
+            assert!(unfolded.contains(f.as_str()), "{} lost in {}", f, unfolded);
+        }
+        // Fields are separated by ';', so the LAST one must not carry
+        // a trailing separator -- a header ending in ';' promises a
+        // field that never comes.
+        assert!(
+            !unfolded.trim_end().ends_with(';'),
+            "the last field must not end in a separator: {:?}",
+            unfolded
+        );
+    }
+
+    #[test]
+    fn a_first_field_too_long_to_fit_still_starts_on_the_header_line() {
+        // The width check is skipped for the first field on purpose:
+        // folding before it would emit a first line that is nothing
+        // but the header name, which is legal and useless. A field
+        // longer than the whole limit is the case that proves the
+        // skip is really there.
+        let long = format!("filename=\"{}\"", "x".repeat(90));
+        let folded = fold_header("X-Mail-Imap-Stripped", std::slice::from_ref(&long));
+        let first = folded.split("\r\n").next().expect("a first line");
+        assert!(
+            first.len() > "X-Mail-Imap-Stripped:".len(),
+            "the header line must carry the field, not stand empty: {:?}",
+            folded
+        );
+        assert!(first.contains("filename="), "{:?}", folded);
+    }
+
+    #[test]
+    fn strip_html_skips_a_whole_script_element_including_tags_inside_it() {
+        // The mutant turning `closing && &name == open` into `||`
+        // survived, because nothing put a tag inside a skipped
+        // element -- where that mutant stops skipping at the first tag
+        // of any kind and leaks the script body.
+        // Asserted exactly, not by `contains`: a mutant that ends the
+        // skip at the inner `</b>` leaks only the two characters after
+        // it, which every "does not contain the obvious words" check
+        // sails past. Exact output is the only assertion that sees it.
+        assert_eq!(
+            strip_html("<p>before</p><script>var x = \"<b>not text</b>\";</script><p>after</p>"),
+            "before\n\nafter"
+        );
     }
 
     #[test]
