@@ -231,6 +231,46 @@ nothing — so the matching half is unproven here too. The test says all
 of this in its own comments rather than asserting something weaker and
 looking complete.
 
+### Partial results, and the rule that was applied unevenly
+
+"Partial results beat none at all" is stated once in DESIGN and
+implemented in three places, and until a review went looking it was
+implemented in only one of them. The pattern that breaks it is always
+the same: a `?` (or a bare `return Err`) inside a loop that is already
+accumulating into a local `Vec`, which unwinds the function and takes
+the accumulator with it.
+
+- `search_in_folder` had it: a chunk that fails reports what earlier
+  chunks found, with a warning.
+- `search_folders` did not. One mailbox that cannot be selected —
+  deleted or renamed by another client since the folder list was taken,
+  which `-f '*'` makes ordinary — discarded every hit from every folder
+  searched before it.
+- `fetch_chunk`'s last-resort per-message walk did not. A hard failure
+  on the twentieth UID threw away the nineteen already recovered, and
+  if that was the folder's first chunk the caller's own partial-result
+  guard then saw an empty list and reported a bare error.
+
+All three now keep what they have and say what stopped them. The rule
+is worth stating as a rule rather than a habit: **an accumulator in
+scope is a reason not to use `?`.**
+
+### Telling a stalled link from corrupt data
+
+`attempt_fetch` reconnects once and retries. When the retry fails on a
+*fresh* connection, the old code concluded the bytes themselves were at
+fault and returned `Unparseable`. That was an assumption, and
+`config.timeout` turned it into a wrong one: a read timeout arrives as
+`imap::Error::Io`, which `is_poisoned` counts, so an ordinary slow
+server was reported as "server response could not be parsed" — sending
+someone to inspect a message for corruption when the answer was their
+network or the `timeout` setting. Worse, the second error was dropped
+entirely, so even `-d` could not recover it.
+
+An `Io` failure on the fresh connection is now a hard error carrying
+its own cause. Everything else that poisons twice really is the data,
+and says so under `-d`.
+
 ### Access level
 
 `Config::access` (`access-level` in the config file) is an ordered

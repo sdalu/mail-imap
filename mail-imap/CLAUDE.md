@@ -95,6 +95,14 @@ Gate: `make check && make tests`
 - **`scripts/check-examples.sh` reads four documents only** — README.md,
   QUICKSTART.md, DESIGN.md and `man/mail-imap.1`. A command line
   written anywhere else, TODO.md included, is replayed by nothing.
+- **`cargo mutants` needs `--in-place` here.** It copies the *git*
+  root to a scratch directory, and the git root is `AiTools` while the
+  package is `AiTools/mail-imap` — so it looks for `<tmp>/src/imap/…`
+  where the file actually landed at `<tmp>/mail-imap/src/imap/…` and
+  every worker dies with *"does not exist, refusing to create it"*.
+  The baseline build and test succeed first, which makes it look like
+  a code problem rather than a layout one. `.gitignore` carries
+  `mutants.out/`, so this has been run here before.
 - **The tree is not rustfmt-clean.** Do not run `cargo fmt` across it as
   part of another change: the reformatting of untouched code buries the
   diff. Format the lines you write.

@@ -563,7 +563,12 @@ impl RealClient {
                     continue;
                 }
                 Attempt::Unparseable => {}
-                Attempt::Fatal(e) => return Err(e),
+                // Same rule as the Unparseable warning below and as
+                // `search_in_folder`'s own: whatever this last-resort
+                // walk already recovered is worth more than a bare
+                // error. The caller's partial-result path can only use
+                // what it is given, and returning Err gives it nothing.
+                Attempt::Fatal(e) => return Self::fatal_with_partial(e, out, folder, uid),
             }
             match self.attempt_fetch(folder, uid, ITEMS_HEADERS) {
                 Attempt::Success(fs) => out.extend(
@@ -576,9 +581,37 @@ impl RealClient {
                         uid, folder
                     );
                 }
-                Attempt::Fatal(e) => return Err(e),
+                Attempt::Fatal(e) => return Self::fatal_with_partial(e, out, folder, uid),
             }
         }
+        Ok(out)
+    }
+
+    /// A hard failure part-way through the per-message walk: keep what
+    /// was already recovered, and say what stopped it.
+    ///
+    /// Returning `Err` here would discard every message this call had
+    /// already fetched, and if this was the folder's first chunk the
+    /// caller's own partial-result guard then sees an empty list and
+    /// reports a bare error -- so nineteen messages that arrived fine
+    /// vanish because the twentieth did not.
+    fn fatal_with_partial(
+        e: anyhow::Error,
+        out: Vec<SearchResult>,
+        folder: &str,
+        uid: &str,
+    ) -> Result<Vec<SearchResult>> {
+        if out.is_empty() {
+            return Err(e);
+        }
+        eprintln!(
+            "warning: fetching UID {} in '{}' failed ({:#}); reporting the {} message(s) \
+             recovered before it",
+            uid,
+            folder,
+            e,
+            out.len()
+        );
         Ok(out)
     }
 
@@ -603,8 +636,28 @@ impl RealClient {
                 Err(e) => e,
             };
             if is_poisoned(&err) {
-                // Even a fresh connection cannot carry this item set: the
-                // offending bytes are in the data itself.
+                // A second poisoning on a FRESH connection. Which kind
+                // it is decides what to tell the user, and getting that
+                // wrong sends them looking in the wrong place.
+                //
+                // `Io` is the link or the clock, not the data -- and
+                // since `config.timeout` is implemented with a read
+                // timeout, an ordinary slow server arrives here as
+                // `Io(TimedOut)`. Calling that "could not be parsed"
+                // sends someone to inspect a message for corruption
+                // when the answer is their network or `timeout`. It is
+                // a hard failure and it carries its own cause.
+                if matches!(err, imap::Error::Io(_)) {
+                    return Attempt::Fatal(anyhow::Error::new(err).context(format!(
+                        "fetching {} in '{}' failed twice, the second time on a fresh                          connection -- the link or the read timeout, not the message",
+                        list, folder
+                    )));
+                }
+                // Anything else that poisons twice over: the offending
+                // bytes really are in the data.
+                if self.debug {
+                    eprintln!("still desynced after reconnecting ({}); treating as unparseable", err);
+                }
                 return Attempt::Unparseable;
             }
         }
@@ -819,7 +872,27 @@ impl ImapBackend for RealClient {
             } else {
                 usize::MAX
             };
-            out.extend(self.search_in_folder(folder, query, cap, sort)?);
+            match self.search_in_folder(folder, query, cap, sort) {
+                Ok(hits) => out.extend(hits),
+                Err(e) => {
+                    // The same rule `search_in_folder` applies to its
+                    // own chunks, applied here to folders: one mailbox
+                    // that cannot be selected -- deleted or renamed by
+                    // another client since the list was taken, which a
+                    // `-f '*'` expansion makes ordinary -- must not
+                    // throw away every hit already found in the folders
+                    // before it.
+                    if out.is_empty() {
+                        return Err(e);
+                    }
+                    eprintln!(
+                        "warning: searching '{}' failed ({:#}); reporting {} result(s)                          from the folders searched before it",
+                        folder,
+                        e,
+                        out.len()
+                    );
+                }
+            }
         }
         Ok(out)
     }
