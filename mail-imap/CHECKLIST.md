@@ -99,7 +99,11 @@ run mutates the working tree and restores it, so `git checkout --
 mail-imap/src` is the recovery if it is interrupted -- and check `git
 diff` when it finishes too, because a run that exits 0 can still leave
 one mutant behind (one here left `required_capability` returning
-`Some("")`). Nothing else may
+`Some("")`), and because a mutated run can *write* things a normal one
+never does: a `parts_save` mutant that succeeded where the test expects
+a refusal left a saved attachment named `uid1_part1` in the tree. Do
+not gitignore that one -- in ordinary operation nothing writes it, so
+its appearing outside a mutation run is a finding, not noise. Nothing else may
 touch the tree while it runs, readers included — the files on disk are
 deliberately broken for the duration.
 

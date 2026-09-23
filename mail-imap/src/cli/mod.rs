@@ -1766,6 +1766,11 @@ pub fn parse_flag_names(names: &[String], system: bool, wire_form: bool) -> Resu
             let composed: String = name.nfc().collect();
             let name: &str = &composed;
             let encoded = modutf7::encode(name);
+            // Guards a note on stderr and nothing else -- `encoded` is
+            // what comes back either way -- so both halves of this
+            // condition survive mutation: no test captures stderr.
+            // That is the structural gap TODO.md records for the whole
+            // command layer, not a hole in this line.
             if encoded != name && modutf7::is_canonical(name) {
                 eprintln!(
                     "Note: '{}' is also a valid modified UTF-7 key ({:?}); it was taken \
@@ -2710,6 +2715,100 @@ mod tests {
         assert!(!parse_sort("arrival,date").unwrap().leads_with_sent_date());
         assert!(!parse_sort("arrival").unwrap().leads_with_sent_date());
         assert!(!parse_sort("subject").unwrap().leads_with_sent_date());
+    }
+
+    /// The small helpers the command layer leans on, none of which
+    /// had a test of its own.
+    ///
+    /// Each is one line and each decides something a user sees or a
+    /// file gets called, which is exactly the shape that goes
+    /// unasserted: a mutant replacing `yes_no`'s whole body with
+    /// `"xyzzy"` -- so `info` reports `xyzzy` for every capability --
+    /// survived the suite.
+    #[test]
+    fn the_one_line_helpers_answer_what_they_say_they_answer() {
+        // INBOX is the one name IMAP defines as case-insensitive, and
+        // `move`/`copy` use this to refuse filing a message into the
+        // folder it is already in. All four of its mutants lived.
+        assert!(same_folder("Archive", "Archive"));
+        assert!(same_folder("INBOX", "inbox"), "INBOX folds case");
+        assert!(!same_folder("Archive", "archive"), "and nothing else does");
+        assert!(!same_folder("INBOX", "Archive"));
+
+        assert_eq!(yes_no(true), "yes");
+        assert_eq!(yes_no(false), "no");
+
+        // RFC 6154, with or without the leading backslash the wire uses.
+        assert_eq!(special_use_name("\\Sent"), Some("\\Sent"));
+        assert_eq!(special_use_name("sent"), Some("\\Sent"));
+        assert_eq!(special_use_name("\\Junk"), Some("\\Junk"));
+        assert_eq!(special_use_name("\\Marked"), None, "not a special use");
+        assert_eq!(special_use_name("nonsense"), None);
+
+        // `--all` names the file when the part does not. The wrapper
+        // was untested: replacing it with `PathBuf::default()` -- an
+        // empty path -- survived, and every saved part would land on
+        // the same unwritable name.
+        assert_eq!(safe_part_filename_all(Some("report.pdf"), 2), PathBuf::from("report.pdf"));
+        assert_eq!(safe_part_filename_all(None, 2), PathBuf::from("part-2.bin"));
+        assert_eq!(safe_part_filename_all(Some("   "), 7), PathBuf::from("part-7.bin"));
+        // And the sanitisation still applies: a name that is a path is
+        // not a name.
+        assert_eq!(safe_part_filename_all(Some("../etc/passwd"), 3), PathBuf::from("part-3.bin"));
+        assert_eq!(safe_part_filename_all(Some("/etc/passwd"), 3), PathBuf::from("part-3.bin"));
+    }
+
+    /// Keywords that will not decode are compared as they stand.
+    ///
+    /// The same arm as `imap::same_keyword`'s, and the same gap: two
+    /// undecodable keywords that are the same string are still the same
+    /// keyword, and inverting the fallback would make `tag remove` miss
+    /// exactly the malformed keywords it exists to handle.
+    #[test]
+    fn keyword_comparison_falls_back_to_the_text_when_decoding_fails() {
+        assert!(same_keyword("&bogus", "&bogus"));
+        assert!(!same_keyword("&bogus", "&other"));
+        assert!(same_keyword("invoice", "INVOICE"), "ASCII case folds");
+        assert!(!same_keyword("invoice", "receipt"));
+    }
+
+    /// `\Recent` is refused by name, and says why.
+    ///
+    /// `parse_flag_names` refuses it because the server manages it --
+    /// a different refusal from "that is not an IMAP flag", and the
+    /// difference is the whole message. Forcing the guard either way
+    /// survived: with `false` the user is told `recent` is not a flag,
+    /// which is wrong and sends them looking for a spelling.
+    #[test]
+    fn recent_is_refused_as_the_servers_own_not_as_a_typo() {
+        let refuse = |name: &str| {
+            parse_flag_names(&[name.to_string()], true, false)
+                .expect_err(name)
+                .to_string()
+        };
+        // Spelled any way, since flag names fold case.
+        for spelling in ["recent", "Recent", "RECENT"] {
+            let text = refuse(spelling);
+            assert!(text.contains("managed by the server"), "{}: {}", spelling, text);
+            assert!(
+                !text.contains("is not an IMAP-defined flag"),
+                "{} got the wrong refusal, which sends the reader hunting for a \
+                 spelling that does not exist: {}",
+                spelling,
+                text
+            );
+        }
+        // An actual typo gets the other message, the one that lists
+        // what is available.
+        assert!(refuse("seeen").contains("is not an IMAP-defined flag"));
+        // And the five real ones still parse.
+        let ok = parse_flag_names(
+            &["seen", "answered", "flagged", "deleted", "draft"].map(String::from),
+            true,
+            false,
+        )
+        .expect("the five IMAP flags");
+        assert_eq!(ok.len(), 5);
     }
 
     #[test]
