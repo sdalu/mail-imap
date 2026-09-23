@@ -946,7 +946,7 @@ Each command prints one compact JSON object to stdout:
 | `info`                                                   | `{"tool", "config", "access", "folders", "defaults", "server"}` — see [`info`](#info) for the fields of each                                                                                                                |
 | `folder list`                                            | `{"count", "folders": [{"name", "delimiter", "no_inferiors", "attrs"}]}` (`delimiter` is `null` for a mailbox reported with none; `attrs` carries `\Marked` and the RFC 6154 special uses)                                  |
 | `folder create` / `rename` / `subscribe` / `unsubscribe` | `{"action", "folder"}`, plus `"to"` for a `rename` and `"use"` for a `create` that declared a special use                                                                                                                   |
-| `search`                                                 | one folder: `{"folder", "query", "count", "results": [...]}`; several folders: `{"folders": [...], "query", "count", "results": [...]}`. Each result includes `"folder"` (its mailbox), `"parts"` (number of MIME parts), `"date"` (when it arrived — the internaldate, and the one the text output prints) and `"sent"` (the message's own `Date:` header, `null` when it has none) |
+| `search`                                                 | one folder: `{"folder", "query", "count", "results": [...]}`; several folders: `{"folders": [...], "query", "count", "results": [...]}`. Each result includes `"folder"` (its mailbox), `"parts"` (number of MIME parts), `"date"` (when it arrived — the internaldate) and `"sent"` (the message's own `Date:` header, `null` when it has none). Both are always present, whichever one the text output shows |
 | `read`                                                   | one `{"folder", "uid", "content", "source"}` object per selected UID; `source` is `text`, `html`, `raw` or `none`, naming which part `content` came from                                                                    |
 | `count` / `status`                                       | `{"all", "counts": [{"name", "messages", "unseen", "recent", "uid_next", "uid_validity"}]}`                                                                                                                                 |
 | `uid`                                                    | one `{"folder", "count", "uids": [1, 2, ...]}` object per selected folder                                                                                                                                                   |
@@ -996,7 +996,11 @@ command.
   it was *sent*), `arrival` the mailbox's internaldate (when it *got
   here*), and a message written on Friday and delivered on Monday sorts
   in two places. A message whose `Date:` is missing or unreadable sorts
-  first under `date` rather than borrowing its arrival date.
+  first under `date` rather than borrowing its arrival date. Each
+  result line carries one of the two dates and labels which: `sent`
+  when the *first* criterion is `date`, `arrived` otherwise — so the
+  column you read the order against is the one the order was made from.
+  `-j` always carries both (`date` and `sent`).
 - **`-M, --max <N>`** — cap search results for this run, overriding
   `max` from the config. `0` means no cap, which is the default.
 - **`-j, --json`** — one compact single-line JSON object per result on

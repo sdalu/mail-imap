@@ -31,7 +31,7 @@ mod sort;
 pub use mock::MockClient;
 pub use mime::StrippedPart;
 pub use real::RealClient;
-pub use sort::{parse_sort, sort_results, SortCriteria, SortKey};
+pub use sort::{parse_sent_date, parse_sort, sort_results, SortCriteria, SortKey};
 
 use crate::config::{AccessLevel, Config};
 use anyhow::{bail, Context, Result};

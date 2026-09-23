@@ -34,15 +34,6 @@ not have.
 
 ## 7. Smaller, still real
 
-- **`search` prints one date, and `--sort date` now orders by the
-  other one.** The text line shows the internaldate, so a run sorted by
-  the sent date comes back with its date column out of order — right,
-  but unverifiable at a glance. `-j` carries both (`date` and `sent`),
-  which is the escape hatch, and the README says which is printed. The
-  fixes all have a cost: showing both makes every line longer, and
-  showing whichever the sort used makes the column mean different
-  things on different runs. Worth deciding the next time the output
-  format is opened, rather than on its own.
 - **The connect phase is still unbounded.** `timeout` covers a server
   that accepts and then goes quiet, and cannot cover the dial or the
   TLS handshake, which `ClientBuilder` owns — nor a stalled write,
@@ -60,8 +51,8 @@ Done and out of this list: the `SEARCH` charset declaration,
 `password-command` half of §2, and four of §7 — the session read
 timeout, SIGPIPE, shell completions, `parse_flag_names` no longer
 refusing an empty list, the NIL hierarchy delimiter `%` used to
-mis-default to `/`, and client-side `--sort date` no longer meaning
-`arrival`. What they
+mis-default to `/`, client-side `--sort date` no longer meaning
+`arrival`, and the date column that followed neither. What they
 left behind is recorded where it belongs rather than here: the untested
 charset fallback in DESIGN.md under *Declaring a charset on `SEARCH`*,
 why `fetch_part` is the trait's primitive under *MIME parsing*, where
@@ -74,7 +65,8 @@ place rather than in each backend under *Reading a message*, and why a
 NIL delimiter makes `%` behave like `*` for that mailbox — and why the
 config's `delimiter` is not the fallback — under *Telling selections
 from names*, and why an unreadable `Date:` header sorts first instead
-of borrowing the arrival date under *Sorting*.
+of borrowing the arrival date — and why the result line labels the one
+date it has room for — under *Sorting*.
 
 The numbers of what remains do not close up as entries leave: §1, §2
 and §7 keep the numbers they were given. Nothing cites another entry

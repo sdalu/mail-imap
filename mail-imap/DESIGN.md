@@ -134,6 +134,25 @@ internaldate. It no longer does: a substitution like that is the same
 confusion one level down, and it would have shown a sent date in the
 arrival column and ordered `--sort arrival` by it.
 
+**The result line shows one date and labels it.** There is room for
+one and the message has two, so `print_search_result` prints the sent
+date when the *primary* criterion is `date` and the internaldate
+otherwise, each behind its word (`sent` / `arrived`). The rule is the
+primary key alone (`SortCriteria::leads_with_sent_date`): `arrival,date`
+is an arrival list with ties broken, and sent dates would explain its
+order less well. The point is not the label but the pairing — a list
+ordered by the sent date and printed with arrival dates is correctly
+ordered and looks scrambled, which is what a reader reports as a bug.
+
+The sent date is normalised to the internaldate's format so the column
+lines up, and *keeps the message's own UTC offset*, which is what the
+message says about itself. Two adjacent lines can therefore still read
+out of order by wall clock while their instants ascend — the same
+offsets that make a string comparison wrong (see `sort.rs`). The
+ordering is on instants; the column is evidence, not the comparison. A
+`Date:` header that will not parse is printed exactly as it came,
+which is also the explanation for why that message sorted to the front.
+
 **A sent date that cannot be read sorts first, and borrows nothing.**
 Same rule as a missing internaldate. Falling back to the arrival date
 would place the message in an order neither quantity justifies, and

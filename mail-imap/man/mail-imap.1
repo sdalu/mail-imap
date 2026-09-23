@@ -148,6 +148,18 @@ A message with no readable
 header sorts first under
 .Ic date
 rather than borrowing its arrival date.
+Each result line shows one of the two dates and labels it
+.Po
+.Ic sent
+when the first criterion is
+.Ic date ,
+.Ic arrived
+otherwise
+.Pc ,
+so the column the order can be read against is the one it was made
+from;
+.Fl j
+always carries both.
 .It Fl h , Fl -help
 Print help and exit.
 .It Fl V , Fl -version

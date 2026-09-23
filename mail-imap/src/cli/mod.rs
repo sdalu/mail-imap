@@ -1011,6 +1011,11 @@ pub fn search_emails(
         return Ok(());
     }
 
+    // One date column, two dates on the message: it follows the sort,
+    // so the column a reader checks the order against is the one the
+    // order was made from.
+    let show_sent = sort.as_ref().is_some_and(|s| s.leads_with_sent_date());
+
     if folders.len() == 1 {
         println!(
             "Found {} email(s) in '{}' matching: {}",
@@ -1019,7 +1024,7 @@ pub fn search_emails(
             query
         );
         for r in &results {
-            print_search_result("  ", r);
+            print_search_result("  ", r, show_sent);
         }
     } else {
         println!(
@@ -1038,15 +1043,41 @@ pub fn search_emails(
             }
             println!("  {} ({}):", folder, hits.len());
             for r in hits {
-                print_search_result("    ", r);
+                print_search_result("    ", r, show_sent);
             }
         }
     }
     Ok(())
 }
 
-fn print_search_result(indent: &str, r: &SearchResult) {
-    let date = r.date.as_deref().unwrap_or("unknown date");
+/// The date cell of a result line: one of the message's two dates,
+/// always saying which.
+///
+/// `search` has room for one date and the message has two, so the
+/// label is not decoration — without it the column is ambiguous, and
+/// with the wrong one chosen it is worse: a list ordered by the sent
+/// date but printed with arrival dates is correctly ordered and looks
+/// scrambled, which is how this started.
+fn date_cell(r: &SearchResult, sent: bool) -> String {
+    if !sent {
+        return format!("arrived {}", r.date.as_deref().unwrap_or("unknown"));
+    }
+    match r.sent.as_deref() {
+        None => "sent unknown".to_string(),
+        // Normalised to the arrival date's format, so the two are
+        // comparable and the column lines up. A header that will not
+        // parse is printed as it came: it is what the message says,
+        // and it is also the explanation for why such a message sorted
+        // to the front.
+        Some(raw) => match crate::imap::parse_sent_date(raw) {
+            Some(d) => format!("sent {}", d.format("%Y-%m-%d %H:%M:%S %z")),
+            None => format!("sent {}", raw),
+        },
+    }
+}
+
+fn print_search_result(indent: &str, r: &SearchResult, sent: bool) {
+    let date = date_cell(r, sent);
     let size = r
         .size
         .map(|s| format!("  [{} bytes]", s))
@@ -2619,6 +2650,66 @@ mod tests {
         )
         .expect_err("part save takes exactly one message");
         assert!(err.to_string().contains("one part of one message"), "{}", err);
+    }
+
+    #[test]
+    fn the_date_column_says_which_date_it_is() {
+        let r = SearchResult {
+            uid: 1,
+            folder: "INBOX".into(),
+            subject: "Hi".into(),
+            from: "a@example.com".into(),
+            date: Some("2026-09-20 12:00:00 +0000".into()),
+            sent: Some("Fri, 18 Sep 2026 17:30:00 +0200".into()),
+            size: None,
+            flags: Vec::new(),
+            parts: 0,
+        };
+        assert_eq!(date_cell(&r, false), "arrived 2026-09-20 12:00:00 +0000");
+        // Normalised to the arrival date's format so the column lines
+        // up -- but keeping the message's own offset, which is what it
+        // says about itself.
+        assert_eq!(date_cell(&r, true), "sent 2026-09-18 17:30:00 +0200");
+    }
+
+    #[test]
+    fn a_date_column_with_nothing_to_show_says_so_rather_than_borrowing() {
+        // The arrival date is right there in both of these, and using
+        // it would be the same conflation the sort keys exist to end.
+        let mut r = SearchResult {
+            uid: 1,
+            folder: "INBOX".into(),
+            subject: "Hi".into(),
+            from: "a@example.com".into(),
+            date: Some("2026-09-20 12:00:00 +0000".into()),
+            sent: None,
+            size: None,
+            flags: Vec::new(),
+            parts: 0,
+        };
+        assert_eq!(date_cell(&r, true), "sent unknown");
+        // A header that will not parse is shown as it came: it is what
+        // the message says, and it explains why such a message sorted
+        // to the front of a date sort.
+        r.sent = Some("whenever I got round to it".into());
+        assert_eq!(date_cell(&r, true), "sent whenever I got round to it");
+        // And the same rule on the other side.
+        r.date = None;
+        assert_eq!(date_cell(&r, false), "arrived unknown");
+    }
+
+    #[test]
+    fn the_column_follows_the_primary_sort_key_only() {
+        use crate::imap::parse_sort;
+        assert!(parse_sort("date").unwrap().leads_with_sent_date());
+        assert!(parse_sort("-date").unwrap().leads_with_sent_date());
+        assert!(parse_sort("date,uid").unwrap().leads_with_sent_date());
+        // An arrival list with ties broken by the sent date is still an
+        // arrival list, and showing sent dates would explain its order
+        // less well rather than better.
+        assert!(!parse_sort("arrival,date").unwrap().leads_with_sent_date());
+        assert!(!parse_sort("arrival").unwrap().leads_with_sent_date());
+        assert!(!parse_sort("subject").unwrap().leads_with_sent_date());
     }
 
     #[test]

@@ -53,6 +53,17 @@ impl SortCriteria {
     pub fn server_sortable(&self) -> bool {
         self.keys.iter().all(|(k, _)| *k != SortKey::Uid)
     }
+
+    /// True when the *primary* criterion is the sent date, which is
+    /// what decides which of a result's two dates `search` prints.
+    ///
+    /// The primary one alone, because that is the ordering a reader
+    /// checks a list against; `arrival,date` is an arrival list with
+    /// ties broken, and showing sent dates for it would explain the
+    /// order less well, not better.
+    pub fn leads_with_sent_date(&self) -> bool {
+        matches!(self.keys.first(), Some((SortKey::Date, _)))
+    }
 }
 
 /// Parse a `--sort` spec, e.g. `"-date"` or `"subject,-size,uid"`.
@@ -133,10 +144,17 @@ fn instant(date: &Option<String>) -> Option<i64> {
 /// quantity justifies, and silently, which is worse than admitting the
 /// message has no sent date to sort by.
 fn sent_instant(sent: &Option<String>) -> Option<i64> {
-    let text = sent.as_deref()?;
-    chrono::DateTime::parse_from_rfc2822(text)
-        .ok()
-        .map(|d| d.timestamp())
+    parse_sent_date(sent.as_deref()?).map(|d| d.timestamp())
+}
+
+/// A message's `Date:` header as a date-time, or `None` when it cannot
+/// be read.
+///
+/// The ordering and the display both go through here, so a header this
+/// tool cannot sort by is also one it will not pretend to have
+/// normalised: `print_search_result` shows such a header verbatim.
+pub fn parse_sent_date(text: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc2822(text).ok()
 }
 
 fn compare(a: &SearchResult, b: &SearchResult, key: SortKey) -> std::cmp::Ordering {
