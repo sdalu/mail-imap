@@ -34,21 +34,6 @@ not have.
 
 ## 7. Smaller, still real
 
-- **The command layer's output is asserted by almost nothing.**
-  `cli/mod.rs`'s handlers print with `println!` straight to stdout, so
-  a test can call one and see only its `Result`. Mutation testing put
-  a number on it: of 368 mutants, 152 survive, and the survivors
-  cluster in the handlers -- `read_emails` alone has 11, and its whole
-  body can be replaced with `Ok(())` unnoticed. `scripts/check-examples.sh`
-  runs them but only fails on a clap usage error, and the wire tests
-  drive `ImapClient`, not `cli::`. The helpers those handlers call are
-  covered (`date_cell`, `show_item`, `print_search_result`'s inputs),
-  so what is unproven is the assembly: which fields are printed, in
-  what order, under which flag. Closing it means handing the handlers
-  somewhere to write -- a `&mut dyn Write` threaded through, or a
-  thin `Output` type -- which is a change to every handler signature
-  for a gain that is real but not urgent, since the shapes a caller
-  parses are the JSON ones and those *are* asserted.
 - **The connect phase is still unbounded.** `timeout` covers a server
   that accepts and then goes quiet, and cannot cover the dial or the
   TLS handshake, which `ClientBuilder` owns — nor a stalled write,
@@ -64,7 +49,8 @@ Done and out of this list: the `SEARCH` charset declaration,
 `folder list --subscribed`), §4 (`copy` and `expunge`), §5 (`append`),
 §6 (`part strip`), §1 (`read` showing the readable text), the
 `password-command` half of §2, and four of §7 — the session read
-timeout, SIGPIPE, shell completions, `parse_flag_names` no longer
+timeout, SIGPIPE, shell completions, the command layer's output now
+being written to something a test can read, `parse_flag_names` no longer
 refusing an empty list, the NIL hierarchy delimiter `%` used to
 mis-default to `/`, client-side `--sort date` no longer meaning
 `arrival`, and the date column that followed neither. What they

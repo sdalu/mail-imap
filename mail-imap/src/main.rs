@@ -1,4 +1,5 @@
 use clap::{CommandFactory, Parser};
+use std::io::{self, Write};
 use std::process;
 
 mod cli;
@@ -599,7 +600,9 @@ fn main() {
         action: TagAction::Known,
     } = &args.command
     {
-        if let Err(e) = cli::tags_known(args.json) {
+        let mut stdout = io::stdout().lock();
+        let out = &mut stdout;
+        if let Err(e) = cli::tags_known(out, args.json) {
             fail(args.json, &format!("{:#}", e));
         }
         return;
@@ -665,30 +668,37 @@ fn main() {
     }
     let debug = args.debug;
 
+    // One locked handle for the whole run. Locking once rather than per
+    // line is what keeps a long listing from interleaving, and it is the
+    // only place the real stdout is named: every handler writes to what
+    // it is handed, which is what makes their output testable.
+    let mut stdout = io::stdout().lock();
+    let out: &mut dyn Write = &mut stdout;
+
     let result = match &args.command {
         Command::Folder { action } => match action {
             FolderAction::List { long, subscribed } => {
-                cli::list_folders(&config, json, debug, *long, *subscribed)
+                cli::list_folders(out, &config, json, debug, *long, *subscribed)
             }
             FolderAction::Create {
                 name,
                 use_attr,
                 wire,
-            } => cli::folder_create(&config, name, use_attr.as_deref(), *wire, json, debug),
+            } => cli::folder_create(out, &config, name, use_attr.as_deref(), *wire, json, debug),
             FolderAction::Rename { from, to } => {
-                cli::folder_rename(&config, from, to, json, debug)
+                cli::folder_rename(out, &config, from, to, json, debug)
             }
             FolderAction::Subscribe { name } => {
-                cli::folder_subscribe(&config, name, true, json, debug)
+                cli::folder_subscribe(out, &config, name, true, json, debug)
             }
             FolderAction::Unsubscribe { name } => {
-                cli::folder_subscribe(&config, name, false, json, debug)
+                cli::folder_subscribe(out, &config, name, false, json, debug)
             }
             FolderAction::Delete { name, force } => {
-                cli::folder_delete(&config, name, *force, json, debug)
+                cli::folder_delete(out, &config, name, *force, json, debug)
             }
         },
-        Command::Info => cli::info(
+        Command::Info => cli::info(out, 
             &config,
             config_file.as_deref(),
             profile.as_deref(),
@@ -697,11 +707,11 @@ fn main() {
             debug,
         ),
         Command::Search { query } => {
-            cli::search_emails(&config, query, &folder_spec(&args), json, debug)
+            cli::search_emails(out, &config, query, &folder_spec(&args), json, debug)
         }
         Command::Read { raw, sel } => {
             let selections = sel.resolve(json);
-            cli::read_emails(
+            cli::read_emails(out, 
                 &config,
                 &folder_spec(&args),
                 &selections,
@@ -710,11 +720,11 @@ fn main() {
                 debug,
             )
         }
-        Command::Count => cli::mailbox_counts(&config, &folder_spec(&args), json, debug),
-        Command::Uid => cli::folder_uids(&config, &folder_spec(&args), json, debug),
+        Command::Count => cli::mailbox_counts(out, &config, &folder_spec(&args), json, debug),
+        Command::Uid => cli::folder_uids(out, &config, &folder_spec(&args), json, debug),
         Command::Thread { sel } => {
             let selections = sel.resolve(json);
-            cli::thread_uids(
+            cli::thread_uids(out, 
                 &config,
                 &folder_spec(&args),
                 &selections,
@@ -722,7 +732,7 @@ fn main() {
                 debug,
             )
         }
-        Command::Unread => cli::unread(&config, &folder_spec(&args), json, debug),
+        Command::Unread => cli::unread(out, &config, &folder_spec(&args), json, debug),
         Command::Move { sel } => {
             // The last argument is the folder, as `mv` has it. A
             // forgotten one needs no guard: `move 1-5` leaves nothing
@@ -739,7 +749,7 @@ fn main() {
                 selection: rest.to_vec(),
             }
             .resolve(json);
-            cli::move_messages(
+            cli::move_messages(out, 
                 &config,
                 &folder_spec(&args),
                 &selections,
@@ -761,7 +771,7 @@ fn main() {
                 selection: rest.to_vec(),
             }
             .resolve(json);
-            cli::copy_messages(
+            cli::copy_messages(out, 
                 &config,
                 &folder_spec(&args),
                 &selections,
@@ -772,7 +782,7 @@ fn main() {
         }
         Command::Expunge { sel } => {
             let selections = sel.resolve(json);
-            cli::expunge_messages(
+            cli::expunge_messages(out, 
                 &config,
                 &folder_spec(&args),
                 &selections,
@@ -781,12 +791,12 @@ fn main() {
             )
         }
         Command::Append { folder, file, flag, date } => {
-            cli::append_message(&config, folder, file, flag, date.as_deref(), json, debug)
+            cli::append_message(out, &config, folder, file, flag, date.as_deref(), json, debug)
         }
         Command::Part { action } => match action {
             PartsAction::List { sel } => {
                 let selections = sel.resolve(json);
-                cli::parts_list(
+                cli::parts_list(out, 
                     &config,
                     &folder_spec(&args),
                     &selections,
@@ -799,7 +809,7 @@ fn main() {
                     Ok(s) => s,
                     Err(e) => fail(json, &format!("{:#}", e)),
                 };
-                cli::parts_strip(
+                cli::parts_strip(out, 
                     &config,
                     &folder_spec(&args),
                     &one[0],
@@ -812,19 +822,22 @@ fn main() {
                 selection,
                 part,
                 all,
-                out,
+                // The `--out` path, bound as `dest` so it is not
+                // confused with the writer every handler now takes.
+                out: dest,
             } => {
                 let one = match parse_selections(std::slice::from_ref(selection)) {
                     Ok(s) => s,
                     Err(e) => fail(json, &format!("{:#}", e)),
                 };
                 cli::parts_save(
+                    out,
                     &config,
                     &folder_spec(&args),
                     &one[0],
                     *part,
                     *all,
-                    out.clone(),
+                    dest.clone(),
                     json,
                     debug,
                 )
@@ -833,7 +846,7 @@ fn main() {
         Command::Flag { action } => match action {
             FlagAction::List { sel, wire } => {
                 let selections = sel.resolve(json);
-                cli::flag_list(
+                cli::flag_list(out, 
                     &config,
                     &folder_spec(&args),
                     &selections,
@@ -845,7 +858,7 @@ fn main() {
             }
             FlagAction::Add { args: argv, wire } => {
                 let (selections, names) = split_args(argv, json);
-                cli::change_flags(
+                cli::change_flags(out, 
                     &config,
                     &folder_spec(&args),
                     &selections,
@@ -859,7 +872,7 @@ fn main() {
             }
             FlagAction::Remove { args: argv, wire } => {
                 let (selections, names) = split_args(argv, json);
-                cli::change_flags(
+                cli::change_flags(out, 
                     &config,
                     &folder_spec(&args),
                     &selections,
@@ -873,18 +886,18 @@ fn main() {
             }
         },
         Command::Tag { action } => match action {
-            TagAction::Known => cli::tags_known(json),
+            TagAction::Known => cli::tags_known(out, json),
             TagAction::Junk { sel } => {
                 let selections = sel.resolve(json);
-                cli::set_junk(&config, &folder_spec(&args), &selections, true, json, debug)
+                cli::set_junk(out, &config, &folder_spec(&args), &selections, true, json, debug)
             }
             TagAction::NotJunk { sel } => {
                 let selections = sel.resolve(json);
-                cli::set_junk(&config, &folder_spec(&args), &selections, false, json, debug)
+                cli::set_junk(out, &config, &folder_spec(&args), &selections, false, json, debug)
             }
             TagAction::List { sel, wire } => {
                 let selections = sel.resolve(json);
-                cli::flag_list(
+                cli::flag_list(out, 
                     &config,
                     &folder_spec(&args),
                     &selections,
@@ -896,7 +909,7 @@ fn main() {
             }
             TagAction::Add { args: argv, wire } => {
                 let (selections, names) = split_args(argv, json);
-                cli::change_flags(
+                cli::change_flags(out, 
                     &config,
                     &folder_spec(&args),
                     &selections,
@@ -910,7 +923,7 @@ fn main() {
             }
             TagAction::Remove { args: argv, wire } => {
                 let (selections, names) = split_args(argv, json);
-                cli::change_flags(
+                cli::change_flags(out, 
                     &config,
                     &folder_spec(&args),
                     &selections,

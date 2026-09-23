@@ -57,7 +57,7 @@ pub enum AccessLevel {
     /// — though it can be cleared, which rescues a message rather than
     /// losing one.
     #[default]
-    #[serde(rename = "organize", alias = "non-destructive")]
+    #[serde(rename = "organize")]
     Organize,
     /// Everything `organize` does, plus the folder tree: create a
     /// mailbox, rename one (never INBOX), subscribe and unsubscribe.
@@ -146,7 +146,7 @@ impl AccessLevel {
     pub fn parse(name: &str) -> Result<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "readonly" | "read-only" => Ok(AccessLevel::ReadOnly),
-            "organize" | "non-destructive" => Ok(AccessLevel::Organize),
+            "organize" => Ok(AccessLevel::Organize),
             "restructure" => Ok(AccessLevel::Restructure),
             "full" => Ok(AccessLevel::Full),
             other => bail!(
@@ -770,10 +770,12 @@ mod tests {
         assert_eq!(AccessLevel::parse("readonly").unwrap(), AccessLevel::ReadOnly);
         assert_eq!(AccessLevel::parse("read-only").unwrap(), AccessLevel::ReadOnly);
         assert_eq!(AccessLevel::parse("ORGANIZE").unwrap(), AccessLevel::Organize);
-        assert_eq!(
-            AccessLevel::parse("non-destructive").unwrap(),
-            AccessLevel::Organize
-        );
+        // `non-destructive` was an older spelling of `organize` and is
+        // gone: one level, one name. It is refused like any other
+        // unknown value rather than silently meaning something.
+        let err = AccessLevel::parse("non-destructive").expect_err("dropped spelling");
+        assert!(err.to_string().contains("unknown access level"), "{}", err);
+        assert!(err.to_string().contains("organize"), "and lists what to write: {}", err);
         assert_eq!(
             AccessLevel::parse("restructure").unwrap(),
             AccessLevel::Restructure
@@ -841,12 +843,15 @@ mod tests {
 
     #[test]
     fn ucl_underscore_alias_and_older_level_spellings_still_read() {
+        // `access_level` for `access-level`, and `read-only` for
+        // `readonly`: the spellings that remain. (`non-destructive`
+        // was dropped -- one level, one name.)
         let cfg = parse_one(
             "server = \"s\"\nusername = \"u\"\npassword = \"p\"\n\
-             access_level = non-destructive\n",
+             access_level = read-only\n",
         )
         .expect("parse");
-        assert_eq!(cfg.access, AccessLevel::Organize);
+        assert_eq!(cfg.access, AccessLevel::ReadOnly);
     }
 
     #[test]

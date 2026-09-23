@@ -11,6 +11,7 @@ use serde::Serialize;
 use select::Selection;
 use unicode_normalization::UnicodeNormalization;
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// The folders a command works on, as given on the command line:
@@ -150,8 +151,8 @@ fn flatten(groups: &[Group]) -> Vec<(&str, u32)> {
 }
 
 /// Print `value` as compact single-line JSON to stdout.
-fn emit_json(value: &impl Serialize) -> Result<()> {
-    println!("{}", serde_json::to_string(value)?);
+fn emit_json(out: &mut dyn Write, value: &impl Serialize) -> Result<()> {
+    writeln!(out, "{}", serde_json::to_string(value)?)?;
     Ok(())
 }
 
@@ -359,7 +360,7 @@ fn bare_system_flag(name: &str) -> Option<String> {
 
 /// Print the keywords the tool knows about. Needs no server: both
 /// tables live in the binary (`src/cli/keywords.rs`).
-pub fn tags_known(json: bool) -> Result<()> {
+pub fn tags_known(out: &mut dyn Write, json: bool) -> Result<()> {
     let registered: Vec<KnownKeyword> = keywords::registered()
         .iter()
         .map(|(k, m)| KnownKeyword {
@@ -375,26 +376,25 @@ pub fn tags_known(json: bool) -> Result<()> {
         })
         .collect();
     if json {
-        return emit_json(&KnownOutput {
+        return emit_json(out, &KnownOutput {
             count: registered.len() + well_known.len(),
             registered: &registered,
             well_known: &well_known,
         });
     }
-    println!("IANA-registered keywords ({}):", registered.len());
+    writeln!(out, "IANA-registered keywords ({}):", registered.len())?;
     for k in &registered {
-        println!("  {:<17} {}", k.keyword, k.means.unwrap_or(""));
+        writeln!(out, "  {:<17} {}", k.keyword, k.means.unwrap_or(""))?;
     }
-    println!();
-    println!(
-        "Well known, but registered nowhere ({}):",
+    writeln!(out)?;
+    writeln!(out, "Well known, but registered nowhere ({}):",
         well_known.len()
-    );
+    )?;
     for k in &well_known {
-        println!("  {:<17} {}", k.keyword, k.means.unwrap_or(""));
+        writeln!(out, "  {:<17} {}", k.keyword, k.means.unwrap_or(""))?;
     }
-    println!();
-    println!("Any other atom is a valid keyword too; these are the ones with an agreed meaning.");
+    writeln!(out)?;
+    writeln!(out, "Any other atom is a valid keyword too; these are the ones with an agreed meaning.")?;
     Ok(())
 }
 
@@ -406,7 +406,7 @@ pub fn tags_known(json: bool) -> Result<()> {
 /// back into `-f`, and a name buried in parentheses is harder to read
 /// off and harder to copy. JSON ignores `long` and always carries
 /// every field: it is read by a caller, which cannot ask again.
-pub fn list_folders(
+pub fn list_folders(out: &mut dyn Write,
     config: &Config,
     json: bool,
     debug: bool,
@@ -430,7 +430,7 @@ pub fn list_folders(
     }
 
     if json {
-        emit_json(&FoldersOutput {
+        emit_json(out, &FoldersOutput {
             count: folders.len(),
             folders: &folders,
         })?;
@@ -438,13 +438,13 @@ pub fn list_folders(
     }
 
     if folders.is_empty() {
-        println!("{}", if subscribed { "No subscribed folders found." } else { "No folders found." });
+        writeln!(out, "{}", if subscribed { "No subscribed folders found." } else { "No folders found." })?;
         return Ok(());
     }
 
-    println!("{} ({}):", if subscribed { "Subscribed folders" } else { "Folders" }, folders.len());
+    writeln!(out, "{} ({}):", if subscribed { "Subscribed folders" } else { "Folders" }, folders.len())?;
     for f in folders {
-        println!("{}", folder_line(&f, long));
+        writeln!(out, "{}", folder_line(&f, long))?;
     }
     Ok(())
 }
@@ -597,6 +597,7 @@ struct ServerInfo {
 /// access level in force, the hierarchy delimiter, and which wire path
 /// each operation takes on this server.
 pub fn info(
+    out: &mut dyn Write,
     config: &Config,
     config_path: Option<&str>,
     profile: Option<&str>,
@@ -605,11 +606,11 @@ pub fn info(
     debug: bool,
 ) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
-    let out = build_info(&mut client, config, config_path, profile, configured)?;
+    let report = build_info(&mut client, config, config_path, profile, configured)?;
     if json {
-        return emit_json(&out);
+        return emit_json(out, &report);
     }
-    print_info(&out);
+    print_info(out, &report)?;
     Ok(())
 }
 
@@ -757,19 +758,17 @@ fn yes_no(b: bool) -> &'static str {
     }
 }
 
-fn print_info(i: &InfoOutput) {
-    println!("{} {} ({} backend)", i.tool.name, i.tool.version, i.tool.backend);
-    println!(
-        "  config      {}",
+fn print_info(out: &mut dyn Write, i: &InfoOutput) -> Result<()> {
+    writeln!(out, "{} {} ({} backend)", i.tool.name, i.tool.version, i.tool.backend)?;
+    writeln!(out, "  config      {}",
         i.config.path.unwrap_or("(none read: built-in defaults)")
-    );
+    )?;
     // Only when there is one: a line saying "profile (none)" on every
     // single-account config is noise on the common case.
     if let Some(p) = i.config.profile {
-        println!("  profile     {}", p);
+        writeln!(out, "  profile     {}", p)?;
     }
-    println!(
-        "  account     {}@{}:{} ({}{})",
+    writeln!(out, "  account     {}@{}:{} ({}{})",
         i.config.username,
         i.config.server,
         i.config.port,
@@ -783,32 +782,31 @@ fn print_info(i: &InfoOutput) {
         } else {
             ""
         }
-    );
-    println!("  auth        {}", i.config.auth);
+    )?;
+    writeln!(out, "  auth        {}", i.config.auth)?;
 
-    println!();
-    println!("Access level: {}", i.access.effective);
+    writeln!(out)?;
+    writeln!(out, "Access level: {}", i.access.effective)?;
     if i.access.effective != i.access.configured {
-        println!("  (narrowed for this run; the config allows {})", i.access.configured);
+        writeln!(out, "  (narrowed for this run; the config allows {})", i.access.configured)?;
     }
     // Width, not hand-counted spaces: the labels change, the column
     // should not have to be re-counted when they do.
     const MAY: usize = 35;
-    println!("  {:<MAY$} {}", "set and clear flags and tags", yes_no(i.access.may.store_flags));
-    println!("  {:<MAY$} {}", "move mail to another folder", yes_no(i.access.may.move_messages));
-    println!("  {:<MAY$} {}", "copy mail into another folder", yes_no(i.access.may.copy_messages));
-    println!("  {:<MAY$} {}", "create / rename / subscribe", yes_no(i.access.may.change_folders));
-    println!("  {:<MAY$} {}", "delete a folder", yes_no(i.access.may.delete_folders));
-    println!("  {:<MAY$} {}", "strip a part from a message", yes_no(i.access.may.strip_part));
-    println!("  {:<MAY$} {}", "set \\Deleted", yes_no(i.access.may.set_deleted));
-    println!("  {:<MAY$} {}", "expunge a \\Deleted message", yes_no(i.access.may.expunge));
-    println!("  {:<MAY$} {}", "append a message into a mailbox", yes_no(i.access.may.append));
+    writeln!(out, "  {:<MAY$} {}", "set and clear flags and tags", yes_no(i.access.may.store_flags))?;
+    writeln!(out, "  {:<MAY$} {}", "move mail to another folder", yes_no(i.access.may.move_messages))?;
+    writeln!(out, "  {:<MAY$} {}", "copy mail into another folder", yes_no(i.access.may.copy_messages))?;
+    writeln!(out, "  {:<MAY$} {}", "create / rename / subscribe", yes_no(i.access.may.change_folders))?;
+    writeln!(out, "  {:<MAY$} {}", "delete a folder", yes_no(i.access.may.delete_folders))?;
+    writeln!(out, "  {:<MAY$} {}", "strip a part from a message", yes_no(i.access.may.strip_part))?;
+    writeln!(out, "  {:<MAY$} {}", "set \\Deleted", yes_no(i.access.may.set_deleted))?;
+    writeln!(out, "  {:<MAY$} {}", "expunge a \\Deleted message", yes_no(i.access.may.expunge))?;
+    writeln!(out, "  {:<MAY$} {}", "append a message into a mailbox", yes_no(i.access.may.append))?;
 
-    println!();
-    println!("Folders");
+    writeln!(out)?;
+    writeln!(out, "Folders")?;
     match &i.folders.delimiter {
-        Some(d) => println!(
-            "  delimiter   '{}' (from the {}){}{}",
+        Some(d) => writeln!(out, "  delimiter   '{}' (from the {}){}{}",
             d,
             i.folders.delimiter_source,
             match &i.folders.server_delimiter {
@@ -830,68 +828,64 @@ fn print_info(i: &InfoOutput) {
             } else {
                 String::new()
             }
-        ),
-        None => println!("  delimiter   none reported: this account has no hierarchy"),
+        )?,
+        None => writeln!(out, "  delimiter   none reported: this account has no hierarchy")?,
     }
-    println!(
-        "  default     {}{}",
+    writeln!(out, "  default     {}{}",
         i.folders.default,
         if i.folders.default_exists {
             ""
         } else {
             "  -- NOT in the mailbox list"
         }
-    );
-    println!("  mailboxes   {}", i.folders.count);
+    )?;
+    writeln!(out, "  mailboxes   {}", i.folders.count)?;
     for (attr, name) in &i.folders.special_use {
-        println!("  {:<11} {}", attr, name);
+        writeln!(out, "  {:<11} {}", attr, name)?;
     }
 
-    println!();
-    println!("Search defaults");
-    println!(
-        "  max         {}",
+    writeln!(out)?;
+    writeln!(out, "Search defaults")?;
+    writeln!(out, "  max         {}",
         if i.defaults.max == 0 {
             "unlimited".to_string()
         } else {
             i.defaults.max.to_string()
         }
-    );
-    println!(
-        "  sort        {}",
+    )?;
+    writeln!(out, "  sort        {}",
         i.defaults.sort.unwrap_or("(none: most recent first)")
-    );
+    )?;
 
-    println!();
-    println!("This server");
-    println!("  {:<19} {}", "moving mail", i.server.filing);
-    println!("  {:<19} {}", "expunging", i.server.expunging);
-    println!("  {:<19} {}-side", "sorting (-S)", i.server.sorting);
-    println!("  {:<19} {}-side", "threading", i.server.threading);
-    println!(
-        "  {:<19} {}",
+    writeln!(out)?;
+    writeln!(out, "This server")?;
+    writeln!(out, "  {:<19} {}", "moving mail", i.server.filing)?;
+    writeln!(out, "  {:<19} {}", "expunging", i.server.expunging)?;
+    writeln!(out, "  {:<19} {}-side", "sorting (-S)", i.server.sorting)?;
+    writeln!(out, "  {:<19} {}-side", "threading", i.server.threading)?;
+    writeln!(out, "  {:<19} {}",
         "folder create --use",
         if i.server.create_special_use {
             "available"
         } else {
             "refused (no CREATE-SPECIAL-USE)"
         }
-    );
-    println!(
-        "  {:<19} {}",
+    )?;
+    writeln!(out, "  {:<19} {}",
         "advertises",
         if i.server.capabilities.is_empty() {
             "(nothing)".to_string()
         } else {
             i.server.capabilities.join(" ")
         }
-    );
+    )?;
+    Ok(())
 }
 
 /// `folder create|rename|subscribe|unsubscribe|delete`. Every one of
 /// these is gated in `ImapClient` -- `restructure` for the first four,
 /// `full` for `delete` -- the handler only reports what happened.
-pub fn folder_create(
+pub fn folder_create(out: &mut dyn Write,
     config: &Config,
     name: &str,
     use_attr: Option<&str>,
@@ -906,7 +900,7 @@ pub fn folder_create(
     let mut client = ImapClient::connect(config, debug)?;
     client.create_folder(name, use_attr)?;
     if json {
-        return emit_json(&FolderChangeOutput {
+        return emit_json(out, &FolderChangeOutput {
             action: "create",
             folder: name,
             to: None,
@@ -914,28 +908,28 @@ pub fn folder_create(
         });
     }
     match use_attr {
-        Some(attr) => println!("Created '{}' with special use {}", name, attr),
-        None => println!("Created '{}'", name),
+        Some(attr) => writeln!(out, "Created '{}' with special use {}", name, attr)?,
+        None => writeln!(out, "Created '{}'", name)?,
     }
     Ok(())
 }
 
-pub fn folder_rename(config: &Config, from: &str, to: &str, json: bool, debug: bool) -> Result<()> {
+pub fn folder_rename(out: &mut dyn Write, config: &Config, from: &str, to: &str, json: bool, debug: bool) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
     client.rename_folder(from, to)?;
     if json {
-        return emit_json(&FolderChangeOutput {
+        return emit_json(out, &FolderChangeOutput {
             action: "rename",
             folder: from,
             to: Some(to),
             use_attr: None,
         });
     }
-    println!("Renamed '{}' to '{}'", from, to);
+    writeln!(out, "Renamed '{}' to '{}'", from, to)?;
     Ok(())
 }
 
-pub fn folder_subscribe(
+pub fn folder_subscribe(out: &mut dyn Write,
     config: &Config,
     name: &str,
     subscribed: bool,
@@ -945,37 +939,36 @@ pub fn folder_subscribe(
     let mut client = ImapClient::connect(config, debug)?;
     client.set_subscribed(name, subscribed)?;
     if json {
-        return emit_json(&FolderChangeOutput {
+        return emit_json(out, &FolderChangeOutput {
             action: if subscribed { "subscribe" } else { "unsubscribe" },
             folder: name,
             to: None,
             use_attr: None,
         });
     }
-    println!(
-        "{} '{}'",
+    writeln!(out, "{} '{}'",
         if subscribed { "Subscribed to" } else { "Unsubscribed from" },
         name
-    );
+    )?;
     Ok(())
 }
 
-pub fn folder_delete(config: &Config, name: &str, force: bool, json: bool, debug: bool) -> Result<()> {
+pub fn folder_delete(out: &mut dyn Write, config: &Config, name: &str, force: bool, json: bool, debug: bool) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
     client.delete_folder(name, force)?;
     if json {
-        return emit_json(&FolderChangeOutput {
+        return emit_json(out, &FolderChangeOutput {
             action: "delete",
             folder: name,
             to: None,
             use_attr: None,
         });
     }
-    println!("Deleted '{}'", name);
+    writeln!(out, "Deleted '{}'", name)?;
     Ok(())
 }
 
-pub fn search_emails(
+pub fn search_emails(out: &mut dyn Write,
     config: &Config,
     query: &str,
     spec: &FolderSpec,
@@ -999,7 +992,7 @@ pub fn search_emails(
     }
 
     if json {
-        emit_json(&SearchOutput {
+        emit_json(out, &SearchOutput {
             folder: folders.first().filter(|_| folders.len() == 1).map(|s| s.as_str()),
             folders: if folders.len() == 1 { None } else { Some(&folders) },
             query,
@@ -1010,7 +1003,7 @@ pub fn search_emails(
     }
 
     if results.is_empty() {
-        println!("No emails matched query: {}", query);
+        writeln!(out, "No emails matched query: {}", query)?;
         return Ok(());
     }
 
@@ -1020,22 +1013,20 @@ pub fn search_emails(
     let show_sent = sort.as_ref().is_some_and(|s| s.leads_with_sent_date());
 
     if folders.len() == 1 {
-        println!(
-            "Found {} email(s) in '{}' matching: {}",
+        writeln!(out, "Found {} email(s) in '{}' matching: {}",
             results.len(),
             folders[0],
             query
-        );
+        )?;
         for r in &results {
-            print_search_result("  ", r, show_sent);
+            print_search_result(out, "  ", r, show_sent)?;
         }
     } else {
-        println!(
-            "Found {} email(s) in {} folder(s) matching: {}",
+        writeln!(out, "Found {} email(s) in {} folder(s) matching: {}",
             results.len(),
             folders.len(),
             query
-        );
+        )?;
         for folder in &folders {
             let hits: Vec<&SearchResult> = results
                 .iter()
@@ -1044,9 +1035,9 @@ pub fn search_emails(
             if hits.is_empty() {
                 continue;
             }
-            println!("  {} ({}):", folder, hits.len());
+            writeln!(out, "  {} ({}):", folder, hits.len())?;
             for r in hits {
-                print_search_result("    ", r, show_sent);
+                print_search_result(out, "    ", r, show_sent)?;
             }
         }
     }
@@ -1079,7 +1070,7 @@ fn date_cell(r: &SearchResult, sent: bool) -> String {
     }
 }
 
-fn print_search_result(indent: &str, r: &SearchResult, sent: bool) {
+fn print_search_result(out: &mut dyn Write, indent: &str, r: &SearchResult, sent: bool) -> Result<()> {
     let date = date_cell(r, sent);
     let size = r
         .size
@@ -1095,10 +1086,10 @@ fn print_search_result(indent: &str, r: &SearchResult, sent: bool) {
     } else {
         format!("  [{}]", r.flags.join(" "))
     };
-    println!(
-        "{}UID {} | {} | {} | {}{}{}{}",
+    writeln!(out, "{}UID {} | {} | {} | {}{}{}{}",
         indent, r.uid, date, r.subject, r.from, size, parts, flags
-    );
+    )?;
+    Ok(())
 }
 
 /// Connect, resolve the selections, and hand back the per-folder
@@ -1140,7 +1131,7 @@ fn selection_groups(
 /// `move <SELECTION...> <FOLDER>`: file messages into the mailbox
 /// named last. Gated in `ImapClient` on `organize`; the target folder
 /// has to exist already, since making one is `restructure`'s business.
-pub fn move_messages(
+pub fn move_messages(out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
@@ -1160,7 +1151,7 @@ pub fn move_messages(
     for group in &groups {
         client.move_messages(&group.folder, &group.uids, to)?;
         if json {
-            emit_json(&MoveOutput {
+            emit_json(out, &MoveOutput {
                 folder: &group.folder,
                 to,
                 count: group.uids.len(),
@@ -1168,8 +1159,7 @@ pub fn move_messages(
             })?;
             continue;
         }
-        println!(
-            "Filed {} message(s) from '{}' into '{}': UIDs {}",
+        writeln!(out, "Filed {} message(s) from '{}' into '{}': UIDs {}",
             group.uids.len(),
             group.folder,
             to,
@@ -1179,7 +1169,7 @@ pub fn move_messages(
                 .map(|u| u.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        )?;
     }
     Ok(())
 }
@@ -1190,7 +1180,7 @@ pub fn move_messages(
 /// message keeps existing either way, one more copy of it appears. The
 /// target folder has to exist already, for the same reason `move`'s
 /// does.
-pub fn copy_messages(
+pub fn copy_messages(out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
@@ -1206,7 +1196,7 @@ pub fn copy_messages(
     for group in &groups {
         client.copy_messages(&group.folder, &group.uids, to)?;
         if json {
-            emit_json(&CopyOutput {
+            emit_json(out, &CopyOutput {
                 folder: &group.folder,
                 to,
                 count: group.uids.len(),
@@ -1214,8 +1204,7 @@ pub fn copy_messages(
             })?;
             continue;
         }
-        println!(
-            "Copied {} message(s) from '{}' into '{}': UIDs {}",
+        writeln!(out, "Copied {} message(s) from '{}' into '{}': UIDs {}",
             group.uids.len(),
             group.folder,
             to,
@@ -1225,7 +1214,7 @@ pub fn copy_messages(
                 .map(|u| u.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        )?;
     }
     Ok(())
 }
@@ -1242,7 +1231,7 @@ pub fn copy_messages(
 /// that is the unbounded action `move_messages` already refuses to
 /// take on a server without UIDPLUS. `search DELETED` gives the UIDs;
 /// this takes them.
-pub fn expunge_messages(
+pub fn expunge_messages(out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
@@ -1260,15 +1249,14 @@ pub fn expunge_messages(
     for group in &groups {
         let removed = client.expunge_messages(&group.folder, &group.uids)?;
         if json {
-            emit_json(&ExpungeOutput {
+            emit_json(out, &ExpungeOutput {
                 folder: &group.folder,
                 count: removed.len(),
                 uids: &removed,
             })?;
             continue;
         }
-        println!(
-            "Removed {} of {} selected message(s) in '{}' (only the ones marked \\Deleted): \
+        writeln!(out, "Removed {} of {} selected message(s) in '{}' (only the ones marked \\Deleted): \
              UIDs {}",
             removed.len(),
             group.uids.len(),
@@ -1278,7 +1266,7 @@ pub fn expunge_messages(
                 .map(|u| u.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        )?;
     }
     Ok(())
 }
@@ -1301,7 +1289,12 @@ pub fn expunge_messages(
 /// `folder` must already exist: `append` does not create it, and a
 /// server's `NO [TRYCREATE]` comes back naming `folder create` instead
 /// of the server's own wording.
-pub fn append_message(
+// Eight, because the writer makes it eight: the seven this command
+// already needed to do its job, plus somewhere to print. Grouping them
+// into a struct would move the arguments rather than remove them, and
+// this is the signature `main.rs` calls once.
+#[allow(clippy::too_many_arguments)]
+pub fn append_message(out: &mut dyn Write,
     config: &Config,
     folder: &str,
     file: &str,
@@ -1339,7 +1332,7 @@ pub fn append_message(
     let mut client = ImapClient::connect(config, debug)?;
     let uid = client.append_message(folder, &content, &flags, internal_date)?;
     if json {
-        return emit_json(&AppendOutput {
+        return emit_json(out, &AppendOutput {
             folder,
             bytes: content.len(),
             flags: &flags,
@@ -1347,17 +1340,16 @@ pub fn append_message(
         });
     }
     match uid {
-        Some(uid) => println!("Appended {} byte(s) to '{}': UID {}", content.len(), folder, uid),
-        None => println!(
-            "Appended {} byte(s) to '{}'; the server did not report a UID (no UIDPLUS)",
+        Some(uid) => writeln!(out, "Appended {} byte(s) to '{}': UID {}", content.len(), folder, uid)?,
+        None => writeln!(out, "Appended {} byte(s) to '{}'; the server did not report a UID (no UIDPLUS)",
             content.len(),
             folder
-        ),
+        )?,
     }
     Ok(())
 }
 
-pub fn read_emails(
+pub fn read_emails(out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
@@ -1376,7 +1368,7 @@ pub fn read_emails(
         let rendered = client.read_message(folder, *uid, raw)?;
         let content = rendered.to_text();
         if json {
-            emit_json(&ReadOutput {
+            emit_json(out, &ReadOutput {
                 folder,
                 uid: *uid,
                 content: &content,
@@ -1384,18 +1376,18 @@ pub fn read_emails(
             })?;
         } else {
             if messages.len() > 1 && i > 0 {
-                println!();
+                writeln!(out)?;
             }
             if messages.len() > 1 {
-                println!("--- {}::{} ---", folder, uid);
+                writeln!(out, "--- {}::{} ---", folder, uid)?;
             }
-            println!("{}", content);
+            writeln!(out, "{}", content)?;
         }
     }
     Ok(())
 }
 
-pub fn mailbox_counts(config: &Config, spec: &FolderSpec, json: bool, debug: bool) -> Result<()> {
+pub fn mailbox_counts(out: &mut dyn Write, config: &Config, spec: &FolderSpec, json: bool, debug: bool) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
     // `count` is the one command whose default is every mailbox rather
     // than the config folder.
@@ -1419,7 +1411,7 @@ pub fn mailbox_counts(config: &Config, spec: &FolderSpec, json: bool, debug: boo
     };
 
     if json {
-        emit_json(&CountOutput {
+        emit_json(out, &CountOutput {
             all: selected.is_none(),
             counts: &counts,
         })?;
@@ -1427,19 +1419,18 @@ pub fn mailbox_counts(config: &Config, spec: &FolderSpec, json: bool, debug: boo
     }
 
     match &selected {
-        Some(folders) => println!("Status for {}:", folders.join(", ")),
-        None => println!("Mailbox counts:"),
+        Some(folders) => writeln!(out, "Status for {}:", folders.join(", "))?,
+        None => writeln!(out, "Mailbox counts:")?,
     }
     for m in &counts {
-        println!(
-            "  {}: messages={} unseen={} recent={} uidnext={} uidvalidity={}",
+        writeln!(out, "  {}: messages={} unseen={} recent={} uidnext={} uidvalidity={}",
             m.name, m.messages, m.unseen, m.recent, m.uid_next, m.uid_validity
-        );
+        )?;
     }
     Ok(())
 }
 
-pub fn folder_uids(config: &Config, spec: &FolderSpec, json: bool, debug: bool) -> Result<()> {
+pub fn folder_uids(out: &mut dyn Write, config: &Config, spec: &FolderSpec, json: bool, debug: bool) -> Result<()> {
     let mut client = ImapClient::connect(config, debug)?;
     let folders = folders(&mut client, spec, config)?;
     if debug {
@@ -1449,7 +1440,7 @@ pub fn folder_uids(config: &Config, spec: &FolderSpec, json: bool, debug: bool) 
     for folder in &folders {
         let uids = client.folder_uids(folder)?;
         if json {
-            emit_json(&UidsOutput {
+            emit_json(out, &UidsOutput {
                 folder,
                 count: uids.len(),
                 uids: &uids,
@@ -1457,7 +1448,7 @@ pub fn folder_uids(config: &Config, spec: &FolderSpec, json: bool, debug: bool) 
             continue;
         }
         if uids.is_empty() {
-            println!("No messages in '{}'", folder);
+            writeln!(out, "No messages in '{}'", folder)?;
             continue;
         }
         let list = uids
@@ -1465,12 +1456,12 @@ pub fn folder_uids(config: &Config, spec: &FolderSpec, json: bool, debug: bool) 
             .map(|u| u.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        println!("UIDs in '{}' ({}): {}", folder, uids.len(), list);
+        writeln!(out, "UIDs in '{}' ({}): {}", folder, uids.len(), list)?;
     }
     Ok(())
 }
 
-pub fn thread_uids(
+pub fn thread_uids(out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
@@ -1486,7 +1477,7 @@ pub fn thread_uids(
         }
         let uids = client.thread_uids(folder, uid)?;
         if json {
-            emit_json(&ThreadOutput {
+            emit_json(out, &ThreadOutput {
                 folder,
                 uid,
                 count: uids.len(),
@@ -1494,25 +1485,29 @@ pub fn thread_uids(
             })?;
             continue;
         }
-        println!(
-            "Thread of UID {} in '{}' ({} message(s)):",
+        writeln!(out, "Thread of UID {} in '{}' ({} message(s)):",
             uid,
             folder,
             uids.len()
-        );
-        println!(
-            "  {}",
+        )?;
+        writeln!(out, "  {}",
             uids.iter()
                 .map(|u| u.to_string())
                 .collect::<Vec<_>>()
                 .join(" ")
-        );
+        )?;
     }
     Ok(())
 }
 
-pub fn unread(config: &Config, spec: &FolderSpec, json: bool, debug: bool) -> Result<()> {
-    search_emails(config, "UNSEEN", spec, json, debug)
+pub fn unread(
+    out: &mut dyn Write,
+    config: &Config,
+    spec: &FolderSpec,
+    json: bool,
+    debug: bool,
+) -> Result<()> {
+    search_emails(out, config, "UNSEEN", spec, json, debug)
 }
 
 /// The IMAP-defined flag a bare word names, if it names one. The five
@@ -1846,7 +1841,7 @@ fn check_uids_exist(client: &mut ImapClient, groups: &[Group], wire: &str) -> Re
 /// `system` distinguishes flag (true) from tag (false);
 /// `add` enables the flags, `remove` disables them.
 #[allow(clippy::too_many_arguments)]
-pub fn change_flags(
+pub fn change_flags(out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
@@ -1901,7 +1896,7 @@ pub fn change_flags(
         client.store_flags(&group.folder, &group.uids, added, removed)?;
 
         if json {
-            emit_json(&FlagChangeOutput {
+            emit_json(out, &FlagChangeOutput {
                 folder: &group.folder,
                 count: group.uids.len(),
                 uids: &group.uids,
@@ -1911,8 +1906,7 @@ pub fn change_flags(
             continue;
         }
         let verb = if add { "Added" } else { "Removed" };
-        println!(
-            "{} {} on {} message(s) in '{}': UIDs {}",
+        writeln!(out, "{} {} on {} message(s) in '{}': UIDs {}",
             verb,
             flags.join(", "),
             group.uids.len(),
@@ -1923,7 +1917,7 @@ pub fn change_flags(
                 .map(|u| u.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        )?;
     }
     Ok(())
 }
@@ -1940,7 +1934,7 @@ pub fn change_flags(
 /// nothing and leaving it there costs correctness. What is *written*
 /// is filtered by `PERMANENTFLAGS`: all the spellings on a server that
 /// takes new keywords, only the listed ones on a server that does not.
-pub fn set_junk(
+pub fn set_junk(out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
@@ -1993,7 +1987,7 @@ pub fn set_junk(
         }
         client.store_flags(&group.folder, &group.uids, add, &remove)?;
         if json {
-            emit_json(&FlagChangeOutput {
+            emit_json(out, &FlagChangeOutput {
                 folder: &group.folder,
                 count: group.uids.len(),
                 uids: &group.uids,
@@ -2002,19 +1996,23 @@ pub fn set_junk(
             })?;
             continue;
         }
-        println!(
-            "Marked {} message(s) in '{}' {}: set {}, cleared {}",
+        writeln!(out, "Marked {} message(s) in '{}' {}: set {}, cleared {}",
             group.uids.len(),
             group.folder,
             if junk { "junk" } else { "not junk" },
             add.join(", "),
             remove.join(", ")
-        );
+        )?;
     }
     Ok(())
 }
 
-pub fn flag_list(
+// Eight, because the writer makes it eight: the seven this command
+// already needed to do its job, plus somewhere to print. Grouping them
+// into a struct would move the arguments rather than remove them, and
+// this is the signature `main.rs` calls once.
+#[allow(clippy::too_many_arguments)]
+pub fn flag_list(out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
@@ -2046,7 +2044,7 @@ pub fn flag_list(
             keywords::JunkState::Unsaid => None,
         };
         if json {
-            emit_json(&FlagListOutput {
+            emit_json(out, &FlagListOutput {
                 folder,
                 uid,
                 count: flags.len(),
@@ -2056,35 +2054,32 @@ pub fn flag_list(
             continue;
         }
         if junk == Some("contradictory") {
-            println!(
-                "{}::{}: both a junk and a not-junk keyword are set; no rule says \
+            writeln!(out, "{}::{}: both a junk and a not-junk keyword are set; no rule says \
                  which wins. 'tag junk' or 'tag notjunk' settles it",
                 folder, uid
-            );
+            )?;
         }
         if flags.is_empty() {
-            println!(
-                "{}::{}: no {}",
+            writeln!(out, "{}::{}: no {}",
                 folder,
                 uid,
                 if tags_only { "tags" } else { "flags" }
-            );
+            )?;
             continue;
         }
         let shown = render_names(&flags, wire);
-        println!(
-            "{}::{}: {} {}: {}",
+        writeln!(out, "{}::{}: {} {}: {}",
             folder,
             uid,
             flags.len(),
             if tags_only { "tag(s)" } else { "flag(s)" },
             shown.join(", ")
-        );
+        )?;
     }
     Ok(())
 }
 
-pub fn parts_list(
+pub fn parts_list(out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
@@ -2100,7 +2095,7 @@ pub fn parts_list(
         }
         let parts = client.list_parts(folder, uid)?;
         if json {
-            emit_json(&PartsListOutput {
+            emit_json(out, &PartsListOutput {
                 folder,
                 uid,
                 count: parts.len(),
@@ -2109,16 +2104,16 @@ pub fn parts_list(
             continue;
         }
         if parts.is_empty() {
-            println!("{}::{}: no parts", folder, uid);
+            writeln!(out, "{}::{}: no parts", folder, uid)?;
             continue;
         }
-        println!("{}::{}: {} part(s):", folder, uid, parts.len());
+        writeln!(out, "{}::{}: {} part(s):", folder, uid, parts.len())?;
         for a in &parts {
             let name = match &a.filename {
                 Some(f) => format!(", filename={}", f),
                 None => String::new(),
             };
-            println!("  [{}] {}{} ({} bytes)", a.part, a.content_type, name, a.size);
+            writeln!(out, "  [{}] {}{} ({} bytes)", a.part, a.content_type, name, a.size)?;
         }
     }
     Ok(())
@@ -2185,7 +2180,7 @@ struct StripOutput<'a> {
     stripped: &'a [crate::imap::StrippedPart],
 }
 
-pub fn parts_strip(
+pub fn parts_strip(out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
     selection: &Selection,
@@ -2206,21 +2201,20 @@ pub fn parts_strip(
     }
     let (folder, uid) = messages[0];
     let folder = folder.to_string();
-    let out = client.strip_part(&folder, uid, parts)?;
+    let outcome = client.strip_part(&folder, uid, parts)?;
 
     if json {
-        emit_json(&StripOutput {
-            folder: &out.folder,
-            old_uid: out.old_uid,
-            new_uid: out.new_uid,
-            bytes_before: out.bytes_before,
-            bytes_after: out.bytes_after,
-            stripped: &out.stripped,
+        emit_json(out, &StripOutput {
+            folder: &outcome.folder,
+            old_uid: outcome.old_uid,
+            new_uid: outcome.new_uid,
+            bytes_before: outcome.bytes_before,
+            bytes_after: outcome.bytes_after,
+            stripped: &outcome.stripped,
         })?;
     } else {
-        for p in &out.stripped {
-            println!(
-                "Stripped part {} ({}{}), {} bytes",
+        for p in &outcome.stripped {
+            writeln!(out, "Stripped part {} ({}{}), {} bytes",
                 p.part,
                 p.content_type,
                 match &p.filename {
@@ -2228,39 +2222,37 @@ pub fn parts_strip(
                     None => String::new(),
                 },
                 p.size
-            );
-            println!("  sha256 {}", p.sha256);
+            )?;
+            writeln!(out, "  sha256 {}", p.sha256)?;
         }
-        match out.new_uid {
-            Some(n) => println!(
-                "UID {} became UID {} in '{}' ({} -> {} bytes)",
-                out.old_uid, n, out.folder, out.bytes_before, out.bytes_after
-            ),
+        match outcome.new_uid {
+            Some(n) => writeln!(out, "UID {} became UID {} in '{}' ({} -> {} bytes)",
+                outcome.old_uid, n, outcome.folder, outcome.bytes_before, outcome.bytes_after
+            )?,
             // Without UIDPLUS there is no APPENDUID, and this command
             // refuses without UIDPLUS -- so this branch is a server
             // that has the capability and did not report the UID.
-            None => println!(
-                "UID {} was rewritten in '{}' ({} -> {} bytes); the server reported no \
+            None => writeln!(out, "UID {} was rewritten in '{}' ({} -> {} bytes); the server reported no \
                  new UID",
-                out.old_uid, out.folder, out.bytes_before, out.bytes_after
-            ),
+                outcome.old_uid, outcome.folder, outcome.bytes_before, outcome.bytes_after
+            )?,
         }
     }
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn parts_save(
+pub fn parts_save(out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
     selection: &Selection,
     part: Option<u32>,
     all: bool,
-    out: Option<PathBuf>,
+    dest: Option<PathBuf>,
     json: bool,
     debug: bool,
 ) -> Result<()> {
-    let to_stdout = out.as_deref() == Some(Path::new("-"));
+    let to_stdout = dest.as_deref() == Some(Path::new("-"));
     if all && to_stdout {
         bail!(
             "'part save --all' can't write to stdout ('-o -'): several binaries \
@@ -2291,12 +2283,12 @@ pub fn parts_save(
     let folder = folder.to_string();
 
     if all {
-        return parts_save_all(&mut client, &folder, uid, out, json, debug);
+        return parts_save_all(out, &mut client, &folder, uid, dest, json, debug);
     }
 
     let part = part.expect("clap requires PART unless --all");
     if debug {
-        eprintln!("Saving part {} of UID {} to '{}'", part, uid, out.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "default filename".to_string()));
+        eprintln!("Saving part {} of UID {} to '{}'", part, uid, dest.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "default filename".to_string()));
     }
     let parts = client.list_parts(&folder, uid)?;
     let info = parts
@@ -2322,11 +2314,11 @@ pub fn parts_save(
         return Ok(());
     }
 
-    let dest = out.unwrap_or_else(|| safe_part_filename(info.filename.as_deref(), uid, part));
+    let dest = dest.unwrap_or_else(|| safe_part_filename(info.filename.as_deref(), uid, part));
 
     let size = client.save_part(&folder, uid, part, &dest)?;
     if json {
-        emit_json(&PartsSaveOutput {
+        emit_json(out, &PartsSaveOutput {
             folder: &folder,
             uid,
             part,
@@ -2334,13 +2326,12 @@ pub fn parts_save(
             size,
         })?;
     } else {
-        println!(
-            "Saved part {} of UID {} to '{}' ({} bytes)",
+        writeln!(out, "Saved part {} of UID {} to '{}' ({} bytes)",
             part,
             uid,
             dest.display(),
             size
-        );
+        )?;
     }
     Ok(())
 }
@@ -2350,15 +2341,15 @@ pub fn parts_save(
 /// overwrite a file already there -- with attachment names coming from
 /// the message rather than the caller, that is the one mistake this
 /// command could make that a "no" can't undo.
-fn parts_save_all(
+fn parts_save_all(out: &mut dyn Write,
     client: &mut ImapClient,
     folder: &str,
     uid: u32,
-    out: Option<PathBuf>,
+    dest: Option<PathBuf>,
     json: bool,
     debug: bool,
 ) -> Result<()> {
-    let dir = out.unwrap_or_else(|| PathBuf::from("."));
+    let dir = dest.unwrap_or_else(|| PathBuf::from("."));
     if !dir.is_dir() {
         bail!(
             "'part save --all -o {}' needs a directory that already exists; it will \
@@ -2383,7 +2374,7 @@ fn parts_save_all(
         }
         let size = client.save_part(folder, uid, p.part, &dest)?;
         if json {
-            emit_json(&PartsSaveOutput {
+            emit_json(out, &PartsSaveOutput {
                 folder,
                 uid,
                 part: p.part,
@@ -2391,13 +2382,12 @@ fn parts_save_all(
                 size,
             })?;
         } else {
-            println!(
-                "Saved part {} of UID {} to '{}' ({} bytes)",
+            writeln!(out, "Saved part {} of UID {} to '{}' ({} bytes)",
                 p.part,
                 uid,
                 dest.display(),
                 size
-            );
+            )?;
         }
     }
     Ok(())
@@ -2643,10 +2633,192 @@ mod tests {
         assert!(err.to_string().contains("matched no message"), "{}", err);
     }
 
+    /// Run a handler and give back what it printed.
+    ///
+    /// The point of threading a writer through every handler: until
+    /// now a test could call one and see only its `Result`, so the
+    /// whole body of `read_emails` could be replaced with `Ok(())`
+    /// and nothing failed. 152 of `cli/mod.rs`'s 368 mutants survived
+    /// for that reason.
+    fn printed(run: impl FnOnce(&mut dyn Write) -> Result<()>) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        run(&mut buf).expect("the handler should succeed against the mock");
+        String::from_utf8(buf).expect("output is UTF-8")
+    }
+
+    #[test]
+    fn search_prints_a_header_and_one_line_a_message() {
+        let text = printed(|out| {
+            search_emails(out, &mock_config(), "ALL", &FolderSpec::default(), false, false)
+        });
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("Found 5 email(s) in 'INBOX'"), "{}", lines[0]);
+        assert_eq!(lines.len(), 6, "a header and one line per message: {:?}", lines);
+        // The fields the README says a result line carries.
+        let third = lines.iter().find(|l| l.contains("UID 3")).expect("UID 3");
+        assert!(third.contains("Quarterly report"), "the subject: {}", third);
+        assert!(third.contains("carol@example.com"), "the from: {}", third);
+        assert!(third.contains("arrived 2026-09-20"), "the labelled date: {}", third);
+        assert!(third.contains("[120 bytes]"), "the size: {}", third);
+        assert!(third.contains("[2 part(s)]"), "the part count: {}", third);
+    }
+
+    #[test]
+    fn the_sort_asked_for_decides_both_the_order_and_the_date_column() {
+        let by_sent = printed(|out| {
+            let config = Config { sort: Some("date".into()), ..mock_config() };
+            search_emails(out, &config, "ALL", &FolderSpec::default(), false, false)
+        });
+        let uids: Vec<&str> = by_sent
+            .lines()
+            .skip(1)
+            .map(|l| l.split(" | ").next().unwrap_or("").trim())
+            .collect();
+        assert_eq!(uids, ["UID 3", "UID 1", "UID 5", "UID 2", "UID 4"], "sent order");
+        assert!(by_sent.contains("sent 2026-09-14"), "and the column follows: {}", by_sent);
+        assert!(!by_sent.contains("arrived"), "not both at once: {}", by_sent);
+    }
+
+    #[test]
+    fn json_output_is_one_object_on_one_line_and_nothing_else() {
+        let text = printed(|out| {
+            search_emails(out, &mock_config(), "ALL", &FolderSpec::default(), true, false)
+        });
+        assert_eq!(text.lines().count(), 1, "one object, one line: {}", text);
+        let value: serde_json::Value = serde_json::from_str(text.trim()).expect("valid JSON");
+        assert_eq!(value["count"], 5);
+        assert_eq!(value["folder"], "INBOX");
+        // Both dates travel in JSON whichever one the text shows.
+        assert!(value["results"][0]["date"].is_string());
+        assert!(value["results"][0]["sent"].is_string());
+    }
+
+    #[test]
+    fn reading_a_message_prints_the_message_and_not_its_mime() {
+        let text = printed(|out| {
+            read_emails(
+                out,
+                &mock_config(),
+                &FolderSpec::default(),
+                &[select::parse_selection("1").unwrap()],
+                false,
+                false,
+                false,
+            )
+        });
+        assert!(text.contains("Subject: Welcome aboard"), "{}", text);
+        assert!(text.contains("Hello, this is message 1."), "the body: {}", text);
+        assert!(!text.contains("Content-Type:"), "the MIME is not the message: {}", text);
+    }
+
+    #[test]
+    fn listing_folders_names_every_mailbox_and_long_adds_the_rest() {
+        let text = printed(|out| list_folders(out, &mock_config(), false, false, false, false));
+        assert!(text.starts_with("Folders (5):"), "{}", text);
+        for name in ["INBOX", "Sent Items", "Drafts", "Trash", "Spam"] {
+            assert!(text.contains(&format!("- {}", name)), "{} missing from {}", name, text);
+        }
+        let long = printed(|out| list_folders(out, &mock_config(), false, false, true, false));
+        assert!(long.contains("Spam"), "{}", long);
+        assert!(long.contains("Junk"), "--long carries the special use: {}", long);
+    }
+
+    #[test]
+    fn reading_several_messages_banners_each_and_separates_them() {
+        // One message prints bare; several get a `--- folder::uid ---`
+        // banner and a blank line between them, and the guards that
+        // decide this survived every mutation until a test read more
+        // than one message.
+        let one = printed(|out| {
+            read_emails(
+                out,
+                &mock_config(),
+                &FolderSpec::default(),
+                &[select::parse_selection("1").unwrap()],
+                false,
+                false,
+                false,
+            )
+        });
+        assert!(!one.contains("---"), "a single message needs no banner: {}", one);
+
+        let two = printed(|out| {
+            read_emails(
+                out,
+                &mock_config(),
+                &FolderSpec::default(),
+                &[select::parse_selection("1,2").unwrap()],
+                false,
+                false,
+                false,
+            )
+        });
+        assert!(two.contains("--- INBOX::1 ---"), "{}", two);
+        assert!(two.contains("--- INBOX::2 ---"), "{}", two);
+        assert!(two.contains("Welcome aboard") && two.contains("Meeting notes"), "{}", two);
+        // A blank line before the second banner, and not before the
+        // first: the separator goes between, not in front.
+        //
+        // The exact run of newlines matters, and asserting less would
+        // prove nothing: the rendered message already ends `\r\n`, and
+        // `writeln!` adds one more, so `\n\n---` is there whether or
+        // not the separator fired. Three is the count that only the
+        // separator can produce -- checked against `od -c`, after a
+        // mutant that removed the blank line sailed past the looser
+        // assertion this line replaces.
+        assert!(two.contains("\n\n\n--- INBOX::2 ---"), "separated: {:?}", two);
+        assert!(!two.starts_with('\n'), "nothing before the first: {:?}", two);
+    }
+
+    #[test]
+    fn searching_several_folders_groups_the_hits_under_each() {
+        let many = printed(|out| {
+            search_emails(
+                out,
+                &mock_config(),
+                "ALL",
+                &FolderSpec::new(vec!["*".to_string()]),
+                false,
+                false,
+            )
+        });
+        assert!(many.starts_with("Found 25 email(s) in 5 folder(s)"), "{}", many);
+        for folder in ["INBOX", "Sent Items", "Drafts", "Trash", "Spam"] {
+            assert!(many.contains(&format!("{} (5):", folder)), "{} missing: {}", folder, many);
+        }
+        // One folder says so instead, and names it rather than counting.
+        let one = printed(|out| {
+            search_emails(out, &mock_config(), "ALL", &FolderSpec::default(), false, false)
+        });
+        assert!(one.starts_with("Found 5 email(s) in 'INBOX'"), "{}", one);
+        assert!(!one.contains("folder(s)"), "not the plural form: {}", one);
+    }
+
+    #[test]
+    fn a_result_line_mentions_parts_only_when_there_are_some() {
+        let mut r = SearchResult {
+            uid: 1,
+            folder: "INBOX".into(),
+            subject: "Hi".into(),
+            from: "a@example.com".into(),
+            date: Some("2026-09-20 12:00:00 +0000".into()),
+            sent: None,
+            size: None,
+            flags: Vec::new(),
+            parts: 0,
+        };
+        let line = printed(|out| print_search_result(out, "  ", &r, false));
+        assert!(!line.contains("part(s)"), "nothing to say about no parts: {}", line);
+        r.parts = 2;
+        let line = printed(|out| print_search_result(out, "  ", &r, false));
+        assert!(line.contains("[2 part(s)]"), "{}", line);
+    }
+
     #[test]
     fn part_save_refuses_a_selection_naming_several_messages() {
         let config = mock_config();
         let err = parts_save(
+            &mut Vec::new(),
             &config,
             &FolderSpec::default(),
             &select::parse_selection("1,2").unwrap(),

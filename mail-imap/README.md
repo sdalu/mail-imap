@@ -1175,9 +1175,11 @@ Renaming INBOX is refused at *every* level, `full` included.
 config allows, never raise it, so a config saying `readonly` cannot be
 talked out of it on the command line.
 
-Two older spellings are still accepted wherever a level is named:
-`read-only` for `readonly`, `non-destructive` for `organize`. The config
-key is read as either `access-level` or `access_level`.
+One older spelling is still accepted wherever a level is named:
+`read-only` for `readonly`. (`non-destructive` was a second name for
+`organize` and is gone: one level, one name. A config still saying it
+is refused by name rather than quietly defaulting.) The config key is
+read as either `access-level` or `access_level`.
 
 The two places differ in how forgiving they are, and deliberately.
 `--access-level` trims and lowercases what it is given, so `FULL` and
