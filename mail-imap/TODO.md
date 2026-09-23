@@ -11,22 +11,38 @@ Ordered by how likely it is to bite.
 
 ## 2. Authentication is `LOGIN` and nothing else
 
-`establish_session` calls `.login(user, password)`
-(`src/imap/real.rs:117`). There is no `AUTHENTICATE`, so no XOAUTH2, no
-OAUTHBEARER, no SASL. Microsoft 365 has disabled basic auth; Gmail
-needs an app password. Between them that is most of the accounts this
-tool would be pointed at.
+*Half done.* `password-command` exists: the password can come from
+`pass`, `gpg`, a keyring or anything else that prints it, and the
+config need not hold it. What is left is the protocol half.
 
-The credential is also a plain string in the config
-(`src/config/mod.rs:108`): no `password-command`, no environment
-variable, no keyring. The README's security note is only that the file
-is gitignored (`README.md:1065`), which protects the repository and not
-the file.
+`establish_session` still calls `.login(user, password)`. There is no
+`AUTHENTICATE`, so no XOAUTH2, no OAUTHBEARER, no SASL. Microsoft 365
+has disabled basic auth; Gmail needs an app password. Between them
+that is most of the accounts this tool would be pointed at, and it is
+the reason this entry is still open.
 
-A `password-command` field is the small half of this and is worth
-doing on its own — it is one config field, one `std::process::Command`,
-and it makes `pass`, `gpg` and a keyring all work without this tool
-knowing about any of them.
+What exists to build on: the fork has `Client::authenticate` and the
+`Authenticator` trait (`../forks/rust-imap/src/client.rs:459`,
+`src/authenticator.rs`), which is exactly the shape XOAUTH2 needs —
+answer the server's challenge with
+`user=<user>\x01auth=Bearer <token>\x01\x01`, base64-encoded. And
+`password-command` already supplies the mechanism for getting a token
+from outside, so a `token-command` is the same machinery under another
+name rather than new machinery.
+
+**The obstacle is not difficulty, it is verification.** GreenMail does
+not speak XOAUTH2, so nothing in `tests/wire.rs` can cover the
+handshake — this would be the first thing here that ships without a
+gate behind it. The part that actually carries the bugs is the payload
+construction, and that *is* unit-testable against the RFC 7628 form.
+So: build it, test the payload exactly, and say plainly in DESIGN.md
+that the exchange itself is unproven against a real provider until
+someone runs it against one. Shipping that honestly is fine; shipping
+it looking tested is not.
+
+Note also that acquiring the token — the OAuth dance, refresh tokens,
+a client secret — is deliberately *not* this tool's job. It takes a
+token from a command, the way it takes a password from one.
 
 ## 7. Smaller, still real
 

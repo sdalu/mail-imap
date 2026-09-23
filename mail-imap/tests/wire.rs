@@ -164,7 +164,7 @@ fn append_raw(message: &str) {
         .connect()
         .unwrap_or_else(|e| panic!("could not connect for APPEND ({:#}).", e));
     let mut session = client
-        .login(cfg.username.as_str(), cfg.password.as_str())
+        .login(cfg.username.as_str(), cfg.effective_password().expect("wire config password"))
         .map_err(|(e, _)| e)
         .unwrap_or_else(|e| panic!("login as '{}' failed for APPEND ({:#}).", cfg.username, e));
     session
@@ -184,7 +184,7 @@ fn fetch_raw_body(uid: u32) -> Vec<u8> {
         .connect()
         .unwrap_or_else(|e| panic!("could not connect for raw FETCH ({:#}).", e));
     let mut session = client
-        .login(cfg.username.as_str(), cfg.password.as_str())
+        .login(cfg.username.as_str(), cfg.effective_password().expect("wire config password"))
         .map_err(|(e, _)| e)
         .unwrap_or_else(|e| panic!("login as '{}' failed for raw FETCH ({:#}).", cfg.username, e));
     session.select("INBOX").expect("SELECT INBOX for raw FETCH");

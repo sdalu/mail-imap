@@ -910,6 +910,39 @@ The one exception is `--mock`, where no server is reached and the
 whole config is optional — and there `info` reports which file it
 actually read, or that it read none.
 
+### Where the password comes from
+
+`password` and `password-command` are exclusive, and exactly one must
+be set — neither is an error, not a default. `password-command` runs
+through `sh -c`, so a user can write a pipeline without this tool
+guessing at quoting rules it would get wrong.
+
+Three rules are worth stating because each one guards a failure that
+would otherwise be diagnosed as "wrong password":
+
+- **Exactly one trailing newline is stripped** — not `trim()`, not
+  `trim_end()`. `pass` and friends emit one newline; a password may
+  legitimately end in a space, and taking it would send a different
+  password than the one stored. There is a test for the trailing
+  space, and it exists to stop either function being reintroduced.
+- **Failure is failure.** A non-zero exit or empty output is an error
+  naming the exit status and the command's stderr — stderr because
+  that is where `gpg: decryption failed` appears. There is no fall
+  back to an empty password, which would reach the server and be
+  refused for a reason that has nothing to do with the real fault.
+- **There is no timeout**, deliberately. `gpg` or `pass` may be sitting
+  at a pinentry prompt, and that wait is the user's to end.
+
+The password never reaches an output stream. `-d` says the command ran
+and whether it succeeded, never what it printed, and the value is held
+in `Secret`, whose `Debug` prints `<redacted>`. That last part is
+structural rather than a thing to remember: the password used to be a
+plain `String` in a `#[derive(Debug)]` struct, so one `{:?}` of a
+`Config` anywhere would have put a credential on a stream. Nothing did,
+so it was a trap and not a leak — and a trap is worth closing with a
+type rather than a comment, since any secret field added later gets the
+same protection by using it.
+
 ## Mock backend (`mock.rs`)
 
 The original mockup, preserved. Returns a fixed set of folders and five sample

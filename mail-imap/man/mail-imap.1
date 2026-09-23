@@ -612,6 +612,24 @@ No default.
 .It Ic password
 Login password.
 No default.
+Exactly one of
+.Ic password
+and
+.Ic password-command
+must be set.
+.It Ic password-command
+A command whose standard output is the password, run through
+.Xr sh 1
+so a pipeline works \(em
+.Ql pass show mail/example ,
+.Ql gpg -qd ~/.mail.gpg .
+Exactly one trailing newline is stripped, so a password ending in a
+space keeps it.
+A non-zero exit or empty output is an error naming the exit status and
+the command\(aqs standard error; there is no fall back to an empty
+password.
+There is no timeout: the command may be waiting at a passphrase prompt.
+No default.
 .It Ic ssl
 Implicit TLS.
 Default

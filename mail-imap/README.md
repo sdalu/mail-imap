@@ -1057,7 +1057,8 @@ password of `30s` stays the text `30s` rather than becoming a number.
 | `server`       | —          | IMAP host                                                                                                                 |
 | `port`         | `993`      | IMAP port                                                                                                                 |
 | `username`     | —          | Login user                                                                                                                |
-| `password`     | —          | Login password (use an app password for e.g. Gmail)                                                                       |
+| `password`     | —          | Login password (use an app password for e.g. Gmail). Exactly one of this and `password-command`                           |
+| `password-command` | —      | A command whose output is the password; run through the shell, with exactly one trailing newline stripped                  |
 | `ssl`          | `true`     | Implicit TLS (typical for port 993)                                                                                       |
 | `starttls`     | `false`    | Upgrade a plain connection with STARTTLS (typical for port 143). Used when `ssl` is `false`.                              |
 | `insecure`     | `false`    | Accept invalid TLS certificates (self-signed local servers)                                                               |
@@ -1268,6 +1269,29 @@ See `DESIGN.md` for details.
 
 `*.conf` files are git-ignored because they contain credentials. Keep real
 configs (e.g. `incal.conf`) out of version control.
+
+Better still, keep the password out of the file. `password-command`
+runs a command and reads the password from its output, so the secret
+can live wherever you already keep secrets:
+
+```
+password-command = "pass show mail/example"
+password-command = "gpg -qd ~/.mail.gpg"
+password-command = "security find-generic-password -s mail -w"
+```
+
+It goes through the shell, so a pipeline works. Exactly **one**
+trailing newline is stripped — `pass` and friends emit one, and a
+password that genuinely ends in a space keeps its space. A command
+that fails, or prints nothing, is an error naming the exit status and
+the command's stderr: there is no silent fall back to an empty
+password. There is no timeout, deliberately, because a `gpg` or `pass`
+invocation may be waiting at a pinentry prompt and that wait is yours
+to end.
+
+The password never reaches an output stream — not an error, not
+`-d`/`--debug`, and not a `{:?}` of the configuration, which holds it
+in a type whose `Debug` prints `<redacted>`.
 
 ## License
 

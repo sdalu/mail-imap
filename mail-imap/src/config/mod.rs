@@ -130,6 +130,32 @@ impl AccessLevel {
 /// config meant to narrow, and a typo in the *key* has to be refused
 /// for the same reason -- `acess-level = readonly` otherwise runs at
 /// the default `organize`, which may change mail.
+/// A value that must never be printed.
+///
+/// The password used to be a plain `String` inside a `#[derive(Debug)]`
+/// struct, which meant one `{:?}` of a `Config` anywhere -- a debug
+/// line, a panic message, a future `dbg!` -- would have put it on a
+/// stream. Nothing did that, so it was a trap rather than a leak; this
+/// makes it structural instead of a thing to remember, and any secret
+/// field added later gets the same protection by using this type.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    /// The value itself. Named so that reaching for it is visible at
+    /// the call site.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -137,7 +163,17 @@ pub struct Config {
     #[serde(default = "default_port")]
     pub port: u16,
     pub username: String,
-    pub password: String,
+    /// The account password, written in the clear. Mutually exclusive
+    /// with `password-command`; exactly one of the two must be set,
+    /// checked once by [`Config::check_password`] right after parsing.
+    #[serde(default)]
+    pub password: Option<Secret>,
+    /// A command run through `sh -c` whose standard output is the
+    /// password, so the secret can live in `pass`, `gpg`, a keyring or
+    /// a vault instead of this file. See [`Config::effective_password`]
+    /// for how the output is read. Mutually exclusive with `password`.
+    #[serde(default, rename = "password-command")]
+    pub password_command: Option<String>,
     /// Use implicit TLS (server port is a TLS port, e.g. 993).
     #[serde(default = "default_ssl")]
     pub ssl: bool,
@@ -193,13 +229,95 @@ fn default_max() -> usize {
     0
 }
 
+impl Config {
+    /// `password` and `password-command` are mutually exclusive, and
+    /// one of them must be set -- there is no default password. Called
+    /// once, right after parsing, so every other reader of `Config`
+    /// (including a hand-built one such as `Config::default()`) can
+    /// assume the check already happened rather than repeat it.
+    fn check_password(&self) -> Result<()> {
+        match (&self.password, &self.password_command) {
+            (Some(_), Some(_)) => bail!(
+                "both 'password' and 'password-command' are set; use exactly one"
+            ),
+            (None, None) => bail!(
+                "neither 'password' nor 'password-command' is set; there is no \
+                 default password"
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    /// The password to log in with: `password` verbatim, or the output
+    /// of running `password-command` through the shell.
+    ///
+    /// `check_password` (run once, at parse time) has already ruled out
+    /// both fields being set or neither -- the final `bail!` below is
+    /// only for a `Config` assembled by hand elsewhere (tests,
+    /// `Config::default()`) without going through it, so that path
+    /// fails loudly instead of reaching a server with an empty password.
+    pub fn effective_password(&self) -> Result<String> {
+        if let Some(p) = &self.password {
+            return Ok(p.expose().to_string());
+        }
+        if let Some(cmd) = &self.password_command {
+            return run_password_command(cmd);
+        }
+        bail!("no password configured: set 'password' or 'password-command'")
+    }
+}
+
+/// Run `command` through `sh -c` and read the password from its
+/// standard output, so a user can write a pipeline or a command with
+/// arguments without this tool parsing quoting rules of its own.
+///
+/// Deliberately no timeout: `gpg`, `pass` and similar may sit at a
+/// pinentry prompt waiting on the user, and cutting that wait short
+/// would be taking a decision -- whether to give up -- that belongs to
+/// the person entering the passphrase, not to this tool.
+///
+/// Exactly one trailing `\n` is trimmed, and nothing else: `pass` and
+/// its kin emit one, but a password may legitimately end in a space,
+/// and `trim()`/`trim_end()` would silently hand back a different
+/// password than the one stored.
+///
+/// The password itself never appears in any error this returns -- only
+/// the exit status and stderr do, since stderr is where a diagnostic
+/// such as `gpg: decryption failed` appears.
+fn run_password_command(command: &str) -> Result<String> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .context("could not run password-command")?;
+
+    if !output.status.success() {
+        bail!(
+            "password-command failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let mut password = String::from_utf8(output.stdout)
+        .map_err(|_| anyhow::anyhow!("password-command did not print valid UTF-8"))?;
+    if password.ends_with('\n') {
+        password.pop();
+    }
+    if password.is_empty() {
+        bail!("password-command produced an empty password");
+    }
+    Ok(password)
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
             server: "localhost".to_string(),
             port: 993,
             username: "".to_string(),
-            password: "".to_string(),
+            password: None,
+            password_command: None,
             ssl: true,
             starttls: false,
             insecure: false,
@@ -347,6 +465,7 @@ pub fn parse_config(content: &str, profile: Option<&str>) -> Result<(Config, Opt
         "config parsed as UCL but is not valid for this tool \
          (unknown access level, or a field of the wrong type)",
     )?;
+    config.check_password()?;
     Ok((config, name))
 }
 
@@ -644,7 +763,7 @@ mod tests {
         // text it was written as, which is what a password needs.
         let cfg = parse_one("server = \"s\"\nusername = \"u\"\npassword = 30s\n")
             .expect("parse");
-        assert_eq!(cfg.password, "30s");
+        assert_eq!(cfg.password.as_ref().map(Secret::expose), Some("30s"));
     }
 
     // --------------------------------------- where the config lives
@@ -857,5 +976,145 @@ mod tests {
         )
         .expect_err("must refuse");
         assert!(format!("{:#}", err).contains("work"));
+    }
+
+    // ---------------------------------------------- password-command
+
+    #[test]
+    fn password_and_password_command_together_is_refused_naming_both() {
+        let err = parse_one(
+            "server = \"s\"\nusername = \"u\"\npassword = \"p\"\n\
+             password-command = \"echo p\"\n",
+        )
+        .expect_err("both must be refused");
+        let text = format!("{:#}", err);
+        assert!(text.contains("password") && text.contains("password-command"), "{}", text);
+    }
+
+    #[test]
+    fn neither_password_nor_password_command_is_refused() {
+        // There is no default password: silently connecting with an
+        // empty one would be worse than refusing to run at all.
+        let err = parse_one("server = \"s\"\nusername = \"u\"\n").expect_err("must refuse");
+        let text = format!("{:#}", err);
+        assert!(text.contains("password") && text.contains("password-command"), "{}", text);
+    }
+
+    #[test]
+    fn password_command_is_read_hyphenated() {
+        let cfg = parse_one(
+            "server = \"s\"\nusername = \"u\"\npassword-command = \"printf hunter2\"\n",
+        )
+        .expect("parse");
+        assert!(cfg.password.is_none());
+        assert_eq!(cfg.password_command.as_deref(), Some("printf hunter2"));
+    }
+
+    #[test]
+    fn debugging_a_config_never_prints_the_password() {
+        // The point of the Secret newtype. If this ever fails, one
+        // `{:?}` somewhere puts a credential on a stream.
+        let cfg = parse_one(
+            "server = \"s\"\nusername = \"u\"\npassword = \"hunter2\"\n",
+        )
+        .expect("parse");
+        let shown = format!("{:?}", cfg);
+        assert!(
+            !shown.contains("hunter2"),
+            "the password reached a Debug output: {}",
+            shown
+        );
+        assert!(shown.contains("redacted"), "{}", shown);
+    }
+
+    #[test]
+    fn effective_password_returns_the_literal_password_unchanged() {
+        let cfg = parse_one("server = \"s\"\nusername = \"u\"\npassword = \"hunter2\"\n")
+            .expect("parse");
+        assert_eq!(cfg.effective_password().expect("password").as_str(), "hunter2");
+    }
+
+    #[test]
+    fn effective_password_runs_the_command_through_the_shell() {
+        // A pipeline, not just a bare command: proof it really goes
+        // through `sh -c` rather than being exec'd word-split.
+        let cfg = parse_one(
+            "server = \"s\"\nusername = \"u\"\n\
+             password-command = \"printf hunter2 | cat\"\n",
+        )
+        .expect("parse");
+        assert_eq!(cfg.effective_password().expect("password").as_str(), "hunter2");
+    }
+
+    #[test]
+    fn effective_password_strips_exactly_one_trailing_newline() {
+        // `pass` and friends emit one trailing newline; only it goes.
+        let cfg = parse_one(
+            "server = \"s\"\nusername = \"u\"\npassword-command = \"printf 'hunter2\\n'\"\n",
+        )
+        .expect("parse");
+        assert_eq!(cfg.effective_password().expect("password").as_str(), "hunter2");
+
+        // A second, genuine newline in the output is part of the
+        // password and must survive -- only ONE is ever stripped.
+        let cfg = parse_one(
+            "server = \"s\"\nusername = \"u\"\npassword-command = \"printf 'hunter2\\n\\n'\"\n",
+        )
+        .expect("parse");
+        assert_eq!(cfg.effective_password().expect("password").as_str(), "hunter2\n");
+    }
+
+    #[test]
+    fn effective_password_keeps_a_trailing_space() {
+        // trim()/trim_end() would silently produce a different password
+        // than the one actually stored -- this is the case that guards
+        // against reintroducing either.
+        let cfg = parse_one(
+            "server = \"s\"\nusername = \"u\"\npassword-command = \"printf 'hunter2 \\n'\"\n",
+        )
+        .expect("parse");
+        assert_eq!(cfg.effective_password().expect("password").as_str(), "hunter2 ");
+    }
+
+    #[test]
+    fn effective_password_fails_on_a_nonzero_exit_with_stderr_in_the_message() {
+        let cfg = parse_one(
+            "server = \"s\"\nusername = \"u\"\n\
+             password-command = \"echo 'gpg: decryption failed' >&2; exit 2\"\n",
+        )
+        .expect("parse");
+        let err = cfg.effective_password().expect_err("must fail");
+        let text = format!("{:#}", err);
+        assert!(text.contains("decryption failed"), "{}", text);
+        assert!(text.contains('2'), "should mention the exit status: {}", text);
+    }
+
+    #[test]
+    fn effective_password_fails_on_empty_output() {
+        let cfg = parse_one("server = \"s\"\nusername = \"u\"\npassword-command = \"true\"\n")
+            .expect("parse");
+        let err = cfg.effective_password().expect_err("must fail");
+        assert!(format!("{:#}", err).contains("empty"));
+    }
+
+    #[test]
+    fn effective_password_fails_on_output_that_is_only_a_newline() {
+        // After stripping the one trailing newline this is empty too.
+        let cfg =
+            parse_one("server = \"s\"\nusername = \"u\"\npassword-command = \"printf '\\n'\"\n")
+                .expect("parse");
+        let err = cfg.effective_password().expect_err("must fail");
+        assert!(format!("{:#}", err).contains("empty"));
+    }
+
+    #[test]
+    fn a_config_without_password_command_falls_back_to_password_when_both_absent_in_code() {
+        // Guards effective_password's own defensive branch: a
+        // hand-built Config (never through check_password) with
+        // neither field set fails loudly rather than logging in with
+        // an empty string.
+        let cfg = Config { server: "s".to_string(), ..Config::default() };
+        let err = cfg.effective_password().expect_err("must fail");
+        assert!(format!("{:#}", err).contains("password"));
     }
 }

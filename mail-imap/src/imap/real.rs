@@ -109,12 +109,26 @@ impl RealClient {
         let client = builder.connect()
             .with_context(|| format!("could not connect to {}:{}", config.server, config.port))?;
 
+        // The password itself is never logged, here or anywhere below:
+        // only whether `password-command` ran and succeeded.
+        if debug && config.password_command.is_some() {
+            eprintln!("Running password-command...");
+        }
+        let password = config.effective_password();
+        if debug && config.password_command.is_some() {
+            eprintln!(
+                "password-command {}",
+                if password.is_ok() { "succeeded" } else { "failed" }
+            );
+        }
+        let password = password.context("could not obtain password")?;
+
         if debug {
             eprintln!("Logging in as '{}'...", config.username);
         }
 
         let session = client
-            .login(config.username.as_str(), config.password.as_str())
+            .login(config.username.as_str(), password.as_str())
             .map_err(|(e, _)| e)
             .with_context(|| format!("login as '{}' failed (check credentials / server)", config.username))?;
 
