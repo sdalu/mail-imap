@@ -767,6 +767,17 @@ impl RealClient {
     /// `imap-proto` parser rejects: metadata is rebuilt from a literal
     /// `BODY.PEEK[HEADER.FIELDS ...]` fetch, which carries raw bytes that
     /// are never parsed as quoted strings.
+    ///
+    /// **Nothing in either suite reaches this.** It is the last rung of
+    /// `fetch_chunk`'s ladder, taken only when a server sends an
+    /// ENVELOPE the parser refuses twice over, and GreenMail cannot be
+    /// made to send one -- so the mock never calls it and the wire
+    /// tests never get here either. Mutation testing says so plainly:
+    /// inverting either filter below survives the whole suite, run
+    /// against a live server. Reaching it needs a fixture that replays
+    /// recorded bytes rather than a server, which is a bigger thing
+    /// than this function. Read the changes here rather than trusting
+    /// a green run.
     fn fetch_to_result_from_headers(
         &self,
         f: &imap::types::Fetch<'_>,

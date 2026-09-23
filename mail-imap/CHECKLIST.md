@@ -100,6 +100,36 @@ mail-imap/src` is the recovery if it is interrupted. Nothing else may
 touch the tree while it runs, readers included — the files on disk are
 deliberately broken for the duration.
 
+**`src/imap/real.rs` needs the wire runner, or the run means nothing.**
+`cargo mutants` runs `cargo test`, which skips the `#[ignore]`d wire
+tests — and `real.rs` is the file the offline suite never reaches. So
+every mutant in it "survives" by construction, and the report looks
+like a catastrophe while saying nothing at all. Start the server and
+point the runner at the wire suite:
+
+    make tests-server-start
+    MAIL_IMAP_WIRE_CONFIG=tests-tmp/greenmail.conf \
+      cargo mutants --file src/imap/real.rs --in-place -F '<functions>' \
+        --test-tool=cargo --cargo-test-arg=--test --cargo-test-arg=wire \
+        --cargo-test-arg=-- --cargo-test-arg=--ignored \
+        --cargo-test-arg=--test-threads=1
+    make tests-server-stop
+
+It is slow — the baseline alone is the whole wire suite, so budget
+about a minute a mutant — and it is the only way to ask this file the
+question. Measured that way, both of `fetch_to_result`'s filters die.
+Three survivors are standing, and none of them is a test gap:
+
+- **`fetch_to_result_from_headers`, both filters.** Nothing reaches
+  the function at all: it is the rung taken only when a server sends
+  an ENVELOPE the parser refuses twice over, and GreenMail cannot be
+  made to send one. Now said above the code as well. Closing it needs
+  a fixture that replays recorded bytes instead of a server.
+- **`unstated` in `permanent_flags`.** Dropping the field leaves
+  `false`, which is what `permanent_flags.is_empty()` returns on any
+  server that states its PERMANENTFLAGS — and GreenMail always does.
+  Equivalent here; distinguishable only on a server that stays silent.
+
 **Do not chase 100%.** A surviving mutant is one of two things, and
 they want opposite answers:
 

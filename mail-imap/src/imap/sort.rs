@@ -208,8 +208,20 @@ mod tests {
     fn parse_sort_rejects_bad_input() {
         assert!(parse_sort("bogus").is_err());
         assert!(parse_sort("").is_err());
-        assert!(parse_sort("-").is_err());
         assert!(parse_sort("date,").is_err());
+        // Each refusal names what is wrong with the spec, and that is
+        // the part worth asserting: every one of these is an error
+        // whatever the code does, so `is_err()` alone proves only that
+        // something went wrong, not that the message says what. A
+        // mutant dropping the bare-`-` guard survived exactly that --
+        // it still failed, reporting an unknown criterion `''`, which
+        // sends someone looking for a criterion they did not write.
+        let err = |spec: &str| parse_sort(spec).expect_err(spec).to_string();
+        assert!(err("-").contains("bare '-'"), "{}", err("-"));
+        assert!(err("bogus").contains("unknown sort criterion 'bogus'"), "{}", err("bogus"));
+        assert!(err("bogus").contains("uid, date, arrival"), "the refusal lists the valid keys");
+        assert!(err("date,").contains("empty criterion"), "{}", err("date,"));
+        assert!(err("").contains("empty criterion"), "{}", err(""));
     }
 
     fn result(uid: u32, subject: &str, from: &str, size: u32) -> SearchResult {

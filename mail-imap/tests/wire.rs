@@ -564,6 +564,46 @@ fn flags_can_be_set_and_cleared() {
     );
 }
 
+/// A search result's flags are the message's, and `\Recent` is not
+/// among them.
+///
+/// `\Recent` is the server's own bookkeeping -- the README says it is
+/// omitted everywhere this tool reports flags, and `flag`/`tag` refuse
+/// to set it -- but nothing asserted that the *search* path drops it.
+/// Mutation testing found that: deleting the `!` in `fetch_to_result`'s
+/// filter inverts it, so a result would carry `\Recent` and nothing
+/// else, and the whole suite still passed.
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn search_results_carry_the_messages_flags_and_never_recent() {
+    let mut c = client();
+    let (token, uids) = fixture(&mut c, "recent", 1);
+    let uid = uids[0];
+    c.store_flags("INBOX", &[uid], &["\\Flagged".to_string()], &[])
+        .expect("+FLAGS");
+
+    let query = format!("HEADER SUBJECT \"{}\"", token);
+    let hits = c
+        .search_folders(&["INBOX".to_string()], &query, 0, None)
+        .expect("search");
+    assert_eq!(hits.len(), 1);
+    let flags = &hits[0].flags;
+    // Both halves matter: the first says the filter keeps what it
+    // should, the second that it drops what it should. An inverted
+    // filter fails one or the other whether or not this server has
+    // marked the message \Recent.
+    assert!(
+        flags.iter().any(|f| f.eq_ignore_ascii_case("\\Flagged")),
+        "a flag set on the message did not reach the search result: {:?}",
+        flags
+    );
+    assert!(
+        !flags.iter().any(|f| f.eq_ignore_ascii_case("\\Recent")),
+        "\\Recent is the server's own and is not reported: {:?}",
+        flags
+    );
+}
+
 #[test]
 #[ignore = "needs an IMAP server: make tests-wire"]
 fn a_keyword_survives_a_round_trip() {
