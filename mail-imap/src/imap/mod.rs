@@ -936,6 +936,11 @@ impl ImapBackend for ImapClient {
             Backend::Mock(c) => c.fetch_raw_message(folder, uid),
         }
     }
+    /// Unkillable against GreenMail, which advertises UIDPLUS: it
+    /// answers `true`, so a mutant that always answers `true` cannot
+    /// be told apart here. Distinguishing it needs a server without
+    /// the capability, which is the same shape as `Permanent::unstated`
+    /// (CHECKLIST lists both).
     fn can_expunge_by_uid(&mut self) -> Result<bool> {
         match &mut self.backend {
             Backend::Real(c) => c.can_expunge_by_uid(),
@@ -1096,6 +1101,11 @@ pub fn thread_component(target: u32, msgs: &[ThreadRefs]) -> Option<Vec<u32>> {
     for m in msgs {
         for id in &m.message_ids {
             match by_id.get(id) {
+                // The guard reads as a correctness check and is a
+                // shortcut: `union(x, x)` is a no-op in any union-find,
+                // and the arm it falls through to re-inserts the value
+                // already there. Forcing it `true` is therefore an
+                // equivalent mutant, not a gap.
                 Some(&other) if other != m.uid => union(&mut parent, m.uid, other),
                 _ => {
                     by_id.insert(id.clone(), m.uid);
@@ -1132,6 +1142,29 @@ mod mailbox_name_tests {
             false,
         )
         .expect("connect")
+    }
+
+    /// Keywords that cannot be decoded are still compared, and still
+    /// compared for *equality*.
+    ///
+    /// `same_keyword` decodes both sides and falls back to the raw
+    /// text when either refuses -- a keyword carrying a broken shift
+    /// sequence is some other client's business, but two of them that
+    /// are the same string are still the same keyword. Nothing tested
+    /// that arm: mutation testing turned its `a == b` into `a != b`
+    /// and the suite passed, which would make `Permanent::keeps`
+    /// answer backwards for exactly the malformed keywords the
+    /// fallback exists for.
+    #[test]
+    fn keywords_that_will_not_decode_are_compared_as_they_stand() {
+        // `&` opens a shift sequence that never closes, so neither
+        // side decodes and the comparison falls through to the text.
+        assert!(same_keyword("&bogus", "&bogus"), "the same broken keyword is the same keyword");
+        assert!(!same_keyword("&bogus", "&other"), "two different ones are not");
+        // The decoding path still works beside it, and is where the
+        // case folding lives.
+        assert!(same_keyword("invoice", "INVOICE"));
+        assert!(!same_keyword("invoice", "receipt"));
     }
 
     #[test]

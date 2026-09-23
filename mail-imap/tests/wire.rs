@@ -240,6 +240,10 @@ fn fixture(client: &mut ImapClient, what: &str, count: usize) -> (String, Vec<u3
 #[ignore = "needs an IMAP server: make tests-wire"]
 fn it_connects_logs_in_and_reports_what_the_server_advertises() {
     let mut c = client();
+    // `is_mock` is what `info` prints as the backend, and only a real
+    // connection can show its `false` side -- offline, every client is
+    // the mock and a mutant that always says so passes.
+    assert!(!c.is_mock(), "this is the real backend, and info must say so");
     let caps = c.capabilities().expect("CAPABILITY");
     assert!(
         caps.iter().any(|x| x == "IMAP4REV1"),

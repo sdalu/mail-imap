@@ -103,11 +103,23 @@ one mutant behind (one here left `required_capability` returning
 touch the tree while it runs, readers included — the files on disk are
 deliberately broken for the duration.
 
-**`src/imap/real.rs` needs the wire runner, or the run means nothing.**
-`cargo mutants` runs `cargo test`, which skips the `#[ignore]`d wire
-tests — and `real.rs` is the file the offline suite never reaches. So
-every mutant in it "survives" by construction, and the report looks
-like a catastrophe while saying nothing at all. Start the server and
+**Code whose only cover is the wire suite needs the wire runner, or
+the run means nothing.** `cargo mutants` runs `cargo test`, which skips
+the `#[ignore]`d wire tests. So every mutant in code only those tests
+reach "survives" by construction, and the report looks like a
+catastrophe while saying nothing at all.
+
+`src/imap/real.rs` is the whole of one such file, but it is not the
+only place: `src/imap/mod.rs` reported **22** survivors offline and
+all but a couple of them died under the wire runner — `ImapClient`'s
+delegating methods (`capabilities`, `thread_uids`, `permanent_flags`,
+`expunge_messages`, `list_subscribed_folders`) and the `--force` guard
+on deleting a non-empty mailbox, which the mock cannot reach at all
+because only INBOX holds mail there and INBOX is refused outright
+before the guard is consulted. Reading that report offline, I started
+writing a test for a guard `tests/wire.rs` already covered in full.
+**Check the offline report against the wire runner before believing a
+survivor in any file that talks to a backend.** Start the server and
 point the runner at the wire suite:
 
     make tests-server-start
@@ -131,6 +143,13 @@ Three survivors are standing, and none of them is a test gap:
   `false`, which is what `permanent_flags.is_empty()` returns on any
   server that states its PERMANENTFLAGS — and GreenMail always does.
   Equivalent here; distinguishable only on a server that stays silent.
+- **`can_expunge_by_uid`.** The same shape: GreenMail advertises
+  UIDPLUS, so it answers `true` and a mutant that always answers `true`
+  is indistinguishable. Needs a server without the capability.
+- **`ImapClient::close` and its `Drop`.** Both replaceable with `()`:
+  what they do is send `LOGOUT`, and nothing observes whether it was
+  sent. Distinguishing them means a server that reports what it
+  received after the fact, which GreenMail does not.
 
 A **TIMEOUT** in the report is a third thing, and it is fine: the
 mutant made the code loop forever (`i += 1` into `i *= 1` in

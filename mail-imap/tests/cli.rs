@@ -139,3 +139,67 @@ fn a_release_build_has_no_mock() {
         stderr
     );
 }
+
+/// Run the binary with a config file of our own, named outright.
+fn run_with_config(config: &str, args: &[&str]) -> Output {
+    static N: AtomicU32 = AtomicU32::new(0);
+    let dir: PathBuf = std::env::temp_dir().join(format!(
+        "mail-imap-cli-conf-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("mail-imap.conf");
+    std::fs::write(&path, config).expect("write config");
+    let mut full: Vec<String> = vec!["-c".into(), path.display().to_string()];
+    full.extend(args.iter().map(|a| (*a).to_string()));
+    let out = Command::new(env!("CARGO_BIN_EXE_mail-imap"))
+        .args(&full)
+        .env_remove("MAIL_IMAP_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
+        .env("HOME", &dir)
+        .output()
+        .expect("run the binary");
+    std::fs::remove_dir_all(&dir).ok();
+    out
+}
+
+/// `--access-level` narrows what the config allows, and is refused
+/// when it would widen it.
+///
+/// This is the property that makes a `readonly` config safe to hand to
+/// something that chooses its own flags -- an agent driving this tool,
+/// which is what it is for. It lives in `main.rs`, so neither the Rust
+/// suite (which calls `cli::` functions) nor `tests/access.rs` (which
+/// drives `ImapClient`) can see it; only running the binary can.
+#[test]
+fn the_command_line_can_narrow_the_access_level_but_never_widen_it() {
+    const CONFIG: &str = "server = \"localhost\"\nusername = \"u\"\npassword = \"p\"\n\
+                          mock = true\naccess-level = organize\n";
+
+    // Narrower: accepted, and `info` reports the narrowed level.
+    let out = run_with_config(CONFIG, &["--access-level", "readonly", "info"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "narrowing must be allowed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        stdout.contains("readonly"),
+        "the narrowed level is the one in force, and info says so: {}",
+        stdout
+    );
+
+    // Wider: refused, and the refusal says why rather than silently
+    // clamping -- a run that asked for more than it may have should
+    // stop, not proceed with less than it asked for.
+    let out = run_with_config(CONFIG, &["--access-level", "full", "info"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "widening must be refused");
+    assert!(
+        stderr.contains("can only narrow"),
+        "the refusal should say what the rule is: {}",
+        stderr
+    );
+
+    // The same level is not a widening.
+    let out = run_with_config(CONFIG, &["--access-level", "organize", "info"]);
+    assert!(out.status.success(), "asking for exactly what the config allows is fine");
+}
