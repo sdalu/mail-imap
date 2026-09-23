@@ -1199,6 +1199,76 @@ mod append_tests {
         assert!(check_rfc5322_shape(b"just some bytes").is_err());
     }
 
+    /// The two other `full`-level operations, which never got the gate
+    /// test `append` got.
+    ///
+    /// Mutation testing found the hole and it is the worst-placed one
+    /// in the tree: forcing `may_strip_part` to `true` -- letting
+    /// `readonly` rewrite a message -- passed the entire suite, in
+    /// both directions and with its comparison reversed, so nothing
+    /// exercised that gate at all. `part strip` is the only operation
+    /// here that destroys something *inside* a message, which is the
+    /// stated reason its level is `full`.
+    ///
+    /// `restructure` is the rung that matters for `folder delete`: it
+    /// may create and rename mailboxes, and must still refuse to
+    /// delete one. A test at `readonly` alone would pass on a gate
+    /// that had slipped one rung.
+    ///
+    /// `info` reports `may.strip_part` and `may.delete_folders` from
+    /// these same functions, so an ungated gate does not only permit
+    /// too much -- it also makes the tool advertise a refusal it no
+    /// longer performs.
+    #[test]
+    fn the_full_level_operations_refuse_every_level_below_full() {
+        let below = [AccessLevel::ReadOnly, AccessLevel::Organize, AccessLevel::Restructure];
+        for level in below {
+            let client = |level| {
+                ImapClient::connect(
+                    &Config { mock: true, access: level, ..Config::default() },
+                    false,
+                )
+                .expect("connect")
+            };
+
+            let err = client(level)
+                .strip_part("INBOX", 3, &[2])
+                .expect_err("only 'full' may rewrite a message");
+            assert!(
+                err.to_string().contains("'full'"),
+                "{:?} refused for the wrong reason: {}",
+                level,
+                err
+            );
+
+            let err = client(level)
+                .delete_folder("Archive", true)
+                .expect_err("only 'full' may delete a mailbox");
+            assert!(
+                err.to_string().contains("'full'"),
+                "{:?} refused for the wrong reason: {}",
+                level,
+                err
+            );
+        }
+
+        // And the other direction, so a gate stuck shut is caught too:
+        // at `full` both get past the gate. `strip_part` goes on to do
+        // real work against the mock, which is why the UID and part
+        // are ones the mock actually has.
+        let mut c = ImapClient::connect(
+            &Config { mock: true, access: AccessLevel::Full, ..Config::default() },
+            false,
+        )
+        .expect("connect");
+        c.strip_part("INBOX", 3, &[2]).expect("'full' may rewrite a message");
+        // A mailbox the mock actually has: the refusals above never
+        // get far enough to care, because the gate is asked before the
+        // mailbox is looked up -- which is itself the right order, and
+        // is why those cases can name anything.
+        c.delete_folder("Spam", true).expect("'full' may delete a mailbox");
+    }
+
     #[test]
     fn append_needs_full_access() {
         let mut c = ImapClient::connect(

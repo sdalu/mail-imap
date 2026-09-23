@@ -96,7 +96,10 @@ tests notice if the code stopped being right?*
 
 `--in-place` is required here (CLAUDE.md says why). Commit first: the
 run mutates the working tree and restores it, so `git checkout --
-mail-imap/src` is the recovery if it is interrupted. Nothing else may
+mail-imap/src` is the recovery if it is interrupted -- and check `git
+diff` when it finishes too, because a run that exits 0 can still leave
+one mutant behind (one here left `required_capability` returning
+`Some("")`). Nothing else may
 touch the tree while it runs, readers included — the files on disk are
 deliberately broken for the duration.
 

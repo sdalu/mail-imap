@@ -20,6 +20,15 @@
 use anyhow::{bail, Result};
 
 /// Does this name carry a modified UTF-7 shift sequence?
+///
+/// A fast path, not a rule: its only caller is [`decoded_display`],
+/// whose own `text != name` guard reaches the same answer the slow way.
+/// Each is the other's backstop, which is why mutation testing cannot
+/// kill either one alone -- forcing this to `true` only means a plain
+/// name is decoded before being found unchanged. Both stay: this one
+/// so the common case does no work, that one because it is the actual
+/// rule. An equivalent mutant, and worth knowing before reading either
+/// as dead code.
 pub fn is_encoded(name: &str) -> bool {
     name.contains('&')
 }
@@ -116,6 +125,13 @@ pub fn decoded_display(name: &str) -> Option<String> {
         return None;
     }
     match decode(name) {
+        // Unkillable by mutation, in both directions, and for two
+        // different reasons. Forcing the guard true changes nothing
+        // because no name containing `&` decodes to itself -- a shift
+        // sequence is always consumed, and the only way `&` survives
+        // decoding is `&-`, which is shorter than what it came from.
+        // Dropping the `is_encoded` check above changes nothing
+        // because this guard catches the same names one step later.
         Ok(text) if text != name => Some(text),
         _ => None,
     }
@@ -131,6 +147,11 @@ fn to_modified_base64(bytes: &[u8]) -> String {
             *chunk.get(1).unwrap_or(&0),
             *chunk.get(2).unwrap_or(&0),
         ];
+        // The three bytes land in bit ranges that do not overlap, so
+        // `|` and `^` are the same operation here: mutating either one
+        // is an equivalent mutant, not a test gap. Same below, where
+        // `acc << 6` always leaves the low six bits clear for a value
+        // that never exceeds them.
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         let chars = [
             ALPHABET[(n >> 18) as usize & 63],

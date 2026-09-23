@@ -366,14 +366,20 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             server: "localhost".to_string(),
-            port: 993,
+            // Through the same functions serde uses for a field the
+            // config file omits, rather than the same values written
+            // again: two copies of a default drift, and the drift is
+            // silent -- a built-in default of `ssl: true` beside a
+            // parsed default of `false` differ only for the user whose
+            // config left the field out.
+            port: default_port(),
             username: "".to_string(),
             password: None,
             password_command: None,
-            ssl: true,
+            ssl: default_ssl(),
             starttls: false,
             insecure: false,
-            folder: "INBOX".to_string(),
+            folder: default_folder(),
             max: default_max(),
             sort: None,
             mock: false,
@@ -431,6 +437,13 @@ const SYSTEM_CONFIG: &str = "/etc/mail-imap.conf";
 
 /// `$XDG_CONFIG_HOME`, else `~/.config` -- which is what `~/.config`
 /// means on a machine that sets it.
+///
+/// Two lines of environment reading over `user_config_dir_from`, which
+/// holds the rule and is tested. This wrapper is deliberately not:
+/// asserting anything about it means setting process-wide environment
+/// variables under a threaded test runner, which is a worse trade than
+/// leaving a function this thin uncovered. Mutation testing reports it
+/// as a survivor for that reason, not because the rule is untested.
 fn user_config_dir() -> Option<String> {
     user_config_dir_from(
         std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
@@ -591,6 +604,96 @@ fn select_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The defaults are documented values, and the README's config
+    /// table is the other copy of them.
+    ///
+    /// Nothing tied the two together: every one of these `default_*`
+    /// functions could be replaced with `0`, `false` or the empty
+    /// string and the suite passed. The failures that invites are
+    /// quiet ones -- a `default_ssl` of `false` sends the password to
+    /// port 993 in the clear, and a `default_timeout` of `0` turns off
+    /// the only bound on a server that stalls.
+    #[test]
+    fn the_defaults_are_the_ones_the_readme_documents() {
+        let c = Config::default();
+        assert_eq!(c.port, 993, "port");
+        assert_eq!(c.timeout, 30, "timeout, in seconds");
+        assert!(c.ssl, "implicit TLS, which is what port 993 means");
+        assert!(!c.starttls, "not both at once");
+        assert!(!c.insecure, "certificates are verified");
+        assert_eq!(c.folder, "INBOX", "default folder");
+        assert_eq!(c.max, 0, "no cap: a search returns what it matched");
+        assert_eq!(c.access, AccessLevel::Organize, "neither readonly nor full");
+        assert_eq!(c.auth, AuthMethod::Login);
+        assert!(!c.mock, "the real backend unless asked otherwise");
+
+        // And a config file that simply omits those fields gets the
+        // same answers. These are two code paths -- `Config::default()`
+        // and serde's per-field defaults -- and they were two copies of
+        // the same values until this test went in: `port`, `ssl` and
+        // `folder` were written out again in the `Default` impl, where
+        // they could drift from what a real config file resolves to
+        // without a single test failing.
+        let minimal: Config =
+            serde_json::from_str(r#"{"server":"s","username":"u","password":"p"}"#)
+                .expect("a config may name only the essentials");
+        assert_eq!(minimal.port, c.port, "port");
+        assert_eq!(minimal.timeout, c.timeout, "timeout");
+        assert_eq!(minimal.ssl, c.ssl, "ssl");
+        assert_eq!(minimal.folder, c.folder, "folder");
+        assert_eq!(minimal.max, c.max, "max");
+        assert_eq!(minimal.access, c.access, "access-level");
+        assert_eq!(minimal.auth, c.auth, "auth");
+    }
+
+    /// `required_capability` is what stops an XOAUTH2 run against a
+    /// server that never offered it, and the atom has to be exact --
+    /// it is compared against what `CAPABILITY` returned. Both this
+    /// and `as_str` (which `info` prints and the config parses back)
+    /// could be replaced wholesale without the suite noticing.
+    #[test]
+    fn the_auth_methods_name_themselves_and_their_capability_exactly() {
+        assert_eq!(AuthMethod::Login.as_str(), "login");
+        assert_eq!(AuthMethod::XOAuth2.as_str(), "xoauth2");
+        assert_eq!(AuthMethod::Login.required_capability(), None);
+        assert_eq!(
+            AuthMethod::XOAuth2.required_capability(),
+            Some("AUTH=XOAUTH2"),
+            "the atom is matched against CAPABILITY, so it is exact or it is useless"
+        );
+        // The names are also what the config spells, so the pair has
+        // to round-trip or a written config stops meaning what it says.
+        for m in [AuthMethod::Login, AuthMethod::XOAuth2] {
+            let text = format!(r#"{{"server":"s","username":"u","password":"p","auth":"{}"}}"#, m.as_str());
+            let parsed: Config = serde_json::from_str(&text).expect("auth name parses back");
+            assert_eq!(parsed.auth, m);
+        }
+    }
+
+    /// Naming a file that is not there says so; searching and finding
+    /// nothing says what was searched.
+    ///
+    /// The two messages send a reader to different places -- one to a
+    /// typo in their own `--config`, the other to the fact that a
+    /// search happened at all and where it looked -- and the guard that
+    /// tells them apart is `candidates.len() == 1`. Forcing it false
+    /// survived the suite: a missing `--config foo.conf` would then be
+    /// reported as "no config file found: tried foo.conf", which reads
+    /// as a search that never happened.
+    #[test]
+    fn a_named_config_that_is_missing_is_not_reported_as_a_failed_search() {
+        let err = match load_config(Some("/nonexistent/mail-imap-test.conf"), None) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("that path does not exist"),
+        };
+        assert!(
+            err.contains("config file not found: /nonexistent/mail-imap-test.conf"),
+            "{}",
+            err
+        );
+        assert!(!err.contains("tried"), "nothing was searched: {}", err);
+    }
 
     #[test]
     fn levels_are_ordered_from_least_to_most_permissive() {

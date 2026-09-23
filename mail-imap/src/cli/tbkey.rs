@@ -97,5 +97,19 @@ mod tests {
         assert_eq!(decode("a=c3"), None, "truncated sequence");
         assert_eq!(decode("a=zz"), None, "not hex");
         assert_eq!(decode("a=c3b"), None, "c3 alone is not UTF-8");
+        // Every case above refuses for a reason it does not need: with
+        // no `=xx` anywhere in them, a build that FAILED to refuse
+        // would hand back the name unchanged, and `text != name` turns
+        // that into None regardless. So they pass whether or not the
+        // refusal works -- mutation testing turned the `||` into `&&`,
+        // which accepts everything this guard exists to reject, and
+        // the whole file still passed.
+        //
+        // These carry an escape as well, so accepting the bad
+        // character would change the text and speak up about a keyword
+        // some other client wrote.
+        assert_eq!(decode("a&b=41"), None, "'&' raw, beside a real escape");
+        assert_eq!(decode("a b=41"), None, "a raw space, beside a real escape");
+        assert_eq!(decode("r=c3=a9gie("), None, "a raw '(' after valid escapes");
     }
 }

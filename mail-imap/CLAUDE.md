@@ -114,7 +114,12 @@ Gate: `make check && make tests`
   every worker dies with *"does not exist, refusing to create it"*.
   The baseline build and test succeed first, which makes it look like
   a code problem rather than a layout one. `.gitignore` carries
-  `mutants.out/`, so this has been run here before. A run over
+  `mutants.out/`, so this has been run here before. **A run that
+  finishes cleanly can still leave a mutant in the tree** -- one here
+  exited 0 having left `required_capability` returning `Some("")` --
+  so `git status` and `git diff` after every run, before anything else.
+  An unnoticed leftover is a deliberately broken line committed as if
+  it were yours. A run over
   `src/imap/real.rs` also needs the wire runner, or every mutant in it
   "survives" because the ignored wire tests never ran — CHECKLIST.md
   carries that command line, and the survivors already accounted for.
