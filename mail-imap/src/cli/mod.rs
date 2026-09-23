@@ -2304,7 +2304,7 @@ pub fn parts_save(out: &mut dyn Write,
         })?;
 
     if to_stdout {
-        let size = stream_part_to_stdout(&mut client, &folder, uid, part)?;
+        let size = stream_part_to_stdout(out, &mut client, &folder, uid, part)?;
         if debug {
             eprintln!(
                 "Wrote {} bytes of part {} of UID {} to stdout",
@@ -2398,12 +2398,12 @@ fn parts_save_all(out: &mut dyn Write,
 /// so this goes through a private temp file rather than the caller's
 /// own stdout descriptor, and always cleans it up.
 fn stream_part_to_stdout(
+    out: &mut dyn Write,
     client: &mut ImapClient,
     folder: &str,
     uid: u32,
     part: u32,
 ) -> Result<u64> {
-    use std::io::Write;
 
     // Straight from the server to stdout. The earlier route through a
     // temporary file was not merely a detour: `std::env::temp_dir()` is
@@ -2412,9 +2412,12 @@ fn stream_part_to_stdout(
     // local user at a path any of them could predict -- and could be
     // redirected by a symlink planted there first.
     let data = client.fetch_part(folder, uid, part)?;
-    let mut stdout = std::io::stdout();
-    stdout.write_all(&data)?;
-    stdout.flush()?;
+    // Through the writer like everything else, rather than reaching for
+    // `std::io::stdout()` again: it was the one path that named stdout
+    // for itself, which left `-o -` the one path a test could not read
+    // back. The bytes are the same bytes.
+    out.write_all(&data)?;
+    out.flush()?;
     Ok(data.len() as u64)
 }
 
@@ -2812,6 +2815,37 @@ mod tests {
         r.parts = 2;
         let line = printed(|out| print_search_result(out, "  ", &r, false));
         assert!(line.contains("[2 part(s)]"), "{}", line);
+    }
+
+    /// `part save -o -` puts the part's bytes on the stream and says
+    /// nothing else on it.
+    ///
+    /// This path named `std::io::stdout()` for itself until now, which
+    /// left it the one output a test could not read back -- and it is
+    /// the path that must not print anything alongside the bytes, or
+    /// whatever the caller redirects into is corrupt.
+    #[test]
+    fn saving_a_part_to_stdout_writes_the_bytes_and_nothing_else() {
+        let mut buf: Vec<u8> = Vec::new();
+        parts_save(
+            &mut buf,
+            &mock_config(),
+            &FolderSpec::default(),
+            &select::parse_selection("3").unwrap(),
+            Some(2),
+            false,
+            Some(PathBuf::from("-")),
+            false,
+            false,
+        )
+        .expect("the mock has part 2 of UID 3");
+        // The mock builds that part as filler sized to what `part list`
+        // declares, so the length is the assertion that matters.
+        assert_eq!(buf.len(), 20480, "the part's bytes, all of them");
+        assert!(
+            !buf.starts_with(b"Saved"),
+            "no commentary on the stream that carries the file"
+        );
     }
 
     #[test]
