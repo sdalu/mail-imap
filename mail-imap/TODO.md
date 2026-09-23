@@ -7,7 +7,7 @@ An entry that turns out to be a deliberate boundary belongs in
 DESIGN.md with its reason, not here — moving it there is a way of
 closing it.
 
-Ordered by how likely it is to bite.
+One is left.
 
 ## 2. OAUTHBEARER, and a real provider account
 
@@ -32,41 +32,11 @@ the capability gate is covered on the wire. What is missing is one run
 against Gmail or Microsoft 365, and it needs an account this tree does
 not have.
 
-## 7. Smaller, still real
-
-*Empty.* Every entry that was here has been closed; they are listed in
-the tail below. The number stays, because commit messages cite it.
-
 ---
 
-Done and out of this list: the `SEARCH` charset declaration,
-`part save --all` / `-o -`, §3 (`folder delete` and
-`folder list --subscribed`), §4 (`copy` and `expunge`), §5 (`append`),
-§6 (`part strip`), §1 (`read` showing the readable text), the
-`password-command` half of §2, and four of §7 — the session read
-timeout, SIGPIPE, shell completions, the command layer's output now
-being written to something a test can read, `parse_flag_names` no longer
-refusing an empty list, the NIL hierarchy delimiter `%` used to
-mis-default to `/`, client-side `--sort date` no longer meaning
-`arrival`, the date column that followed neither, and the unbounded
-connect phase. What they
-left behind is recorded where it belongs rather than here: the untested
-charset fallback in DESIGN.md under *Declaring a charset on `SEARCH`*,
-why `fetch_part` is the trait's primitive under *MIME parsing*, where
-the line falls between `restructure` and `full` under *Access level*,
-why `expunge` never marks `\Deleted` itself under *Copying and
-expunging*, why a lone LF is normalised before an `append` under
-*Putting a message in*, and why `part strip` writes before it deletes
-under *Stripping a part*, why the message renderer sits in one
-place rather than in each backend under *Reading a message*, and why a
-NIL delimiter makes `%` behave like `*` for that mailbox — and why the
-config's `delimiter` is not the fallback — under *Telling selections
-from names*, and why an unreadable `Date:` header sorts first instead
-of borrowing the arrival date — and why the result line labels the one
-date it has room for — under *Sorting*.
-
-The numbers of what remains do not close up as entries leave: §1, §2
-and §7 keep the numbers they were given. Nothing cites another entry
-any more — §6 was the last that did — but renumbering now would break
-every reference to this file from a commit message, which is where the
-reasoning for each of these lives.
+Everything else that stood here is closed; `git log` has the list, and
+what each one decided is written where it is enforced rather than
+repeated here — mostly DESIGN.md, which is the file to search. §1, §3
+through §7 are all gone that way. The numbers do not close up as
+entries leave: commit messages cite them, and renumbering would break
+every reference to a file whose whole value is being citable.

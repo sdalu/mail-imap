@@ -43,9 +43,11 @@ Gate: `make check && make tests`
   connection on its own thread. A refused ENVELOPE poisons the stream
   and the client reconnects, and a single-threaded script never accepts
   that second connection -- the client then blocks reading a greeting
-  that never comes, which `timeout` does not bound (the connect phase
-  is unbounded, see TODO.md), so it hangs for good and looks exactly
-  like a defect in the code under test.
+  that never comes. `timeout` bounds that now (the fork's
+  `ClientBuilder::timeout`, added because of exactly this), so it fails
+  in a second instead of hanging for good -- but with `timeout = 0`, or
+  a script that stalls some other way, it can still look exactly like a
+  defect in the code under test.
 - **`make tests` proves the mock backend, not the wire.** It never
   opens a socket, so nothing in it can fail because
   `src/imap/real.rs` sends the wrong thing. `make tests-wire` is the
