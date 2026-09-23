@@ -314,7 +314,7 @@ and `LIST`, and changes nothing.
 
 ```console
 $ mail-imap -c incal.conf info
-mail-imap 0.1.0 (real backend)
+mail-imap 0.2.0 (real backend)
   config      incal.conf
   account     user@example.com@imap.example.com:993 (implicit TLS)
 
@@ -377,7 +377,7 @@ What each block is for:
 `-j` gives the same thing as one object:
 
 ```json
-{"tool":{"name":"mail-imap","version":"0.1.0","backend":"real"},
+{"tool":{"name":"mail-imap","version":"0.2.0","backend":"real"},
  "config":{"path":"incal.conf","server":"imap.example.com","port":993,
            "tls":"implicit","insecure":false,"username":"user@example.com"},
  "access":{"effective":"organize","configured":"organize",
@@ -1251,7 +1251,7 @@ see [CHECKLIST.md](CHECKLIST.md).
 src/
   main.rs          CLI entry (clap)
   lib.rs           the same modules as a library, for the test suite
-  config/mod.rs    JSON config loading, the access-level ladder
+  config/mod.rs    UCL config loading, the access-level ladder, the auth method
   cli/
     mod.rs         command handlers / output formatting, per-folder UID groups
     select.rs      message selection grammar, folder-pattern matching/expansion
@@ -1262,7 +1262,8 @@ src/
     mod.rs         ImapBackend trait, shared types, backend selection
     real.rs        RealClient  — talks to a real IMAP server (imap crate)
     mock.rs        MockClient  — in-memory mock, used by the test suite
-    mime.rs        minimal MIME parser (parts, boundary, CTE decoding)
+    mime.rs        MIME: parses (parts, boundaries, CTE), renders a message
+                   for `read`, and rewrites one for `part strip`
     sort.rs        --sort spec parsing + client-side result ordering
 ```
 

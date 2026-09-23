@@ -75,6 +75,26 @@ Gate: `make check && make tests`
   into a tree that already has clap 4. So: cmake and a C compiler are
   build requirements, the binary has no runtime libucl dependency, and
   the UCL dialect understood is 0.5.0's, not the system's.
+- **GreenMail advertises `AUTH=XOAUTH2` and cannot complete it.** It
+  answers the `AUTHENTICATE` with *"Missing argument. Command should be
+  `<tag> AUTHENTICATE <auth_type> *(CRLF base64)`"* — it wants the
+  initial response inline (RFC 4959 SASL-IR), which the `imap` crate
+  does not send. So the throwaway server can neither complete an
+  XOAUTH2 exchange nor exercise the missing-capability refusal, and
+  `auth = "xoauth2"` is **the one path in this tree with no end-to-end
+  test behind it**. The SASL payload is unit-tested byte for byte;
+  the handshake against a real provider is not tested at all. Anyone
+  touching `establish_session` should know that the suite will not
+  catch them there.
+- **`--access-level` can only narrow, never widen.** So a `full`-level
+  path (`expunge`, `append`, `part strip`, `folder delete`) cannot be
+  exercised by adding a flag to a default run: it needs a config file
+  saying `access-level = "full"`. With `mock = true` in it, that costs
+  nothing and touches no account — which is how the `full` commands
+  get run by hand.
+- **`scripts/check-examples.sh` reads four documents only** — README.md,
+  QUICKSTART.md, DESIGN.md and `man/mail-imap.1`. A command line
+  written anywhere else, TODO.md included, is replayed by nothing.
 - **The tree is not rustfmt-clean.** Do not run `cargo fmt` across it as
   part of another change: the reformatting of untouched code buries the
   diff. Format the lines you write.

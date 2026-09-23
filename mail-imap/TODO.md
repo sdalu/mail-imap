@@ -34,12 +34,6 @@ not have.
 
 ## 7. Smaller, still real
 
-- **`info` advertises capabilities with no command behind them**
-  (`README.md`): `QUOTA`, `IDLE`. Either give them commands (`quota`;
-  a `watch`) or say in DESIGN.md that the `advertises` line reports
-  what the *server* is, not what this tool will do with it. The second
-  is a paragraph and is probably the honest answer; the first is two
-  features nobody has asked for.
 - **The connect phase is still unbounded.** `timeout` covers a server
   that accepts and then goes quiet, and cannot cover the dial or the
   TLS handshake, which `ClientBuilder` owns — nor a stalled write,

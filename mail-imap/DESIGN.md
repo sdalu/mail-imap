@@ -949,6 +949,27 @@ So: the first person to point this at Gmail or Microsoft 365 is the
 test. That is written down in the README too, where a user will see it,
 rather than only here.
 
+### What `info` claims, and what it does not
+
+`info`'s `advertises` line lists what the **server** said it can do. It
+is not a list of what this tool will do with it, and the difference is
+worth stating because the line names things no command here uses —
+`QUOTA` and `IDLE` most obviously.
+
+That is deliberate rather than an omission waiting to be filled. The
+line exists so a caller can tell *why* an operation took the path it
+took, or was refused: `filing` says `UID MOVE` because `MOVE` is on
+that list, `expunging` says `refused` when `UIDPLUS` is not. Reporting
+only the capabilities this tool consumes would make those explanations
+unverifiable from the output. The lines directly above it — `filing`,
+`expunging`, `sorting`, `threading`, `folder create --use` — are the
+ones that say what this tool will do; `advertises` is the evidence
+underneath them.
+
+So `QUOTA` appearing there is not a promise of a `quota` command, and
+`IDLE` is not a promise of a `watch`. If either is ever built, it joins
+the lines above rather than changing what `advertises` means.
+
 ### Timeouts, and what they do not cover
 
 `timeout` (seconds, default 30, `0` to disable) is set on the session

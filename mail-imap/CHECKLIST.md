@@ -61,6 +61,13 @@ this morning is a claim, not a fact.
       places: the struct, the README table, the man page, and this
       template. `scripts/check-examples.sh` does not read configs, so nothing
       catches a stale one but this line.
+- [ ] **Does anything now ship without a gate behind it?** One thing
+      does — the XOAUTH2 exchange (CLAUDE.md says why) — and it is
+      named in three places: DESIGN.md for the reasoning, TODO.md as
+      work still owed, and the README where a *user* will meet it. A
+      second such thing should get the same treatment rather than a
+      commit message alone, which nobody reads twice. If a round makes
+      an untested path testable, the note comes back out.
 - [ ] **The doc comments above what this round touched.** A module
       header and a trait's summary are documents too, and nothing here
       reads them: `ImapBackend` in `src/imap/mod.rs` still said "nothing
@@ -117,7 +124,10 @@ this morning is a claim, not a fact.
 ## Release
 
 - [ ] Does the number move? A change that alters no behaviour usually
-      does not. It lives in one file: `Cargo.toml`. There is no `make
+      does not, and a round in the middle of a longer piece of work
+      should wait for the end of it rather than move twice — a number
+      that moves twice for one body of work tells a reader less than
+      one that moves once. It lives in one file: `Cargo.toml`. There is no `make
       tag`: the tags belong to the AiTools repository this tree sits in.
 
 Then capture: whatever this round learned goes to the artifact that owns
