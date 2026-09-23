@@ -123,28 +123,43 @@ impl RealClient {
             builder = builder.danger_skip_tls_verify(true);
         }
 
+        // The connect phase is bounded by the same `timeout`, which it
+        // could not be until the fork gained `ClientBuilder::timeout`:
+        // the dial, the TLS handshake, the STARTTLS exchange and the
+        // greeting all happen before a `Client` exists to set a timeout
+        // on, so a server that accepted and then said nothing hung this
+        // CLI for good. The socket timeouts it sets are not cleared
+        // afterwards, so the session's *writes* are bounded too --
+        // `SetReadTimeout` has no counterpart and never could be.
+        if config.timeout > 0 {
+            builder = builder.timeout(std::time::Duration::from_secs(config.timeout));
+        }
+
         let client = builder.connect()
             .with_context(|| format!("could not connect to {}:{}", config.server, config.port))?;
 
         // `config.timeout` bounds a server that accepts the connection
-        // and then goes quiet mid-response -- it does NOT bound the
-        // connect above: `ClientBuilder::connect()` owns the dial (and,
-        // for TLS, the handshake) and hands back an already-established
-        // `Client`, with no hook for a caller to time that part. Doing
-        // so would mean patching the fork, which is out of scope here.
-        // A server that never accepts, or stalls mid-handshake, still
-        // hangs this CLI for good; only a server that answers and then
-        // stalls afterwards is caught by what follows.
+        // and then goes quiet mid-response. It now also bounds the
+        // connect above -- see the `builder.timeout` call -- which it
+        // did not until the fork gained a hook for it. What is still
+        // not covered is resolving the name: `getaddrinfo` has no
+        // timeout of its own, so a resolver that hangs hangs here.
         //
         // The greeting is already consumed by `builder.connect()`, so
         // there is no `read_greeting()` to call again. Pulling the
         // connection back out with `into_inner()` and re-wrapping it
         // with `Client::new()` is the only route in: `Session` and
         // `Client` have no `set_read_timeout` of their own, only the
-        // boxed `Connection` they hold does, via `SetReadTimeout`. That
-        // trait is also read-only -- there is no matching "set write
-        // timeout" -- so a stalled write (a large `APPEND` to a server
-        // that stopped reading, say) is not bounded by this either.
+        // boxed `Connection` they hold does, via `SetReadTimeout`.
+        //
+        // That trait is read-only -- there is no matching "set write
+        // timeout" -- which used to leave a stalled write (a large
+        // `APPEND` to a server that stopped reading, say) unbounded.
+        // It no longer does, but not because of this code: the write
+        // timeout is set on the socket during the connect above, and
+        // socket options outlive the handshake. This call is still
+        // needed for the read side, because `timeout` may be set on a
+        // connection this did not open.
         let mut client = if config.timeout == 0 {
             client
         } else {

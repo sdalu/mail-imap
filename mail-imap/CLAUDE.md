@@ -30,8 +30,10 @@ Gate: `make check && make tests`
 
 - **The `imap` and `imap-proto` dependencies are local forks**
   (`../forks/rust-imap`, `../forks/tokio-imap/imap-proto`), carrying
-  RFC 5256 THREAD/SORT support that upstream has not released. A
-  checkout without `../forks` does not build.
+  RFC 5256 THREAD/SORT support that upstream has not released, and now
+  `ClientBuilder::timeout` as well — without which nothing can bound
+  the connect phase, because it all happens before a `Client` exists.
+  A checkout without `../forks` does not build.
 - **`tests/replay.rs` is a scripted socket, not a server.** It speaks
   just enough IMAP to walk the real backend down `fetch_chunk`'s
   degradation ladder -- answering badly on purpose, which no real

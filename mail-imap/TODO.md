@@ -34,13 +34,8 @@ not have.
 
 ## 7. Smaller, still real
 
-- **The connect phase is still unbounded.** `timeout` covers a server
-  that accepts and then goes quiet, and cannot cover the dial or the
-  TLS handshake, which `ClientBuilder` owns — nor a stalled write,
-  since `SetReadTimeout` has no counterpart. Closing either means
-  patching the `imap` fork, which is a bigger decision than the fix:
-  the forks are rebased by hand and CHECKLIST.md wants that debt
-  shrinking. Worth doing only if a real account actually hangs there.
+*Empty.* Every entry that was here has been closed; they are listed in
+the tail below. The number stays, because commit messages cite it.
 
 ---
 
@@ -53,7 +48,8 @@ timeout, SIGPIPE, shell completions, the command layer's output now
 being written to something a test can read, `parse_flag_names` no longer
 refusing an empty list, the NIL hierarchy delimiter `%` used to
 mis-default to `/`, client-side `--sort date` no longer meaning
-`arrival`, and the date column that followed neither. What they
+`arrival`, the date column that followed neither, and the unbounded
+connect phase. What they
 left behind is recorded where it belongs rather than here: the untested
 charset fallback in DESIGN.md under *Declaring a charset on `SEARCH`*,
 why `fetch_part` is the trait's primitive under *MIME parsing*, where

@@ -231,6 +231,15 @@ characters there; the `imap` crate turns such a line into a fabricated
 with "Bye Response: no explanation given" unless it is caught. `RealClient`
 countermeasures (`src/imap/real.rs`):
 
+- **the connect phase is bounded by `timeout` as well**, which took a
+  patch to the `imap` fork (`ClientBuilder::timeout`): the dial, the
+  TLS handshake, the STARTTLS exchange and the greeting all happen
+  before a `Client` exists to set a timeout on, so a server that
+  accepted and then said nothing hung the tool for good. The fork
+  applies the bound to the socket rather than to each step, which also
+  bounds the session's *writes* — `SetReadTimeout` has no counterpart,
+  so a stalled `APPEND` had nothing to stop it. What remains unbounded
+  is name resolution: `getaddrinfo` takes no timeout;
 - `attempt_fetch` recognizes connection-poisoning errors (`Bye`,
   `TagMismatch`, `ConnectionLost`, `Io`), re-establishes the session
   (`reconnect`) and retries once;

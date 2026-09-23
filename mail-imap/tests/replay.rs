@@ -176,6 +176,15 @@ fn fetch_reply(tag: &str, items: &str, answer: Answer) -> String {
 
 /// A client pointed at the script. `timeout` is a parameter because one
 /// test here is *about* the timeout firing.
+fn config_for(port: u16, timeout: u64) -> Config {
+    let json = format!(
+        r#"{{"server":"127.0.0.1","port":{},"username":"tester","password":"secret",
+            "ssl":false,"starttls":false,"access-level":"readonly","timeout":{}}}"#,
+        port, timeout
+    );
+    serde_json::from_str(&json).expect("config")
+}
+
 fn client(port: u16, timeout: u64) -> ImapClient {
     let json = format!(
         r#"{{"server":"127.0.0.1","port":{},"username":"tester","password":"secret",
@@ -202,6 +211,57 @@ fn fetches(log: &Log) -> Vec<String> {
 }
 
 // ----------------------------------------------------------- the tests
+
+/// A server that accepts and then says nothing is bounded by `timeout`.
+///
+/// It was not, until the fork gained `ClientBuilder::timeout`. The dial,
+/// the TLS handshake, the STARTTLS exchange and the greeting all happen
+/// before a `Client` exists to set a timeout on, so a socket that
+/// accepted and went quiet hung the CLI for good -- no error, no exit,
+/// nothing to interrupt but the process.
+///
+/// This is the shape that cost real time in this tree: a scripted
+/// server that did not accept a reconnect left the client reading a
+/// greeting that never came, and it looked exactly like a defect in
+/// the code under test.
+///
+/// Note how this one fails if it regresses: it *hangs*, because the
+/// bug is a hang and Rust's harness has no per-test timeout. `make
+/// tests` stops finishing rather than going red. That is visible
+/// enough to act on, and it is the only shape a test of this can
+/// take -- the elapsed-time assertion below is reached only when the
+/// connect returns at all.
+#[test]
+fn a_server_that_accepts_and_says_nothing_does_not_hang_the_connect() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    // Accept, then hold the socket open and say nothing at all.
+    thread::spawn(move || {
+        let held: Vec<TcpStream> = listener.incoming().flatten().collect();
+        drop(held);
+    });
+
+    let began = std::time::Instant::now();
+    let err = match ImapClient::connect(&config_for(port, 1), false) {
+        Err(e) => e,
+        Ok(_) => panic!("a greeting that never comes must not be waited for forever"),
+    };
+    let waited = began.elapsed();
+
+    assert!(
+        waited < std::time::Duration::from_secs(20),
+        "it should give up after about the timeout, not hang: waited {:?}",
+        waited
+    );
+    let text = format!("{:#}", err);
+    assert!(
+        text.to_lowercase().contains("timed out")
+            || text.contains("temporarily unavailable")
+            || text.to_lowercase().contains("would block"),
+        "and say the wait is what stopped it: {}",
+        text
+    );
+}
 
 /// The whole ladder, ending on the rung nothing else reaches.
 #[test]
