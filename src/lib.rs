@@ -29,13 +29,16 @@ mod tests {
     }
 
     #[test]
-    fn readonly_refuses_every_flag_change() {
-        let mut client = client_at(AccessLevel::ReadOnly);
+    fn survey_refuses_every_flag_change() {
+        let mut client = client_at(AccessLevel::Survey);
         let seen = vec!["\\Seen".to_string()];
         let err = client
             .store_flags("INBOX", &[1], &seen, &[])
-            .expect_err("readonly must change nothing");
-        assert!(err.to_string().contains("readonly"), "{}", err);
+            .expect_err("survey must change nothing");
+        // The refusal names the level as it is written today, so a
+        // rename cannot leave the message saying something a config
+        // cannot be spelled with.
+        assert!(err.to_string().contains("survey"), "{}", err);
         // Clearing is a change too.
         assert!(client.store_flags("INBOX", &[1], &[], &seen).is_err());
         // ... but reading is not.
@@ -83,12 +86,12 @@ mod tests {
     }
 
     #[test]
-    fn readonly_files_nothing() {
-        let mut client = client_at(AccessLevel::ReadOnly);
+    fn survey_files_nothing() {
+        let mut client = client_at(AccessLevel::Survey);
         let err = client
             .move_messages("INBOX", &[1], "Trash")
-            .expect_err("readonly changes nothing");
-        assert!(err.to_string().contains("readonly"), "{}", err);
+            .expect_err("survey changes nothing");
+        assert!(err.to_string().contains("survey"), "{}", err);
         assert!(client.folder_uids("INBOX").unwrap().contains(&1));
     }
 
@@ -154,8 +157,8 @@ mod tests {
     }
 
     #[test]
-    fn readonly_refuses_the_tree_too() {
-        let mut client = client_at(AccessLevel::ReadOnly);
+    fn survey_refuses_the_tree_too() {
+        let mut client = client_at(AccessLevel::Survey);
         assert!(client.create_folder("Archive", None).is_err());
         assert!(client.rename_folder("Spam", "Junk").is_err());
         assert!(client.set_subscribed("Drafts", true).is_err());

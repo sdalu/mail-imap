@@ -86,7 +86,7 @@ struct Args {
     )]
     sort: Option<String>,
 
-    /// Narrow what this run may change: readonly, organize,
+    /// Narrow what this run may change: survey, organize,
     /// restructure or full.
     /// The config's "access-level" sets the ceiling; this can only lower
     /// it, never raise it

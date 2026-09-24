@@ -3244,12 +3244,12 @@ mod tests {
     fn info_narrowed_for_a_run_reports_both_levels() {
         let mut client = mock_client();
         let config = Config {
-            access: crate::config::AccessLevel::ReadOnly,
+            access: crate::config::AccessLevel::Survey,
             ..mock_config()
         };
         let out = build_info(&mut client, &config, None, None, crate::config::AccessLevel::Full)
             .expect("info");
-        assert_eq!(out.access.effective, "readonly");
+        assert_eq!(out.access.effective, "survey");
         assert_eq!(out.access.configured, "full");
     }
 

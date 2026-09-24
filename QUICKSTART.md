@@ -3,7 +3,7 @@
 mail-imap is a command-line IMAP client for programmatic and AI use.
 Reads change nothing on the server -- they use `BODY.PEEK[]` -- and
 everything else is capped by an `access-level` in the config
-(`readonly` / `organize` / `restructure` / `full`).
+(`survey` / `organize` / `restructure` / `full`).
 
 ## Point it at a real account
 
@@ -19,8 +19,8 @@ server   = "imap.example.com"
 username = "you@example.com"
 password = "secret"
 
-# readonly / organize / restructure / full
-access-level = readonly
+# survey / organize / restructure / full
+access-level = survey
 ```
 
 [ucl]: https://github.com/vstakhov/libucl
@@ -32,7 +32,7 @@ More than one account goes in the same file, each in a named block,
 selected with `-p` — see [Several accounts in one
 file](README.md#several-accounts-in-one-file).
 
-`readonly` costs nothing while you get the shape right; `organize` is
+`survey` costs nothing while you get the shape right; `organize` is
 the config's own default if the field is left out. See [Access
 level](README.md#access-level) for what each of the four levels
 permits.

@@ -98,7 +98,7 @@ Every selectable mailbox of the account; shorthand for
 .Fl f Ar \(aq*\(aq .
 .It Fl -access-level Ar level
 Narrow what this run may change:
-.Ic readonly , organize , restructure ,
+.Ic survey , organize , restructure ,
 or
 .Ic full .
 Can only lower what the config allows, never raise it.
@@ -604,7 +604,7 @@ in the config says how much of the account
 may change.
 The levels are a ladder; each permits everything below it.
 .Bl -tag -width "restructure"
-.It Ic readonly
+.It Ic survey
 Nothing changes.
 .It Ic organize
 The default.
@@ -622,10 +622,22 @@ Everything, including setting
 .Fl -access-level
 on the command line can only lower what the config allows, never
 raise it.
-One older spelling is also accepted wherever a level is named:
+The bottom rung is named for what a run at it does, which keeps the
+ladder in one register:
+.Ic survey , organize , restructure
+say what the run may do, where
+.Ic readonly
+was the one name describing a restriction instead.
+.Ic readonly
+and
 .Ic read-only
-for
-.Ic readonly .
+were what it was called before that and both still read wherever a
+level is named.
+They are ways in, not second names:
+.Ic info
+reports the level as
+.Ic survey
+however it was written.
 This is not a security boundary: the same account can be reached by
 any other client with the same password.
 .Sh CONFIGURATION
@@ -767,7 +779,7 @@ the account holder states what the tool may do.
 on the command line may only narrow, and is not the same thing.
 .Bd -literal -offset indent
 max          = 25
-access-level = readonly
+access-level = survey
 default      = "work"
 
 work {

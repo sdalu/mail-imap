@@ -553,7 +553,7 @@ impl ImapClient {
     }
 
     /// Refuse a flag change the access level does not allow. Clearing a
-    /// flag is unrestricted above `ReadOnly`: taking `\Deleted` off a
+    /// flag is unrestricted above `Survey`: taking `\Deleted` off a
     /// message rescues it, and taking any other flag off loses an
     /// annotation, not a message.
     fn check_flag_change(&self, add: &[String], remove: &[String]) -> Result<()> {
@@ -1237,7 +1237,7 @@ mod append_tests {
     ///
     /// Mutation testing found the hole and it is the worst-placed one
     /// in the tree: forcing `may_strip_part` to `true` -- letting
-    /// `readonly` rewrite a message -- passed the entire suite, in
+    /// `survey` rewrite a message -- passed the entire suite, in
     /// both directions and with its comparison reversed, so nothing
     /// exercised that gate at all. `part strip` is the only operation
     /// here that destroys something *inside* a message, which is the
@@ -1245,7 +1245,7 @@ mod append_tests {
     ///
     /// `restructure` is the rung that matters for `folder delete`: it
     /// may create and rename mailboxes, and must still refuse to
-    /// delete one. A test at `readonly` alone would pass on a gate
+    /// delete one. A test at `survey` alone would pass on a gate
     /// that had slipped one rung.
     ///
     /// `info` reports `may.strip_part` and `may.delete_folders` from
@@ -1254,7 +1254,7 @@ mod append_tests {
     /// longer performs.
     #[test]
     fn the_full_level_operations_refuse_every_level_below_full() {
-        let below = [AccessLevel::ReadOnly, AccessLevel::Organize, AccessLevel::Restructure];
+        let below = [AccessLevel::Survey, AccessLevel::Organize, AccessLevel::Restructure];
         for level in below {
             let client = |level| {
                 ImapClient::connect(

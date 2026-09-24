@@ -5,7 +5,7 @@
 //! `ImapClient` rather than in the handlers, so a new command cannot
 //! quietly escape it. The promise is only as good as its weakest gate,
 //! and mutation testing found two that nothing tested at all --
-//! `may_strip_part` could be forced to `true`, letting `readonly`
+//! `may_strip_part` could be forced to `true`, letting `survey`
 //! rewrite a message, and the suite passed.
 //!
 //! So the ladder is checked as a *matrix* rather than one case at a
@@ -26,7 +26,7 @@ use mail_imap::imap::{ImapBackend, ImapClient};
 
 /// The ladder, least to most permissive.
 const LEVELS: [AccessLevel; 4] = [
-    AccessLevel::ReadOnly,
+    AccessLevel::Survey,
     AccessLevel::Organize,
     AccessLevel::Restructure,
     AccessLevel::Full,
@@ -191,12 +191,12 @@ fn every_level_permits_what_it_is_allowed_to_do() {
     }
 }
 
-/// Reading is never gated, including at `readonly` -- which is the
+/// Reading is never gated, including at `survey` -- which is the
 /// level's whole point, and the reason reads use `BODY.PEEK` so that
 /// even fetching a message sets no `\Seen`.
 #[test]
-fn readonly_can_still_read_everything() {
-    let mut c = client(AccessLevel::ReadOnly);
+fn survey_can_still_read_everything() {
+    let mut c = client(AccessLevel::Survey);
     c.list_folders().expect("listing mailboxes changes nothing");
     c.folder_uids("INBOX").expect("listing UIDs changes nothing");
     c.search_folders(&["INBOX".to_string()], "ALL", 0, None)
@@ -207,7 +207,7 @@ fn readonly_can_still_read_everything() {
 
 /// The first gate that stops you is the one that speaks.
 ///
-/// Setting `\Deleted` needs `full`, but at `readonly` it is refused
+/// Setting `\Deleted` needs `full`, but at `survey` it is refused
 /// before that ever comes up -- by the gate that allows no changes at
 /// all -- and the message says `organize`, the next rung, not `full`.
 /// That is right: it names the smallest step that would get the reader
@@ -217,14 +217,14 @@ fn readonly_can_still_read_everything() {
 fn a_refusal_names_the_rung_that_would_lift_it_not_the_final_one() {
     let deleted = ["\\Deleted".to_string()];
 
-    let at_readonly = client(AccessLevel::ReadOnly)
+    let at_survey = client(AccessLevel::Survey)
         .store_flags("INBOX", &[1], &deleted, &[])
-        .expect_err("readonly changes nothing")
+        .expect_err("survey changes nothing")
         .to_string();
     assert!(
-        at_readonly.contains("'organize'"),
-        "readonly should point at the next rung, not the last: {}",
-        at_readonly
+        at_survey.contains("'organize'"),
+        "survey should point at the next rung, not the last: {}",
+        at_survey
     );
 
     let at_organize = client(AccessLevel::Organize)
@@ -256,7 +256,7 @@ fn the_ladder_is_ordered_least_to_most_permissive() {
     for pair in LEVELS.windows(2) {
         assert!(pair[0] < pair[1], "{:?} must be narrower than {:?}", pair[0], pair[1]);
     }
-    assert_eq!(LEVELS.iter().copied().min(), Some(AccessLevel::ReadOnly));
+    assert_eq!(LEVELS.iter().copied().min(), Some(AccessLevel::Survey));
     assert_eq!(LEVELS.iter().copied().max(), Some(AccessLevel::Full));
     assert_eq!(AccessLevel::default(), AccessLevel::Organize, "the default is neither extreme");
 }

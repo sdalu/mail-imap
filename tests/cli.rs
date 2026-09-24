@@ -167,7 +167,7 @@ fn run_with_config(config: &str, args: &[&str]) -> Output {
 /// `--access-level` narrows what the config allows, and is refused
 /// when it would widen it.
 ///
-/// This is the property that makes a `readonly` config safe to hand to
+/// This is the property that makes a `survey` config safe to hand to
 /// something that chooses its own flags -- an agent driving this tool,
 /// which is what it is for. It lives in `main.rs`, so neither the Rust
 /// suite (which calls `cli::` functions) nor `tests/access.rs` (which
@@ -178,12 +178,20 @@ fn the_command_line_can_narrow_the_access_level_but_never_widen_it() {
                           mock = true\naccess-level = organize\n";
 
     // Narrower: accepted, and `info` reports the narrowed level.
+    // Deliberately written with the OLD spelling, so this covers both
+    // halves at once: the alias is still a way in, and what comes back
+    // out is the canonical name rather than what was typed.
     let out = run_with_config(CONFIG, &["--access-level", "readonly", "info"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "narrowing must be allowed: {}", String::from_utf8_lossy(&out.stderr));
     assert!(
-        stdout.contains("readonly"),
+        stdout.contains("survey"),
         "the narrowed level is the one in force, and info says so: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("readonly"),
+        "an alias is a way in, not a second name to report back: {}",
         stdout
     );
 

@@ -1179,21 +1179,21 @@ fn a_line_break_in_a_folder_name_never_reaches_the_server() {
 
 #[test]
 #[ignore = "needs an IMAP server: make tests-wire"]
-fn readonly_changes_nothing_on_a_real_server() {
+fn survey_changes_nothing_on_a_real_server() {
     // The access level is enforced in ImapClient, above the backend, so
     // it has to hold with a real socket underneath it too.
     let mut c = client();
-    let (_token, uids) = fixture(&mut c, "readonly", 1);
+    let (_token, uids) = fixture(&mut c, "survey", 1);
     let uid = uids[0];
 
     let mut ro = connect_with(Config {
-        access: AccessLevel::ReadOnly,
+        access: AccessLevel::Survey,
         ..config()
     });
     let err = ro
         .store_flags("INBOX", &[uid], &["\\Flagged".to_string()], &[])
-        .expect_err("readonly must refuse");
-    assert!(err.to_string().contains("readonly"), "{}", err);
+        .expect_err("survey must refuse");
+    assert!(err.to_string().contains("survey"), "{}", err);
 
     // ... and reading still works, without marking anything seen.
     assert!(ro.read_message("INBOX", uid, false).is_ok());

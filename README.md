@@ -5,7 +5,7 @@ Designed for programmatic / AI use.
 
 **Reads change nothing**: they use `BODY.PEEK[]`, so fetching a message
 does not even mark it `\Seen`. What it may change is capped by
-`access-level` in the config — `readonly`, `organize` (the default),
+`access-level` in the config — `survey`, `organize` (the default),
 `restructure` or `full` — and every changing command says which level it
 needs. See [Access level](#access-level).
 
@@ -21,7 +21,7 @@ The smallest config that works is four fields:
     "server": "imap.example.com",
     "username": "user@example.com",
     "password": "secret",
-    "access-level": "readonly"
+    "access-level": "survey"
 }
 ```
 
@@ -288,7 +288,7 @@ flag        = "seen" | "answered" | "flagged" | "deleted" | "draft" ;
                              With --wire, the form a listing prints:
                              "\Seen", "\Answered", ... *)
 keyword     = atom ;   (* non-ASCII is encoded to modified UTF-7     *)
-level       = "readonly" | "organize" | "restructure" | "full" ;
+level       = "survey" | "organize" | "restructure" | "full" ;
 command     = one row of the Commands table above ;
 ```
 
@@ -979,7 +979,7 @@ command.
 - **`-A, --all-folders`** — every selectable mailbox of the account;
   exactly `-f '*'`.
 - **`--access-level <LEVEL>`** — narrow what this run may change:
-  `readonly`, `organize`, `restructure`, `full`. It can only lower what
+  `survey`, `organize`, `restructure`, `full`. It can only lower what
   the config allows, never raise it. See
   [Access level](#access-level).
 - **`-S, --sort <SPEC>`** — sort `search`/`unread` results.
@@ -1083,7 +1083,7 @@ password of `30s` stays the text `30s` rather than becoming a number.
 | `max`          | `0`        | Cap on search results; `0` is no cap. Overridden by `-M/--max` on the command line                                        |
 | `sort`         | `null`     | Default sort spec for `search`/`unread` (same format as `-S/--sort`); overridden by `-S` on the command line              |
 | `delimiter`    | `null`     | The hierarchy delimiter `info` reports, overriding the server's own answer. Advisory only: nothing rewrites a folder name |
-| `access-level` | `organize` | How much this tool may change: `readonly`, `organize`, `restructure` or `full` — see [Access level](#access-level)        |
+| `access-level` | `organize` | How much this tool may change: `survey`, `organize`, `restructure` or `full` — see [Access level](#access-level)        |
 | `mock`         | `false`    | Answer from the in-memory mock backend instead of connecting. Development builds only: a released binary carries no mock and refuses the command rather than reaching for the account |
 
 ### Several accounts in one file
@@ -1094,7 +1094,7 @@ profile overrides what it names:
 
 ```nginx
 max          = 25          # shared by every profile
-access-level = readonly
+access-level = survey
 default      = "work"      # used when -p names none
 
 work {
@@ -1128,7 +1128,7 @@ accounts share a host or a password; `username` almost never.
 `access-level` above the shared one, not only lower it:
 
 ```nginx
-access-level = readonly        # the default for every profile...
+access-level = survey          # the default for every profile...
 risky { username = "u"
         access-level = full }  # ...and this one is full
 ```
@@ -1156,7 +1156,7 @@ change. The levels are a ladder, each permitting everything below it:
 
 | Level         | Permits                                                                              |
 | ------------- | ------------------------------------------------------------------------------------ |
-| `readonly`    | Nothing changes. Reads use `BODY.PEEK[]`, so even `\Seen` stays as it was            |
+| `survey`      | Nothing changes. Reads use `BODY.PEEK[]`, so even `\Seen` stays as it was            |
 | `organize`    | *(default)* Read, plus set and clear flags and tags, and move mail to another folder |
 | `restructure` | That, plus the folder tree: `folder create`, `rename`, `subscribe`, `unsubscribe`    |
 | `full`        | Everything the tool can do: setting `\Deleted`, `expunge`, `append`, `part strip`, and deleting a mailbox |
@@ -1172,14 +1172,22 @@ and where the gate lives.
 Renaming INBOX is refused at *every* level, `full` included.
 
 `--access-level LEVEL` narrows a single run. It can only lower what the
-config allows, never raise it, so a config saying `readonly` cannot be
+config allows, never raise it, so a config saying `survey` cannot be
 talked out of it on the command line.
 
-One older spelling is still accepted wherever a level is named:
-`read-only` for `readonly`. (`non-destructive` was a second name for
-`organize` and is gone: one level, one name. A config still saying it
-is refused by name rather than quietly defaulting.) The config key is
-read as either `access-level` or `access_level`.
+The bottom rung is named for what a run at it *does* — it surveys —
+which is what keeps the ladder in one register: `survey`, `organize`,
+`restructure` say what the run may do, where `readonly` was the one
+name describing a restriction instead.
+
+`readonly` and `read-only` were what it was called before that, and
+both still read wherever a level is named. They are ways in, not second
+names: `info` and the JSON report the level as `survey` however it was
+written, so anything matching on the reported level matches one string.
+(`non-destructive` was a second name for `organize` and is gone: one
+level, one name. A config still saying it is refused by name rather
+than quietly defaulting.) The config key is read as either
+`access-level` or `access_level`.
 
 The two places differ in how forgiving they are, and deliberately.
 `--access-level` trims and lowercases what it is given, so `FULL` and
@@ -1192,7 +1200,7 @@ does not get to guess at it.
 A typo in the *key* fails the file for the same reason. An unrecognised
 key is refused (the error names it and lists the ones that exist)
 rather than being dropped, because a dropped key leaves its setting at
-the default — and `acess-level = readonly` silently defaulting to
+the default — and `acess-level = survey` silently defaulting to
 `organize` would widen exactly what the line was written to narrow.
 
 This is not a security boundary: the same account can be reached by any

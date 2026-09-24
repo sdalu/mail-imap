@@ -351,9 +351,9 @@ and says so under `-d`.
 ### Access level
 
 `Config::access` (`access-level` in the config file) is an ordered
-ladder — `readonly` < `organize` < `restructure` < `full` — and the
+ladder — `survey` < `organize` < `restructure` < `full` — and the
 command line may
-only narrow it, never widen it, so a config that says `readonly` cannot
+only narrow it, never widen it, so a config that says `survey` cannot
 be argued out of it by an argument list.
 
 Where the line falls between `restructure` and `full` is worth stating,
@@ -380,13 +380,13 @@ to the same rule as the server and the refusals are testable offline.
 
 Two asymmetries are deliberate:
 
-- **Clearing is freer than setting.** Above `readonly` any flag may be
+- **Clearing is freer than setting.** Above `survey` any flag may be
   cleared, including `\Deleted`: taking a flag off a message loses an
   annotation, never a message, and un-deleting is a rescue.
 - **`\Deleted` is the only flag `organize` refuses to set.** `\Draft`
   is permitted — it marks a composition, it cannot cost anything.
 
-The two rungs above `readonly` draw different lines. `organize` is
+The two rungs above `survey` draw different lines. `organize` is
 about messages: nothing is lost, and the folder tree is left exactly as
 it was found — it moves mail into folders that exist, it does not make
 them. `restructure` is about the tree: `create_folder`,
@@ -1097,7 +1097,7 @@ Two narrowings are deliberate:
 
 **An unparseable config is fatal, never a default.** Falling back to
 `Config::default()` would widen what a config meant to narrow: a typo
-in `readonly` would silently become `organize`, which may change mail.
+in `survey` would silently become `organize`, which may change mail.
 The one exception is `--mock`, where no server is reached and the
 whole config is optional — and there `info` reports which file it
 actually read, or that it read none.
@@ -1302,7 +1302,7 @@ fixtures depend on.
 mock backend (no network). What it proves, and where:
 
 - **the access-level ladder refuses what it says it refuses** —
-  `readonly` changes nothing, `organize` sets anything but `\Deleted`
+  `survey` changes nothing, `organize` sets anything but `\Deleted`
   and clears even that, `organize` leaves the folder tree alone,
   `restructure` changes the tree and still loses no message, renaming
   INBOX is refused at every level. Each refusal has a test that feeds it

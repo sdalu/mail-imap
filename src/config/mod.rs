@@ -49,8 +49,15 @@ impl AuthMethod {
 pub enum AccessLevel {
     /// Change nothing at all. Reads use `BODY.PEEK[]`, so even `\Seen`
     /// stays as it was.
-    #[serde(rename = "readonly", alias = "read-only")]
-    ReadOnly,
+    ///
+    /// Named for what the level is *for* rather than for what it
+    /// withholds, which is also what keeps the ladder in one register:
+    /// `survey`, `organize`, `restructure` are what a run does, and
+    /// `readonly` was the one rung describing a restriction instead.
+    /// The older spellings still read, and only read: `survey` is what
+    /// is reported back.
+    #[serde(rename = "survey", alias = "readonly", alias = "read-only")]
+    Survey,
     /// Read, plus the changes that keep every message: set and clear
     /// flags and tags, and move mail to another folder. `\Deleted`
     /// cannot be *set* here — it is the one flag whose point is removal
@@ -121,10 +128,10 @@ impl AccessLevel {
     }
 
     /// May this flag be *set*? Clearing is unrestricted above
-    /// `ReadOnly`: taking a flag off a message never loses the message.
+    /// `Survey`: taking a flag off a message never loses the message.
     pub fn may_set(self, flag: &str) -> bool {
         match self {
-            AccessLevel::ReadOnly => false,
+            AccessLevel::Survey => false,
             AccessLevel::Organize | AccessLevel::Restructure => {
                 !flag.eq_ignore_ascii_case("\\Deleted")
             }
@@ -135,7 +142,7 @@ impl AccessLevel {
     /// The name this level is written with in the config file.
     pub fn as_str(self) -> &'static str {
         match self {
-            AccessLevel::ReadOnly => "readonly",
+            AccessLevel::Survey => "survey",
             AccessLevel::Organize => "organize",
             AccessLevel::Restructure => "restructure",
             AccessLevel::Full => "full",
@@ -145,12 +152,12 @@ impl AccessLevel {
     /// Parse a level as written on the command line.
     pub fn parse(name: &str) -> Result<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
-            "readonly" | "read-only" => Ok(AccessLevel::ReadOnly),
+            "survey" | "readonly" | "read-only" => Ok(AccessLevel::Survey),
             "organize" => Ok(AccessLevel::Organize),
             "restructure" => Ok(AccessLevel::Restructure),
             "full" => Ok(AccessLevel::Full),
             other => bail!(
-                "unknown access level '{}' (readonly, organize, restructure or full)",
+                "unknown access level '{}' (survey, organize, restructure or full)",
                 other
             ),
         }
@@ -624,7 +631,7 @@ mod tests {
         assert!(!c.insecure, "certificates are verified");
         assert_eq!(c.folder, "INBOX", "default folder");
         assert_eq!(c.max, 0, "no cap: a search returns what it matched");
-        assert_eq!(c.access, AccessLevel::Organize, "neither readonly nor full");
+        assert_eq!(c.access, AccessLevel::Organize, "neither survey nor full");
         assert_eq!(c.auth, AuthMethod::Login);
         assert!(!c.mock, "the real backend unless asked otherwise");
 
@@ -697,15 +704,15 @@ mod tests {
 
     #[test]
     fn levels_are_ordered_from_least_to_most_permissive() {
-        assert!(AccessLevel::ReadOnly < AccessLevel::Organize);
+        assert!(AccessLevel::Survey < AccessLevel::Organize);
         assert!(AccessLevel::Organize < AccessLevel::Restructure);
         assert!(AccessLevel::Restructure < AccessLevel::Full);
         assert_eq!(AccessLevel::default(), AccessLevel::Organize);
     }
 
     #[test]
-    fn readonly_permits_nothing() {
-        let level = AccessLevel::ReadOnly;
+    fn survey_permits_nothing() {
+        let level = AccessLevel::Survey;
         assert!(!level.may_store_flags());
         assert!(!level.may_set("\\Seen"));
         assert!(!level.may_set("invoice"));
@@ -724,7 +731,7 @@ mod tests {
 
     #[test]
     fn organize_leaves_the_folder_tree_alone() {
-        assert!(!AccessLevel::ReadOnly.may_change_folders());
+        assert!(!AccessLevel::Survey.may_change_folders());
         assert!(
             !AccessLevel::Organize.may_change_folders(),
             "it moves mail into folders that exist; it does not make them"
@@ -751,7 +758,7 @@ mod tests {
     fn only_full_may_expunge() {
         // Same rung as setting \Deleted itself: marking a message for
         // removal and removing it are both destruction.
-        assert!(!AccessLevel::ReadOnly.may_expunge());
+        assert!(!AccessLevel::Survey.may_expunge());
         assert!(!AccessLevel::Organize.may_expunge());
         assert!(!AccessLevel::Restructure.may_expunge());
         assert!(AccessLevel::Full.may_expunge());
@@ -759,7 +766,7 @@ mod tests {
 
     #[test]
     fn only_full_may_append() {
-        assert!(!AccessLevel::ReadOnly.may_append());
+        assert!(!AccessLevel::Survey.may_append());
         assert!(!AccessLevel::Organize.may_append());
         assert!(!AccessLevel::Restructure.may_append());
         assert!(AccessLevel::Full.may_append());
@@ -767,8 +774,16 @@ mod tests {
 
     #[test]
     fn levels_parse_under_both_spellings() {
-        assert_eq!(AccessLevel::parse("readonly").unwrap(), AccessLevel::ReadOnly);
-        assert_eq!(AccessLevel::parse("read-only").unwrap(), AccessLevel::ReadOnly);
+        assert_eq!(AccessLevel::parse("survey").unwrap(), AccessLevel::Survey);
+        assert_eq!(AccessLevel::parse(" SURVEY ").unwrap(), AccessLevel::Survey);
+        // `readonly` and `read-only` were what this level was called
+        // before the ladder was put in one register, and they still
+        // read.
+        assert_eq!(AccessLevel::parse("readonly").unwrap(), AccessLevel::Survey);
+        assert_eq!(AccessLevel::parse("read-only").unwrap(), AccessLevel::Survey);
+        // An alias is a way in, not a second name to report back: one
+        // level answers with one spelling whichever way it was written.
+        assert_eq!(AccessLevel::parse("readonly").unwrap().as_str(), "survey");
         assert_eq!(AccessLevel::parse("ORGANIZE").unwrap(), AccessLevel::Organize);
         // `non-destructive` was an older spelling of `organize` and is
         // gone: one level, one name. It is refused like any other
@@ -791,7 +806,7 @@ mod tests {
             r#"{"server":"s","username":"u","password":"p","access-level":"readonly"}"#,
         )
         .expect("parse");
-        assert_eq!(with.access, AccessLevel::ReadOnly);
+        assert_eq!(with.access, AccessLevel::Survey);
         let without: Config =
             serde_json::from_str(r#"{"server":"s","username":"u","password":"p"}"#)
                 .expect("parse");
@@ -837,21 +852,30 @@ mod tests {
         )
         .expect("JSON config should parse as UCL");
         assert_eq!(cfg.server, "s");
-        assert_eq!(cfg.access, AccessLevel::ReadOnly);
+        assert_eq!(cfg.access, AccessLevel::Survey);
         assert_eq!(cfg.max, 7);
     }
 
     #[test]
     fn ucl_underscore_alias_and_older_level_spellings_still_read() {
-        // `access_level` for `access-level`, and `read-only` for
-        // `readonly`: the spellings that remain. (`non-destructive`
-        // was dropped -- one level, one name.)
+        // `access_level` for `access-level`, and `readonly` /
+        // `read-only` for `survey`: the spellings that remain.
+        // (`non-destructive` was dropped -- one level, one name.)
         let cfg = parse_one(
             "server = \"s\"\nusername = \"u\"\npassword = \"p\"\n\
              access_level = read-only\n",
         )
         .expect("parse");
-        assert_eq!(cfg.access, AccessLevel::ReadOnly);
+        assert_eq!(cfg.access, AccessLevel::Survey);
+        // serde reads the alias too, which is a separate path from
+        // `AccessLevel::parse` and so needs its own line: `--access-level
+        // survey` goes through one, `access-level = survey` the other.
+        let cfg = parse_one(
+            "server = \"s\"\nusername = \"u\"\npassword = \"p\"\n\
+             access-level = survey\n",
+        )
+        .expect("parse");
+        assert_eq!(cfg.access, AccessLevel::Survey);
     }
 
     #[test]
@@ -1026,7 +1050,7 @@ mod tests {
         assert_eq!(work.access, AccessLevel::Organize, "the profile wins");
         let (home, _) = parse_config(TWO, Some("home")).expect("parse");
         assert_eq!(home.max, 7);
-        assert_eq!(home.access, AccessLevel::ReadOnly, "shared default stands");
+        assert_eq!(home.access, AccessLevel::Survey, "shared default stands");
     }
 
     #[test]
