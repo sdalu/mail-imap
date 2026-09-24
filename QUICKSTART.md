@@ -9,9 +9,10 @@ everything else is capped by an `access-level` in the config
 
 A real account needs four fields: where to connect, who as, and how
 much mail-imap may change. The config is [UCL][ucl] -- comments, bare
-keys, no commas, no outer braces. Save this as `myaccount.conf` (or
-point `-c` / `$MAIL_IMAP_CONFIG` at it from anywhere, or drop it at
-`~/.config/mail-imap.conf` and pass nothing):
+keys, no commas, no outer braces. Save it as
+`~/.config/mail-imap.conf`, which is where mail-imap looks when no
+config is named (or keep it anywhere and point `-c` /
+`$MAIL_IMAP_CONFIG` at it):
 
 ```nginx
 server   = "imap.example.com"
@@ -39,9 +40,9 @@ permits.
 Then a first query -- list, search, read:
 
 ```bash
-$ mail-imap -c myaccount.conf folder list
-$ mail-imap -c myaccount.conf search 'TEXT invoice'
-$ mail-imap -c myaccount.conf read 5
+$ mail-imap folder list
+$ mail-imap search 'TEXT invoice'
+$ mail-imap read 5
 ```
 
 `info` is the one to run first, though: it reports what this run may
@@ -50,7 +51,7 @@ delimiter, and which wire path each operation will take on this
 server.
 
 ```bash
-$ mail-imap -c myaccount.conf info
+$ mail-imap info
 ```
 
 A config that will not parse is reported before anything connects --

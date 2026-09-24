@@ -30,8 +30,8 @@ capabilities, with none of the quirks the degradation ladders in
 wire still owes a real account.
 
 - [ ] Did this round change what goes on the wire? Then `make tests-wire`
-      passes, *and* it was run against a real account (`-c incal.conf`,
-      `-d` to see the exchange) with the commands named in the commit.
+      passes, *and* it was run against a real account (`-d` to see the
+      exchange) with the commands named in the commit.
 - [ ] Did it change a mutating path (`flag`, `tag` — the only two)? Then
       it was run against a real account on a message that can be spared.
 - [ ] Did it add an operation that changes the server? Then its gate is

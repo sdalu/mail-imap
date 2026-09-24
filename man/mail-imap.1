@@ -832,31 +832,31 @@ a JSON object with one key,
 .Sh EXAMPLES
 What this run can do, and what the server is:
 .Bd -literal -offset indent
-$ mail-imap -c incal.conf info
+$ mail-imap info
 .Ed
 .Pp
 List folders, then read one message:
 .Bd -literal -offset indent
-$ mail-imap -c incal.conf folder list
-$ mail-imap -c incal.conf -f INBOX read 12345
+$ mail-imap folder list
+$ mail-imap -f INBOX read 12345
 .Ed
 .Pp
 Search, capped at 200 results, most recent first:
 .Bd -literal -offset indent
-$ mail-imap -c incal.conf -f INBOX -M 200 search ALL
+$ mail-imap -f INBOX -M 200 search ALL
 .Ed
 .Pp
 File the 20 newest messages of INBOX into Archive/2026 (needs access
 level
 .Ic organize ) :
 .Bd -literal -offset indent
-$ mail-imap -c incal.conf -f INBOX move last:20 Archive/2026
+$ mail-imap -f INBOX move last:20 Archive/2026
 .Ed
 .Pp
 Set and list flags:
 .Bd -literal -offset indent
-$ mail-imap -c incal.conf -f INBOX flag add 12345 67890 flagged
-$ mail-imap -c incal.conf -f INBOX flag list --wire 12345
+$ mail-imap -f INBOX flag add 12345 67890 flagged
+$ mail-imap -f INBOX flag list --wire 12345
 .Ed
 .Pp
 The keywords with an agreed meaning are a table in the binary, so this

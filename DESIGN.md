@@ -1376,8 +1376,8 @@ are in `CHECKLIST.md`.
 To exercise the real backend manually:
 
 ```bash
-cargo run --release -- -c incal.conf folder list
-cargo run --release -- -c incal.conf -f INBOX search "SINCE 01-Jan-2026"
+cargo run --release -- folder list
+cargo run --release -- -f INBOX search "SINCE 01-Jan-2026"
 ```
 
 ## Output

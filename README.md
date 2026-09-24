@@ -25,9 +25,12 @@ The smallest config that works is four fields:
 }
 ```
 
+Put it at `~/.config/mail-imap.conf` and nothing has to name it; `-c
+PATH` or `$MAIL_IMAP_CONFIG` names one kept elsewhere.
+
 ```bash
-mail-imap -c myaccount.conf info
-mail-imap -c myaccount.conf -f INBOX search UNSEEN
+mail-imap info
+mail-imap -f INBOX search UNSEEN
 ```
 
 `info` first is the habit worth forming: it reports what this run may
@@ -297,9 +300,9 @@ wire path each operation will take here. It connects, asks `CAPABILITY`
 and `LIST`, and changes nothing.
 
 ```console
-$ mail-imap -c incal.conf info
+$ mail-imap info
 mail-imap 0.4.0 (real backend)
-  config      incal.conf
+  config      /home/you/.config/mail-imap.conf
   account     user@example.com@imap.example.com:993 (implicit TLS)
   auth        login
 
@@ -363,7 +366,8 @@ What each block is for:
 
 ```json
 {"tool":{"name":"mail-imap","version":"0.4.0","backend":"real"},
- "config":{"path":"incal.conf","server":"imap.example.com","port":993,
+ "config":{"path":"/home/you/.config/mail-imap.conf",
+           "server":"imap.example.com","port":993,
            "tls":"implicit","insecure":false,"auth":"login",
            "username":"user@example.com"},
  "access":{"effective":"organize","configured":"organize",
@@ -410,18 +414,18 @@ the thing no UID range can express, since UIDs are sparse:
 
 ```bash
 # the 5 newest messages (the 5 highest UIDs) of the folder
-mail-imap --config incal.conf -f INBOX read last:5
+mail-imap -f INBOX read last:5
 
 # the 5 oldest, and a mix with plain UIDs
-mail-imap --config incal.conf -f INBOX read first:5
-mail-imap --config incal.conf -f INBOX read 12345,last:3
+mail-imap -f INBOX read first:5
+mail-imap -f INBOX read 12345,last:3
 
 # a count names no UID, so an unqualified one is not ambiguous across
 # folders: it means N per selected folder
-mail-imap --config incal.conf -f INBOX,Archive flag list last:5
+mail-imap -f INBOX,Archive flag list last:5
 
 # ... and a qualified one can ask a different count of each
-mail-imap --config incal.conf read 'INBOX::last:10' 'Archive::first:2'
+mail-imap read 'INBOX::last:10' 'Archive::first:2'
 ```
 
 They count by UID, which ascends with arrival — they say nothing about
@@ -577,9 +581,9 @@ different atom. JSON always carries the wire form.
 
 ### Examples
 
-Every line below is a complete command. They assume a config at
-`incal.conf`; drop `--config` to search `$MAIL_IMAP_CONFIG`,
-`~/.config/mail-imap.conf` and `/etc/mail-imap.conf` in turn.
+Every line below is a complete command. They name no config, so each
+searches `$MAIL_IMAP_CONFIG`, `~/.config/mail-imap.conf` and
+`/etc/mail-imap.conf` in turn; `-c PATH` names one outright.
 
 #### Where am I, and what may this run do?
 
@@ -588,33 +592,33 @@ hierarchy delimiter to build folder paths with, the special-use
 mailboxes, and the wire path each operation takes on this server.
 
 ```bash
-mail-imap --config incal.conf info
-mail-imap --config incal.conf -j info
+mail-imap info
+mail-imap -j info
 ```
 
 #### Folders
 
 ```bash
 # List folders -- just the names, so they can be typed back into -f
-mail-imap --config incal.conf folder list
+mail-imap folder list
 
 # ... with each one's hierarchy delimiter and LIST attributes
 # (\Sent, \Junk, \Noinferiors, ...)
-mail-imap --config incal.conf folder list -l
+mail-imap folder list -l
 
 # Change the folder tree (needs "access-level": "restructure")
-mail-imap --config incal.conf folder create Archive/2026
-mail-imap --config incal.conf folder create Archive --use archive
-mail-imap --config incal.conf folder rename Spam Junk
-mail-imap --config incal.conf folder subscribe Archive/2026
+mail-imap folder create Archive/2026
+mail-imap folder create Archive --use archive
+mail-imap folder rename Spam Junk
+mail-imap folder subscribe Archive/2026
 
 # ... and just the ones you are subscribed to
-mail-imap --config incal.conf folder list --subscribed
+mail-imap folder list --subscribed
 
 # Delete a mailbox (needs "access-level": "full"); --force is what it
 # takes to destroy one that still holds messages
-mail-imap --config incal.conf folder delete Archive/2025
-mail-imap --config incal.conf folder delete Archive/2025 --force
+mail-imap folder delete Archive/2025
+mail-imap folder delete Archive/2025 --force
 ```
 
 #### Searching
@@ -624,9 +628,9 @@ The query is any IMAP `SEARCH` expression — `UNSEEN`, `FROM bob`,
 matches every message; for bare UIDs use `uid` instead.
 
 ```bash
-mail-imap --config incal.conf search "SINCE 01-Jan-2026"
-mail-imap --config incal.conf -f INBOX search ALL
-mail-imap --config incal.conf -f INBOX -M 200 search ALL   # raise the cap for this run
+mail-imap search "SINCE 01-Jan-2026"
+mail-imap -f INBOX search ALL
+mail-imap -f INBOX -M 200 search ALL   # raise the cap for this run
 ```
 
 `-f` is repeatable and comma-separated, and both spellings mean the
@@ -635,8 +639,8 @@ iterates over the folders and aggregates; the `-M`/`--max` cap applies
 to the total, not to each folder.
 
 ```bash
-mail-imap --config incal.conf -f INBOX -f "Sent Items" search UNSEEN
-mail-imap --config incal.conf -f "INBOX,Sent Items" search UNSEEN
+mail-imap -f INBOX -f "Sent Items" search UNSEEN
+mail-imap -f "INBOX,Sent Items" search UNSEEN
 ```
 
 `-f` also takes IMAP `LIST` patterns: `S*` matches every mailbox
@@ -644,8 +648,8 @@ starting with S, `Archive/*` crosses the hierarchy delimiter where
 `Archive/%` would not. `-A`/`--all-folders` is shorthand for `-f '*'`.
 
 ```bash
-mail-imap --config incal.conf -f 'S*' search UNSEEN
-mail-imap --config incal.conf -A search UNSEEN
+mail-imap -f 'S*' search UNSEEN
+mail-imap -A search UNSEEN
 ```
 
 Sorting applies to `search` and `unread`, most recent first by default.
@@ -653,8 +657,8 @@ Server-side `UID SORT` (RFC 5256) where the server advertises `SORT`,
 client-side otherwise.
 
 ```bash
-mail-imap --config incal.conf -S -date -f INBOX search ALL
-mail-imap --config incal.conf -S "subject,-size" -f INBOX search UNSEEN
+mail-imap -S -date -f INBOX search ALL
+mail-imap -S "subject,-size" -f INBOX search UNSEEN
 ```
 
 #### Reading
@@ -665,12 +669,12 @@ folder-qualified selection reaches another folder without touching
 `-f`.
 
 ```bash
-mail-imap --config incal.conf -f INBOX read 12345
-mail-imap --config incal.conf -f INBOX read 12345 67890
-mail-imap --config incal.conf -f INBOX read 12345,67890   # same thing
-mail-imap --config incal.conf -f INBOX read 1-50
-mail-imap --config incal.conf -f INBOX read '*'
-mail-imap --config incal.conf read Archive::12345 "Sent Items::1-5"
+mail-imap -f INBOX read 12345
+mail-imap -f INBOX read 12345 67890
+mail-imap -f INBOX read 12345,67890   # same thing
+mail-imap -f INBOX read 1-50
+mail-imap -f INBOX read '*'
+mail-imap read Archive::12345 "Sent Items::1-5"
 ```
 
 #### Moving mail
@@ -679,9 +683,9 @@ The folder is named last, as `mv` has it. Needs `"access-level":
 "organize"`, and the target folder has to exist already.
 
 ```bash
-mail-imap --config incal.conf move 12345 Archive/2026
-mail-imap --config incal.conf -f INBOX move last:20 Archive/2026
-mail-imap --config incal.conf move 'INBOX::1-5' 'Spam::9' Trash
+mail-imap move 12345 Archive/2026
+mail-imap -f INBOX move last:20 Archive/2026
+mail-imap move 'INBOX::1-5' 'Spam::9' Trash
 ```
 
 #### Copying mail
@@ -691,8 +695,8 @@ argument order, the same `organize` level, and the originals stay where
 they are.
 
 ```bash
-mail-imap --config incal.conf copy 12345 Archive/2026
-mail-imap --config incal.conf -f INBOX copy last:20 Archive/2026
+mail-imap copy 12345 Archive/2026
+mail-imap -f INBOX copy last:20 Archive/2026
 ```
 
 Unlike `move`, `copy` does **not** refuse a target equal to the source
@@ -714,7 +718,7 @@ if none of the named messages carries `\Deleted` it refuses and says
 what marks them:
 
 ```console
-$ mail-imap -c incal.conf expunge 12345
+$ mail-imap expunge 12345
 Error: none of the given message(s) are marked \Deleted: 'expunge' only
 removes messages already marked for removal -- 'flag add <selection>
 deleted' is what marks them
@@ -731,8 +735,8 @@ There is deliberately no form that expunges everything marked
 the UIDs, `expunge` takes them.
 
 ```bash
-mail-imap --config incal.conf -f INBOX flag add 12345 deleted
-mail-imap --config incal.conf -f INBOX expunge 12345
+mail-imap -f INBOX flag add 12345 deleted
+mail-imap -f INBOX expunge 12345
 ```
 
 #### Putting a message in (`append`)
@@ -764,9 +768,9 @@ the new UID is reported; when it does not, `append` says so rather than
 leaving you to guess what was created.
 
 ```bash
-mail-imap --config incal.conf append Drafts /tmp/draft.eml
-mail-imap --config incal.conf append Archive/2026 /tmp/old.eml --flag seen
-mail-imap --config incal.conf append Drafts - --date 2026-09-22T18:40:11+02:00
+mail-imap append Drafts /tmp/draft.eml
+mail-imap append Archive/2026 /tmp/old.eml --flag seen
+mail-imap append Drafts - --date 2026-09-22T18:40:11+02:00
 ```
 
 #### Counts, UIDs and threads
@@ -774,17 +778,17 @@ mail-imap --config incal.conf append Drafts - --date 2026-09-22T18:40:11+02:00
 ```bash
 # Message counts / status (every selectable mailbox with no -f/-A, or
 # the selected folder(s))
-mail-imap --config incal.conf count
-mail-imap --config incal.conf -f INBOX count
-mail-imap --config incal.conf -f INBOX status   # "status" is an alias of "count"
+mail-imap count
+mail-imap -f INBOX count
+mail-imap -f INBOX status   # "status" is an alias of "count"
 
 # List the message UIDs of the selected folder(s), one block per folder
-mail-imap --config incal.conf -f INBOX uid
-mail-imap --config incal.conf -A uid
+mail-imap -f INBOX uid
+mail-imap -A uid
 
 # List unread emails of the selected folder(s)
-mail-imap --config incal.conf -f INBOX unread
-mail-imap --config incal.conf -f INBOX -f Archive unread
+mail-imap -f INBOX unread
+mail-imap -f INBOX -f Archive unread
 ```
 
 Threading needs no server `THREAD` extension: without one the tool
@@ -792,7 +796,7 @@ reads the Message-ID / References / In-Reply-To headers of the
 folder's messages as raw header literals and reconstructs the thread.
 
 ```bash
-mail-imap --config incal.conf -f INBOX thread 12345
+mail-imap -f INBOX thread 12345
 ```
 
 #### MIME parts
@@ -829,15 +833,15 @@ the name of a file in the working directory. `-o` is unfiltered: there
 the caller named the path.
 
 ```bash
-mail-imap --config incal.conf -f INBOX part list 12345
-mail-imap --config incal.conf -f INBOX part list 12345 67890
-mail-imap --config incal.conf -f INBOX part save 12345 2 -o /tmp/invoice.pdf
+mail-imap -f INBOX part list 12345
+mail-imap -f INBOX part list 12345 67890
+mail-imap -f INBOX part save 12345 2 -o /tmp/invoice.pdf
 
 # every part of one message, into a directory that already exists
-mail-imap --config incal.conf -f INBOX part save 12345 --all -o /tmp/parts
+mail-imap -f INBOX part save 12345 --all -o /tmp/parts
 
 # one part on stdout, for piping
-mail-imap --config incal.conf -f INBOX part save 12345 2 -o -
+mail-imap -f INBOX part save 12345 2 -o -
 ```
 
 #### Stripping an attachment (`part strip`)
@@ -875,15 +879,15 @@ write first, delete last, so a failure in between leaves both and says
 so, rather than losing the message.
 
 ```console
-$ mail-imap -c incal.conf -f Archive part strip 12345 3
+$ mail-imap -f Archive part strip 12345 3
 Stripped part 3 (application/pdf, invoice-2026-01.pdf), 4194304 bytes
   sha256 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
 UID 12345 became UID 20881 in 'Archive' (4213770 -> 19664 bytes)
 ```
 
 ```bash
-mail-imap --config incal.conf -f Archive part strip 12345 3
-mail-imap --config incal.conf -f Archive part strip 12345 2 3
+mail-imap -f Archive part strip 12345 3
+mail-imap -f Archive part strip 12345 2 3
 ```
 
 #### Setting flags and tags
@@ -893,20 +897,20 @@ mail-imap --config incal.conf -f Archive part strip 12345 2 3
 owns user-defined keywords and refuses system flags.
 
 ```bash
-mail-imap --config incal.conf -f INBOX flag list 12345 67890
-mail-imap --config incal.conf -f INBOX flag add 12345 67890 flagged
-mail-imap --config incal.conf -f INBOX flag remove 12345 seen
+mail-imap -f INBOX flag list 12345 67890
+mail-imap -f INBOX flag add 12345 67890 flagged
+mail-imap -f INBOX flag remove 12345 seen
 
-mail-imap --config incal.conf -f INBOX tag list 12345
-mail-imap --config incal.conf -f INBOX tag add 12345 invoice '$Important'
-mail-imap --config incal.conf -f INBOX tag remove 12345 invoice
+mail-imap -f INBOX tag list 12345
+mail-imap -f INBOX tag add 12345 invoice '$Important'
+mail-imap -f INBOX tag remove 12345 invoice
 ```
 
 A listing prints what `add` takes back; `--wire` prints the atoms the
 server sent, which `add --wire` takes back in turn.
 
 ```bash
-mail-imap --config incal.conf -f INBOX flag list --wire 12345
+mail-imap -f INBOX flag list --wire 12345
 ```
 
 The keywords with an agreed meaning — the IANA registry, then what
@@ -921,7 +925,7 @@ mail-imap tag known
 
 ```bash
 # One compact JSON object on stdout
-mail-imap --config incal.conf -j -f INBOX search "SINCE 01-Jan-2026"
+mail-imap -j -f INBOX search "SINCE 01-Jan-2026"
 ```
 
 
