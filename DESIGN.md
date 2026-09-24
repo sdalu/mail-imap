@@ -24,7 +24,7 @@ if config.mock { MockClient::connect(cfg) } else { RealClient::connect(cfg) }
 
 ## Real backend (`real.rs`)
 
-Uses the `imap` crate — the fork under `../forks/rust-imap`, a 3.0
+Uses the `imap` crate — the fork under `forks/rust-imap`, a 3.0
 alpha — over `native-tls`.
 
 ### Connection
@@ -216,7 +216,7 @@ sub-tree containing the requested UID is flattened to its UIDs. This is one
 round trip instead of fetching every message's headers. The parser for the
 nested `* THREAD (…)` response is provided by the bundled `imap-proto` fork
 and the `Session::thread` / `Session::uid_thread` commands by the `imap`
-fork (see `../forks`, pending upstream releases).
+fork (see `forks/`, pending upstream releases).
 
 On servers that do not advertise THREAD — or if the THREAD command fails,
 returns no thread for the UID, or the connection is lost — the tool falls

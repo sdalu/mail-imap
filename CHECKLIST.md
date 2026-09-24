@@ -101,9 +101,9 @@ tests notice if the code stopped being right?*
 
     cargo mutants --file src/imap/mime.rs --in-place -F '<functions>'
 
-`--in-place` is required here (CLAUDE.md says why). Commit first: the
-run mutates the working tree and restores it, so `git checkout --
-mail-imap/src` is the recovery if it is interrupted -- and check `git
+`--in-place` is what works here (CLAUDE.md says where the reason lives). Commit first: the
+run mutates the working tree and restores it, so `git checkout -- src`
+is the recovery if it is interrupted -- and check `git
 diff` when it finishes too, because a run that exits 0 can still leave
 one mutant behind (one here left `required_capability` returning
 `Some("")`), and because a mutated run can *write* things a normal one
@@ -228,8 +228,9 @@ they want opposite answers:
       `info` reports `threading  server`.)
 
       The debt is worth re-reading each round rather than settling in:
-      the forks are rebased by hand, they are why a checkout without
-      `../forks` does not build, and their own bugs are ours to carry —
+      the forks are rebased by hand, they are why a clone without
+      `--recurse-submodules` does not build, and their own bugs are
+      ours to carry —
       the CRLF hole that let a folder name inject an IMAP command was
       in the fork's `quote!`, not in this tree.
 
@@ -239,8 +240,18 @@ they want opposite answers:
       does not, and a round in the middle of a longer piece of work
       should wait for the end of it rather than move twice — a number
       that moves twice for one body of work tells a reader less than
-      one that moves once. It lives in one file: `Cargo.toml`. There is no `make
-      tag`: the tags belong to the AiTools repository this tree sits in.
+      one that moves once. It lives in one file: `Cargo.toml`, and
+      `make check` asks cargo for it too, so a second reader has to
+      agree before anything else runs.
+- [ ] **When it moves, tag it with `make tag`**, never `git tag` by
+      hand: the number is read out of `Cargo.toml` so it cannot be
+      typed twice, an unclean worktree and an existing tag are refused
+      before anything is asked, `make check` and the whole suite run on
+      the yes path, and nothing is pushed: sending the tag anywhere is a
+      separate, deliberate step, and the target prints the command for
+      it. `make tag YES=1` answers the prompt for a script. The
+      other direction is gated too: `scripts/checktag.sh`, inside `make
+      check`, refuses a tree whose number and nearest tag disagree.
 - [ ] **When it moves, the README's sample output moves with it, and
       nothing checks that.** `make check-version` greps `src` only —
       which is right, since the point is that the code reads

@@ -28,13 +28,17 @@ Gate: `make check && make tests`
 
 ## Traps
 
-- **The `imap` and `imap-proto` dependencies are local forks**
-  (`../forks/rust-imap`, `../forks/tokio-imap/imap-proto`), carrying
-  RFC 5256 THREAD support that upstream has not released (`SORT` it
-  already has), and `ClientBuilder::timeout` — without which nothing
-  can bound the connect phase, because it all happens before a
-  `Client` exists.
-  A checkout without `../forks` does not build.
+- **The `imap` and `imap-proto` dependencies are local forks**, carried
+  as submodules under `forks/` (`forks/rust-imap`,
+  `forks/tokio-imap/imap-proto`), carrying RFC 5256 THREAD support that
+  upstream has not released (`SORT` it already has), and
+  `ClientBuilder::timeout` — without which nothing can bound the
+  connect phase, because it all happens before a `Client` exists.
+  **Clone with `--recurse-submodules`**, or `cargo build` has nothing
+  to point at; an existing clone catches up with `git submodule update
+  --init`. The commit pins the fork, not a version number, so a release
+  here says which fork commit it was built against and nothing else
+  does.
 - **`tests/replay.rs` is a scripted socket, not a server.** It speaks
   just enough IMAP to walk the real backend down `fetch_chunk`'s
   degradation ladder -- answering badly on purpose, which no real
@@ -115,17 +119,17 @@ Gate: `make check && make tests`
 - **`scripts/check-examples.sh` reads four documents only** — README.md,
   QUICKSTART.md, DESIGN.md and `man/mail-imap.1`. A command line
   written anywhere else, TODO.md included, is replayed by nothing.
-- **`cargo mutants` needs `--in-place` here.** It copies the *git*
-  root to a scratch directory, and the git root is `AiTools` while the
-  package is `AiTools/mail-imap` — so it looks for `<tmp>/src/imap/…`
-  where the file actually landed at `<tmp>/mail-imap/src/imap/…` and
-  every worker dies with *"does not exist, refusing to create it"*.
-  The baseline build and test succeed first, which makes it look like
-  a code problem rather than a layout one. `.gitignore` carries
-  `mutants.out/`, so this has been run here before. **A run that
-  finishes cleanly can still leave a mutant in the tree** -- one here
-  exited 0 having left `required_capability` returning `Some("")` --
-  so `git status` and `git diff` after every run, before anything else.
+- **`cargo mutants` copies the tree to a scratch directory**, which is
+  where a run here fails rather than in the code under test: the
+  baseline build dies in the copy while the real tree is fine.
+  `--in-place` runs it where the files are instead, and whether this
+  host needs that is in CLAUDE.local.md rather than here — it is a fact
+  about the machine's scratch space, not about the repository.
+  `.gitignore` carries `mutants.out/`, so this has been run here
+  before. **A run that finishes cleanly can still leave a mutant in the
+  tree** -- one here exited 0 having left `required_capability`
+  returning `Some("")` -- so `git status` and `git diff` after every
+  run, before anything else.
   An unnoticed leftover is a deliberately broken line committed as if
   it were yours. A run over
   `src/imap/real.rs` also needs the wire runner, or every mutant in it
@@ -140,5 +144,9 @@ Gate: `make check && make tests`
   back to `Config::default()` (`src/main.rs`), so a config typo under
   `--mock` shows up as defaults rather than as an error. `info` names
   the file it actually read, or says none was.
-- **This tree is a subdirectory of the AiTools repository**, which owns
-  the git history and the tags. There is no `make tag` here.
+- **A release is tagged with `make tag`**, which reads the number out
+  of `Cargo.toml` so it is never typed twice, refuses an unclean
+  worktree or an existing tag, runs `make check` and the suite on the
+  way, and pushes nothing. `make check` gates the other direction:
+  `scripts/checktag.sh` refuses a tree whose number and nearest tag
+  disagree.

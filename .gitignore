@@ -1,1 +1,15 @@
-# forks/ are git submodules -- see .gitmodules
+target/
+*~
+# notes about this checkout and this host, never the repository's
+CLAUDE.local.md
+# real configs contain credentials — ignore all .conf except the template
+*.conf
+!example.conf
+# cargo-mutants scratch output
+mutants.out/
+mutants.out.old/
+# a mutant that loops forever is killed, and a killed process dumps
+# core here -- see CHECKLIST.md, where TIMEOUT is an expected result
+*.core
+# scratch for the test server: fetched jar + its runtime state
+tests-tmp/

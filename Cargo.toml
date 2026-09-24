@@ -13,10 +13,12 @@ default = ["mock"]
 mock = []
 
 [dependencies]
-# LOCAL DEV: forks with RFC 5256 THREAD support (upstream imap-proto
-# release pending; see forks/ in the workspace root).
-imap = { path = "../forks/rust-imap", features = ["native-tls"] }
-imap-proto = { path = "../forks/tokio-imap/imap-proto" }
+# Local forks, carried as submodules under forks/: they add RFC 5256
+# THREAD (upstream has SORT already) and `ClientBuilder::timeout`,
+# neither of which upstream has released. Clone with
+# --recurse-submodules, or the build has nothing to point at.
+imap = { path = "forks/rust-imap", features = ["native-tls"] }
+imap-proto = { path = "forks/tokio-imap/imap-proto" }
 base64 = "0.13"
 # Direct, though it also arrives under `imap`: `append --date` has to
 # hand `AppendCmd::internal_date` a `DateTime<FixedOffset>`, and Rust's

@@ -49,7 +49,7 @@ VERSION		!= sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml
 
 .PHONY: help all check check-lint check-version check-man build tests \
 	tests-unit tests-examples tests-wire tests-server-start \
-	tests-server-stop doc version options clean distclean \
+	tests-server-stop doc version options tag clean distclean \
 	install uninstall
 
 help:						## show this help (the default)
@@ -82,9 +82,7 @@ help:						## show this help (the default)
 	    MANSRC   '$(MANSRC)  (man page source)' \
 	    TESTS_TMP '$(TESTS_TMP)  (scratch for the test server; distclean removes it)'
 	@echo ''
-	@echo 'There is no tag target: this tree is a subdirectory of the AiTools'
-	@echo 'repository, which carries the tags. There is no deploy target'
-	@echo 'either -- mail-imap runs where it is installed.'
+	@echo 'There is no deploy target: mail-imap runs where it is installed.'
 
 all: check build					## check, then build
 
@@ -94,12 +92,25 @@ check-lint:					## clippy is clean, warnings included -- both with the mock and 
 	$(CARGO) clippy --all-targets -- -D warnings
 	$(CARGO) clippy --no-default-features -- -D warnings
 
-check-version:					## the release number is written once, in Cargo.toml
+check-version:					## the release number is written once, every reader agrees, and the tags say the same
 	@if grep -RnE '"[0-9]+\.[0-9]+\.[0-9]+"' src | grep -v CARGO_PKG_VERSION; then \
 	    echo 'make: a version literal reappeared in src; read it from' >&2; \
 	    echo '      CARGO_PKG_VERSION instead (Cargo.toml holds the number)' >&2; \
 	    exit 1; fi
-	@echo 'version $(VERSION) is written once (Cargo.toml)'
+# Two readers parse Cargo.toml: the sed above, and cargo itself -- which
+# is the one the binary's --version comes from, through CARGO_PKG_VERSION.
+# A sed that agrees with nothing but itself is how the number drifts
+# while every gate stays green.
+	@cargover=`$(CARGO) pkgid | sed 's/.*[#@]//'`; \
+	if [ "$$cargover" != '$(VERSION)' ]; then \
+	    echo "make: this Makefile reads $(VERSION) from Cargo.toml," >&2; \
+	    echo "      cargo reads $$cargover -- they must not differ" >&2; \
+	    exit 1; fi
+# The tags are the other half of the same statement, and nothing in the
+# tree makes them agree: on a tag with a clean worktree the number must
+# BE the tag, anywhere else it must be at or ahead of the nearest one.
+	@sh $(SCRIPTS)/checktag.sh '$(VERSION)' || exit 1
+	@echo 'version $(VERSION) is written once (Cargo.toml), cargo agrees, tags agree'
 
 check-man:					## the man page is well-formed mdoc
 	@if [ ! -f $(MAN1) ]; then \
@@ -156,6 +167,31 @@ options:					## print the configuration knobs and their defaults
 	@echo ''
 	@echo 'Runtime configuration is the JSON config file, not a build knob:'
 	@echo 'see the Configuration table in README.md.'
+
+# The number is never typed twice: this reads it out of Cargo.toml.
+# Order matters -- the refusals that cost nothing come first, then the
+# question, then the whole suite on the yes path only, so declining is
+# free and accepting pays for the tests once. It pushes nothing.
+tag:						## tag this release, from the number in Cargo.toml
+	@if [ -n "`git status --porcelain --untracked-files=no`" ]; then \
+	    echo 'make: uncommitted changes; commit them before tagging' >&2; \
+	    exit 1; fi
+	@if git rev-parse -q --verify 'refs/tags/v$(VERSION)' >/dev/null; then \
+	    echo 'make: v$(VERSION) exists already; bump Cargo.toml first' >&2; \
+	    exit 1; fi
+	@if [ "$(YES)" != 1 ]; then \
+	    printf 'tag v%s at %s? (check and the suite run first) [y/N] ' \
+		'$(VERSION)' "`git rev-parse --short HEAD`"; \
+	    read -r ans || ans=; \
+	    case "$$ans" in \
+		y|Y|yes|YES) ;; \
+		*) echo 'make: not tagged'; exit 1 ;; \
+	    esac; \
+	fi
+	@$(MAKE) check && $(MAKE) tests
+	git tag -a -m '$(NAME) $(VERSION)' 'v$(VERSION)'
+	@sh $(SCRIPTS)/checktag.sh '$(VERSION)'
+	@echo 'tagged v$(VERSION) -- push it with: git push origin v$(VERSION)'
 
 clean:						## remove what a build here made
 	@sh $(SCRIPTS)/greenmail-server.sh stop

@@ -45,11 +45,19 @@ config parser is a C library compiled from source as part of the
 build and linked statically, so the finished binary has no runtime
 dependency on it.
 
-The `imap` and `imap-proto` crates are local forks under `../forks`.
-They carry two things upstream has not released: RFC 5256 `THREAD`
-(upstream has `SORT` already) and `ClientBuilder::timeout`, without
-which nothing can bound the connect phase. A checkout without them
-does not build.
+The `imap` and `imap-proto` crates are local forks, carried as
+submodules under `forks/`. They add two things upstream has not
+released: RFC 5256 `THREAD` (upstream has `SORT` already) and
+`ClientBuilder::timeout`, without which nothing can bound the connect
+phase. So clone with them:
+
+```bash
+git clone --recurse-submodules <url> mail-imap
+# an existing clone catches up with:
+git submodule update --init
+```
+
+Without them `cargo build` has nothing to point at.
 
 The `Makefile` is the interface (`make` alone, or `make help`, prints
 what it does):
@@ -66,6 +74,7 @@ what it does):
 | `make uninstall` | Remove what `install` put down                                                                                                                                  |
 | `make clean`     | Remove what a build here made: `cargo clean`, the mutation-testing output, and the test server's scratch. `distclean` also drops the generated docs and the fetched GreenMail jar |
 | `make options`   | Print the build knobs and their defaults                                                                                                                        |
+| `make tag`       | Tag this release, reading the number from `Cargo.toml`: refuses an unclean worktree or an existing tag, asks, then runs `check` and the suite before tagging. Pushes nothing (`YES=1` answers the prompt) |
 
 Build knobs: `RELEASE` (`yes`), `PREFIX` (`/usr/local`), `BINDIR`
 (`$PREFIX/bin`), `MANDIR` (`$PREFIX/share/man`), `BASHCOMPDIR` /
