@@ -120,7 +120,7 @@ pub fn resolve_groups(
         let mut uids: Vec<u32> = Vec::new();
         let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for selection in &selections {
-            for uid in selection.resolve(available.as_deref())? {
+            for uid in selection.resolve_in(Some(&folder), available.as_deref())? {
                 if seen.insert(uid) {
                     uids.push(uid);
                 }

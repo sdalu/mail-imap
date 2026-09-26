@@ -75,14 +75,24 @@ impl Selection {
                 .all(|i| matches!(i, UidItem::Last(_) | UidItem::First(_)))
     }
 
+    /// [`Selection::resolve_in`] with only the folder the token names,
+    /// which is all a test resolving a bare token has.
+    #[cfg(test)]
+    pub fn resolve(&self, available: Option<&[u32]>) -> Result<Vec<u32>> {
+        self.resolve_in(self.folder.as_deref(), available)
+    }
+
     /// Resolve to concrete UIDs.
     ///
     /// `available` is the folder's UID list, required when
     /// [`Selection::needs_uid_list`] is true. Explicitly named UIDs are
     /// kept whether or not they appear in `available` (an unknown UID
     /// is then reported by the server, which says so better than we
-    /// could); ranges and `*` match only messages that exist.
-    pub fn resolve(&self, available: Option<&[u32]>) -> Result<Vec<u32>> {
+    /// could); ranges and `*` match only messages that exist. `folder`
+    /// is where `available` came from -- which a selection resolved
+    /// against the default folder does not carry itself -- so a refusal
+    /// can say where it looked.
+    pub fn resolve_in(&self, folder: Option<&str>, available: Option<&[u32]>) -> Result<Vec<u32>> {
         let mut out: Vec<u32> = Vec::new();
         // The order UIDs were named in is part of the contract, so the
         // result stays a Vec; the set is only there to answer "seen
@@ -138,11 +148,7 @@ impl Selection {
                         // Doing silently less than asked is the worst
                         // outcome on a mutating command, so every item
                         // has to match something.
-                        bail!(
-                            "'{}' of selection '{}' matched no message",
-                            show_item(item),
-                            self.source
-                        );
+                        bail!("{}", self.no_match(item, folder));
                     }
                     matched.sort_unstable();
                     for uid in matched {
@@ -152,6 +158,26 @@ impl Selection {
             }
         }
         Ok(out)
+    }
+
+    /// The refusal for `item` matching nothing in `folder`. The term is
+    /// named once: the whole selection when the item is all of it, the
+    /// item and then its selection when it is only part (`'4-7' of
+    /// selection '1,4-7'`). The folder is added unless the selection
+    /// already spells it (`Archive::99-`), which is when a reader could
+    /// not otherwise tell -- a count spread over `-f`, a default folder.
+    fn no_match(&self, item: &UidItem, folder: Option<&str>) -> String {
+        let term = if self.items.len() == 1 {
+            format!("selection '{}'", self.source)
+        } else {
+            format!("'{}' of selection '{}'", show_item(item), self.source)
+        };
+        match folder {
+            Some(folder) if !self.source.contains("::") => {
+                format!("{} matched no message in '{}'", term, folder)
+            }
+            _ => format!("{} matched no message", term),
+        }
     }
 }
 
@@ -715,16 +741,53 @@ mod tests {
         ];
         for (token, item, available) in cases {
             let text = err(token, available);
-            assert!(
-                text.starts_with(&format!("'{}' of selection '{}'", item, token)),
-                "the refusal must name the item, then the selection: {}",
-                text
+            assert_eq!(
+                text,
+                format!("'{}' of selection '{}' matched no message", item, token),
+                "the refusal must name the item, then the selection"
             );
-            assert!(text.contains("matched no message"), "{}", text);
         }
         // `*` cannot share a selection with anything (it is the whole
         // mailbox), so it is checked on its own against no messages.
-        assert!(err("*", &[]).starts_with("'*' of selection '*'"));
+        assert_eq!(err("*", &[]), "selection '*' matched no message");
+    }
+
+    #[test]
+    fn a_refusal_names_the_term_once_and_the_folder_it_was_not_in() {
+        // It used to say "'last:5' of selection 'last:5' matched no
+        // message": the item and the selection are the same string
+        // when the item is all there is, and where it looked -- the
+        // thing a count spread over several `-f` folders needs -- was
+        // not said at all.
+        let refusal = |token: &str, folder: Option<&str>| {
+            sel(token)
+                .resolve_in(folder, Some(&[]))
+                .expect_err(token)
+                .to_string()
+        };
+        assert_eq!(
+            refusal("last:5", Some("Archives")),
+            "selection 'last:5' matched no message in 'Archives'"
+        );
+        assert_eq!(
+            refusal("LAST:5", Some("Archives")),
+            "selection 'LAST:5' matched no message in 'Archives'",
+            "the selection is named as it was written"
+        );
+        assert_eq!(
+            refusal("1,4-7", Some("INBOX")),
+            "'4-7' of selection '1,4-7' matched no message in 'INBOX'"
+        );
+        // A selection that spells its folder is not told it again.
+        assert_eq!(
+            refusal("Archives::last:5", Some("Archives")),
+            "selection 'Archives::last:5' matched no message"
+        );
+        // `resolve` knows only the folder the token carries.
+        assert_eq!(
+            sel("Archives::9-").resolve(Some(&[1])).unwrap_err().to_string(),
+            "selection 'Archives::9-' matched no message"
+        );
     }
 
     #[test]
