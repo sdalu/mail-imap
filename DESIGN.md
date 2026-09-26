@@ -857,7 +857,14 @@ names no UID it is unambiguous across folders, so an *unqualified*
 count is expanded by `selection_groups` into one selection per selected
 folder, while `Archive::last:5` asks a count of one named folder — and
 a single run can ask different counts of different folders, which the
-flag never could. Counting is by UID, which ascends with arrival;
+flag never could. Being N *per folder*, the expanded count asks nothing
+of an empty folder: `resolve_groups` skips its share there (no group,
+no refusal) and refuses the token only when every folder it spread over
+was empty, naming them. That is the one exception to "an item matching
+nothing is an error" below, and it is narrow on purpose: a folder that
+cannot be opened still fails the command as it does for any selection,
+and a count naming its folder (`Archive::last:5`) still needs a message
+there. Counting is by UID, which ascends with arrival;
 ordering by `Date:` is `-S`'s job.
 
 A range or `*` is symbolic (`UidItem::Range`/`From`/`All`) until

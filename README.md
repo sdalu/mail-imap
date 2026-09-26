@@ -421,7 +421,7 @@ mail-imap -f INBOX read first:5
 mail-imap -f INBOX read 12345,last:3
 
 # a count names no UID, so an unqualified one is not ambiguous across
-# folders: it means N per selected folder
+# folders: it means N per selected folder (an empty one adds nothing)
 mail-imap -f INBOX,Archive flag list last:5
 
 # ... and a qualified one can ask a different count of each
@@ -439,7 +439,12 @@ A few rules are easy to get wrong:
   `UID SEARCH ALL` per folder, fetched once and only when a selection for
   that folder holds a range or `*`). **Every item must match at least one
   message**, so `flag add 5 999-` is an error rather than quietly
-  becoming `flag add 5`.
+  becoming `flag add 5`. The one reading of "match" to know: an
+  unqualified count spread over several folders (`-f INBOX,Archive
+  last:5`) is N *per folder*, so an empty folder contributes nothing to
+  it and it fails only when every folder it reaches is empty. A folder
+  that cannot be opened still fails the run, and `Archive::last:5`
+  names one folder, so an empty `Archive` fails it.
 - A UID named explicitly is not checked against that list for read-only
   commands — the server reports it (`no email with UID n`). `flag` and
   `tag` do check first, because RFC 3501 has `UID STORE` ignore an

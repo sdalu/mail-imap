@@ -93,51 +93,96 @@ pub struct Group {
 /// Resolve parsed selections into per-folder UID groups. Folders keep
 /// the order they were first named in; a folder's UID list is fetched
 /// once, and only when a selection of that folder holds a range or `*`.
+///
+/// `spread[i]` is `Some(k)` when `selections[i]` is one folder's share
+/// of an unqualified count (`last:5` under `-f INBOX,Archives`), `k`
+/// telling which token it came from. Such a count is N *per folder*, so
+/// an empty folder contributes nothing to it rather than failing it;
+/// the token fails only when every folder it spread over was empty. A
+/// folder that cannot be opened still fails the command, as it does for
+/// any other selection.
 pub fn resolve_groups(
     client: &mut ImapClient,
     selections: &[Selection],
+    spread: &[Option<usize>],
     default: &str,
 ) -> Result<Vec<Group>> {
-    let mut grouped: Vec<(String, Vec<&Selection>)> = Vec::new();
-    for selection in selections {
+    type Entry<'a> = (&'a Selection, Option<usize>);
+    let mut grouped: Vec<(String, Vec<Entry>)> = Vec::new();
+    for (i, selection) in selections.iter().enumerate() {
         let folder = selection.folder.clone().unwrap_or_else(|| default.to_string());
+        let entry = (selection, spread.get(i).copied().flatten());
         match grouped.iter_mut().find(|(f, _)| *f == folder) {
-            Some((_, sels)) => sels.push(selection),
-            None => grouped.push((folder, vec![selection])),
+            Some((_, entries)) => entries.push(entry),
+            None => grouped.push((folder, vec![entry])),
         }
     }
 
     let mut out = Vec::new();
-    for (folder, selections) in grouped {
-        let available = if selections.iter().any(|s| s.needs_uid_list()) {
+    // Tokens spread over folders that found something somewhere.
+    let mut found: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (folder, entries) in grouped {
+        let available = if entries.iter().any(|(s, _)| s.needs_uid_list()) {
             Some(client.folder_uids(&folder)?)
         } else {
             None
         };
+        let empty = available.as_deref().is_some_and(<[u32]>::is_empty);
         // Same reason as `Selection::resolve`'s own set: input order is
         // the contract, but asking "seen already" must not be a scan of
         // everything collected so far.
         let mut uids: Vec<u32> = Vec::new();
         let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        for selection in &selections {
+        for (selection, origin) in &entries {
+            if let Some(origin) = origin {
+                if empty {
+                    continue;
+                }
+                found.insert(*origin);
+            }
             for uid in selection.resolve_in(Some(&folder), available.as_deref())? {
                 if seen.insert(uid) {
                     uids.push(uid);
                 }
             }
         }
-        if uids.is_empty() {
-            bail!(
-                "selection '{}' matched no message in '{}'",
-                selections
-                    .iter()
-                    .map(|s| s.source.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                folder
-            );
+        // Every selection that is not a spread count either matched or
+        // refused above, so a group can only be empty when all it held
+        // was spread counts over an empty folder: it contributes nothing.
+        if !uids.is_empty() {
+            out.push(Group { folder, uids });
         }
-        out.push(Group { folder, uids });
+    }
+
+    // A spread count that found nothing in any of its folders is a
+    // selection matching nothing, which is refused like any other.
+    let mut refused: Vec<usize> = Vec::new();
+    for origin in spread.iter().flatten() {
+        if !found.contains(origin) && !refused.contains(origin) {
+            refused.push(*origin);
+        }
+    }
+    if let Some(origin) = refused.first() {
+        let mut source = "";
+        let mut folders: Vec<String> = Vec::new();
+        for (selection, _) in selections
+            .iter()
+            .zip(spread)
+            .filter(|(_, o)| **o == Some(*origin))
+        {
+            source = &selection.source;
+            if let Some(folder) = &selection.folder {
+                folders.push(format!("'{}'", folder));
+            }
+        }
+        match folders.len() {
+            1 => bail!("selection '{}' matched no message in {}", source, folders[0]),
+            _ => bail!(
+                "selection '{}' matched no message in any of {}",
+                source,
+                folders.join(", ")
+            ),
+        }
     }
     Ok(out)
 }
@@ -1105,19 +1150,25 @@ fn selection_groups(
     // An unqualified selection that is only counts (`last:20`) names no
     // UID, so it is not ambiguous across folders the way a bare UID is:
     // it means N *per folder*, and applies to each folder -f/-A chose.
+    // An empty folder among them contributes nothing to the count; the
+    // count fails only when every one of them is empty (see
+    // `resolve_groups`, which `spread` tells which token each came from).
     let mut expanded: Vec<Selection> = Vec::new();
+    let mut spread: Vec<Option<usize>> = Vec::new();
     let mut needs_default = false;
-    for selection in selections {
+    for (i, selection) in selections.iter().enumerate() {
         if selection.folder.is_none() && selection.is_count_only() {
             for folder in folders(client, spec, config)? {
                 expanded.push(Selection {
                     folder: Some(folder),
                     ..selection.clone()
                 });
+                spread.push(Some(i));
             }
         } else {
             needs_default |= selection.folder.is_none();
             expanded.push(selection.clone());
+            spread.push(None);
         }
     }
     let default = if needs_default {
@@ -1125,7 +1176,7 @@ fn selection_groups(
     } else {
         String::new()
     };
-    resolve_groups(client, &expanded, &default)
+    resolve_groups(client, &expanded, &spread, &default)
 }
 
 /// `move <SELECTION...> <FOLDER>`: file messages into the mailbox
@@ -2593,6 +2644,91 @@ mod tests {
         assert_eq!(groups[0].uids, vec![4, 5]);
         assert_eq!(groups[1].folder, "Trash");
         assert_eq!(groups[1].uids, vec![4, 5]);
+    }
+
+    /// Empty `folder` in the mock by moving all five messages out.
+    fn emptied(client: &mut ImapClient, folder: &str) {
+        client
+            .move_messages(folder, &[1, 2, 3, 4, 5], "INBOX")
+            .expect("move");
+        assert!(client.folder_uids(folder).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_empty_folder_contributes_nothing_to_an_unqualified_count() {
+        // A count is N per selected folder, so an empty Archives beside
+        // a full INBOX asks nothing of Archives. It used to fail the
+        // whole run: `-f INBOX,Archives flag list last:5` exited 1 with
+        // "matched no message" while `-f INBOX` listed five.
+        let mut client = mock_client();
+        emptied(&mut client, "Trash");
+        let spec = FolderSpec::new(vec!["INBOX".to_string(), "Trash".to_string()]);
+        let groups =
+            selection_groups(&mut client, &spec, &mock_config(), &sels(&["last:2"])).unwrap();
+        assert_eq!(groups.len(), 1, "the empty folder yields no group");
+        assert_eq!(groups[0].folder, "INBOX");
+        assert_eq!(groups[0].uids, vec![4, 5]);
+        // Either order: the empty folder first changes nothing.
+        let spec = FolderSpec::new(vec!["Trash".to_string(), "INBOX".to_string()]);
+        let groups =
+            selection_groups(&mut client, &spec, &mock_config(), &sels(&["first:1"])).unwrap();
+        assert_eq!(flatten(&groups), vec![("INBOX", 1)]);
+    }
+
+    #[test]
+    fn an_unqualified_count_fails_only_when_every_folder_is_empty() {
+        let mut client = mock_client();
+        emptied(&mut client, "Trash");
+        emptied(&mut client, "Drafts");
+        let spec = FolderSpec::new(vec!["Drafts".to_string(), "Trash".to_string()]);
+        let err = selection_groups(&mut client, &spec, &mock_config(), &sels(&["last:2"]))
+            .expect_err("nothing anywhere is still nothing");
+        assert_eq!(
+            err.to_string(),
+            "selection 'last:2' matched no message in any of 'Drafts', 'Trash'"
+        );
+        let spec = FolderSpec::new(vec!["Trash".to_string()]);
+        let err = selection_groups(&mut client, &spec, &mock_config(), &sels(&["last:2"]))
+            .expect_err("one empty folder");
+        assert_eq!(err.to_string(), "selection 'last:2' matched no message in 'Trash'");
+        // Judged per token: a second one that matches does not rescue
+        // a count that found nothing in any of its folders.
+        let spec = FolderSpec::new(vec!["Drafts".to_string(), "Trash".to_string()]);
+        let err = selection_groups(
+            &mut client,
+            &spec,
+            &mock_config(),
+            &sels(&["INBOX::1", "last:2"]),
+        )
+        .expect_err("the count matched nothing");
+        assert_eq!(
+            err.to_string(),
+            "selection 'last:2' matched no message in any of 'Drafts', 'Trash'"
+        );
+    }
+
+    #[test]
+    fn a_count_that_names_its_folder_still_needs_a_message_there() {
+        // `Trash::last:2` asks one named folder, so an empty Trash is a
+        // selection matching nothing, whatever else -f selected.
+        let mut client = mock_client();
+        emptied(&mut client, "Trash");
+        let spec = FolderSpec::new(vec!["INBOX".to_string(), "Trash".to_string()]);
+        let err =
+            selection_groups(&mut client, &spec, &mock_config(), &sels(&["Trash::last:2"]))
+                .expect_err("a named empty folder");
+        assert_eq!(err.to_string(), "selection 'Trash::last:2' matched no message");
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_opened_still_fails_a_spread_count() {
+        // Empty is not missing: a folder that cannot be opened fails
+        // the command, as it does for every other selection.
+        let mut client = mock_client();
+        let spec = FolderSpec::new(vec!["INBOX".to_string(), "Nope".to_string()]);
+        let err = selection_groups(&mut client, &spec, &mock_config(), &sels(&["last:2"]))
+            .expect_err("a missing folder is an error");
+        assert!(err.to_string().contains("Nope"), "{}", err);
     }
 
     #[test]

@@ -597,6 +597,12 @@ Ranges and
 .Ic \&*
 are resolved against the folder's real UID list; every item must
 match at least one message.
+An unqualified
+.Ic last:N
+or
+.Ic first:N
+is a count per selected folder: an empty folder contributes nothing to
+it, and it fails only when every selected folder is empty.
 .Sh ACCESS LEVELS
 .Ic access-level
 in the config says how much of the account
