@@ -22,7 +22,12 @@ set -eu
 # shellcheck disable=SC1007
 DIR="${MAIL_IMAP_GM_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/tests-tmp}"
 JAR="$DIR/greenmail.jar"
-VER=2.1.9
+# 2.1.14, not 2.1.9: 2.1.9 drops the connection with a NullPointerException
+# on DELETE of a mailbox a session had SELECTed and left (upstream #902).
+VER=2.1.14
+# The jar keeps one name (callers link to it) and this stamp says which
+# version it is, so changing VER refetches instead of running the old jar.
+STAMP="$DIR/greenmail.version"
 URL="https://repo1.maven.org/maven2/com/icegreen/greenmail-standalone/$VER/greenmail-standalone-$VER.jar"
 CONF="${MAIL_IMAP_GM_CONF:-$DIR/greenmail.conf}"
 # The server is stopped by the pid we started, never by matching the
@@ -55,9 +60,13 @@ stop_server() {
 case "${1:-start}" in
 start)
     mkdir -p "$DIR"
-    if [ ! -f "$JAR" ]; then
-        echo "==> fetching GreenMail $VER (once; distclean removes it)" >&2
-        fetch -o "$JAR" "$URL" 2>/dev/null || curl -fsSL -o "$JAR" "$URL"
+    if [ ! -f "$JAR" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$VER" ]; then
+        echo "==> fetching GreenMail $VER (once per version; distclean removes it)" >&2
+        # into a temporary name first: an interrupted fetch must not
+        # leave a truncated jar under the name the stamp vouches for
+        fetch -o "$JAR.part" "$URL" 2>/dev/null || curl -fsSL -o "$JAR.part" "$URL"
+        mv -f "$JAR.part" "$JAR"
+        echo "$VER" > "$STAMP"
     fi
     stop_server
     echo "==> starting GreenMail (IMAP 127.0.0.1:3143, SMTP 127.0.0.1:3025)" >&2

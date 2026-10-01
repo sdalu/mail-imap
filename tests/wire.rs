@@ -339,7 +339,7 @@ fn a_non_ascii_search_is_accepted_as_charset_utf8_though_greenmail_does_not_matc
     );
 
     // The interesting case: search on the accented subject itself.
-    // GreenMail (v2.1.9, as vendored by scripts/greenmail-server.sh)
+    // GreenMail (2.1.9 and 2.1.14, as vendored by scripts/greenmail-server.sh)
     // accepts `CHARSET UTF-8` without complaint -- no BAD/NO, so
     // `uid_search_charset`'s fallback never fires here -- but it does
     // not actually match a non-ASCII byte in a header: `hits` comes
