@@ -114,6 +114,16 @@ impl MockClient {
         Ok(())
     }
 
+    /// The Message-ID a UID carries: the first of the IDs `thread`
+    /// links by, so `search` and `read` report the same one the thread
+    /// is built from rather than a second table that could disagree.
+    fn message_id(&self, uid: u32) -> Option<String> {
+        self.thread_ids
+            .iter()
+            .find(|(u, _, _)| *u == uid)
+            .and_then(|(_, ids, _)| ids.first().cloned())
+    }
+
     /// Fixed part metadata: message 3 carries a spreadsheet,
     /// message 5 a PDF. Every message also has its plain-text body as
     /// part 1.
@@ -186,6 +196,7 @@ impl MockClient {
                     .unwrap_or_default(),
                 // Matches `parts()`: uids 3 and 5 carry an extra part.
                 parts: self.parts(*uid).len() as u32,
+                message_id: self.message_id(*uid),
             })
             .collect();
         if let Some(spec) = sort {
@@ -535,6 +546,10 @@ impl ImapBackend for MockClient {
         // them while disagreeing with what `read` shows.
         if let Some(d) = sent(uid) {
             msg.push_str(&format!("Date: {}\r\n", d));
+        }
+        // And the same Message-ID, for the same reason.
+        if let Some(id) = self.message_id(uid) {
+            msg.push_str(&format!("Message-ID: {}\r\n", id));
         }
         if parts.len() < 2 {
             msg.push_str("Content-Type: text/plain\r\n\r\n");

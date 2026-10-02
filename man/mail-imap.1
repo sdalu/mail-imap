@@ -1,4 +1,4 @@
-.Dd September 22, 2026
+.Dd October 2, 2026
 .Dt MAIL-IMAP 1
 .Os
 .Sh NAME
@@ -244,7 +244,7 @@ A mailbox that still holds messages is refused unless
 .Fl -force
 is given, and the refusal names how many would be destroyed.
 .El
-.It Cm search Ar query
+.It Cm search Oo Fl -message-id Oc Ar query
 Search email in the selected folder(s) with any IMAP
 .Ic SEARCH
 query
@@ -257,7 +257,24 @@ Most recent first unless
 is given.
 Results are capped by
 .Fl M Ns / Ns Ic max .
-.It Cm read Oo Fl -raw Oc Ar selection No ...
+.Fl -message-id
+appends each message\(aqs
+.Li Message-ID
+header, verbatim with its angle brackets, two spaces after the rest of
+its result line; a message without one gets nothing appended, and the
+first is shown when it has several.
+The ID is a locator: searching the header for it finds the message
+again, under whatever UID it has by then, in the folder(s) searched
+.Pq Fl A No to look everywhere :
+.Bd -literal -offset indent
+$ mail-imap search 'HEADER Message-ID <m5@mail>'
+.Ed
+.Pp
+JSON output always carries it, as
+.Qq message_id
+.Pq Li null No for a message without one ,
+with or without the option.
+.It Cm read Oo Fl -raw Oc Oo Fl -message-id Oc Ar selection No ...
 Read the selected email(s): a short header summary, then the message\(aqs
 readable text \(em its
 .Ic text/plain
@@ -272,6 +289,19 @@ prints the MIME body verbatim instead, and no attachment list.
 The header summary is read from the message\(aqs own headers, not from
 the server\(aqs
 .Ic ENVELOPE .
+.Fl -message-id
+ends the header summary with a
+.Li Message-ID
+line, the message\(aqs first, verbatim; nothing is added for a message
+without one.
+Search for the ID as under
+.Cm search
+to find the message again.
+JSON output always carries it, as
+.Qq message_id ,
+with or without the option, and leaves
+.Qq content
+as it was.
 .It Cm count
 Message counts and status
 .Pq Ic STATUS
@@ -291,9 +321,14 @@ when the server advertises
 otherwise client-side reconstruction from
 .Li Message-ID Ns / Ns Li References
 headers.
-.It Cm unread
+.It Cm unread Op Fl -message-id
 List unread email of the selected folder(s)
 .Pq Cm search Ar UNSEEN .
+.Fl -message-id
+appends each message\(aqs
+.Li Message-ID
+as under
+.Cm search .
 .It Cm move Ar selection No ... Ar folder
 File the selected email(s) into
 .Ar folder ,

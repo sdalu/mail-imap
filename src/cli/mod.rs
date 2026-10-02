@@ -228,6 +228,9 @@ struct ReadOutput<'a> {
     /// Which leaf `content`'s body came from: `"text"`, `"html"`,
     /// `"raw"` or `"none"` -- see `mime::render_message`.
     source: &'a str,
+    /// The message's first `Message-ID:`, verbatim, or `null` -- always
+    /// present, with or without `--message-id`, as in `search`.
+    message_id: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -1017,6 +1020,7 @@ pub fn search_emails(out: &mut dyn Write,
     config: &Config,
     query: &str,
     spec: &FolderSpec,
+    message_id: bool,
     json: bool,
     debug: bool,
 ) -> Result<()> {
@@ -1064,7 +1068,7 @@ pub fn search_emails(out: &mut dyn Write,
             query
         )?;
         for r in &results {
-            print_search_result(out, "  ", r, show_sent)?;
+            print_search_result(out, "  ", r, show_sent, message_id)?;
         }
     } else {
         writeln!(out, "Found {} email(s) in {} folder(s) matching: {}",
@@ -1082,7 +1086,7 @@ pub fn search_emails(out: &mut dyn Write,
             }
             writeln!(out, "  {} ({}):", folder, hits.len())?;
             for r in hits {
-                print_search_result(out, "    ", r, show_sent)?;
+                print_search_result(out, "    ", r, show_sent, message_id)?;
             }
         }
     }
@@ -1115,7 +1119,16 @@ fn date_cell(r: &SearchResult, sent: bool) -> String {
     }
 }
 
-fn print_search_result(out: &mut dyn Write, indent: &str, r: &SearchResult, sent: bool) -> Result<()> {
+/// One result line. `message_id` appends the message's Message-ID,
+/// two spaces after everything else, when it has one; without it the
+/// line is what it has always been.
+fn print_search_result(
+    out: &mut dyn Write,
+    indent: &str,
+    r: &SearchResult,
+    sent: bool,
+    message_id: bool,
+) -> Result<()> {
     let date = date_cell(r, sent);
     let size = r
         .size
@@ -1131,8 +1144,12 @@ fn print_search_result(out: &mut dyn Write, indent: &str, r: &SearchResult, sent
     } else {
         format!("  [{}]", r.flags.join(" "))
     };
-    writeln!(out, "{}UID {} | {} | {} | {}{}{}{}",
-        indent, r.uid, date, r.subject, r.from, size, parts, flags
+    let id = match (message_id, r.message_id.as_deref()) {
+        (true, Some(id)) => format!("  {}", id),
+        _ => String::new(),
+    };
+    writeln!(out, "{}UID {} | {} | {} | {}{}{}{}{}",
+        indent, r.uid, date, r.subject, r.from, size, parts, flags, id
     )?;
     Ok(())
 }
@@ -1400,11 +1417,13 @@ pub fn append_message(out: &mut dyn Write,
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn read_emails(out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
     selections: &[Selection],
     raw: bool,
+    message_id: bool,
     json: bool,
     debug: bool,
 ) -> Result<()> {
@@ -1417,13 +1436,16 @@ pub fn read_emails(out: &mut dyn Write,
 
     for (i, (folder, uid)) in messages.iter().enumerate() {
         let rendered = client.read_message(folder, *uid, raw)?;
-        let content = rendered.to_text();
         if json {
+            // `content` is the message and `--message-id` leaves it
+            // alone; the ID travels in its own field, flag or not.
+            let content = rendered.to_text();
             emit_json(out, &ReadOutput {
                 folder,
                 uid: *uid,
                 content: &content,
                 source: rendered.source,
+                message_id: rendered.message_id.as_deref(),
             })?;
         } else {
             if messages.len() > 1 && i > 0 {
@@ -1432,7 +1454,7 @@ pub fn read_emails(out: &mut dyn Write,
             if messages.len() > 1 {
                 writeln!(out, "--- {}::{} ---", folder, uid)?;
             }
-            writeln!(out, "{}", content)?;
+            writeln!(out, "{}", rendered.to_text_with(message_id))?;
         }
     }
     Ok(())
@@ -1555,10 +1577,11 @@ pub fn unread(
     out: &mut dyn Write,
     config: &Config,
     spec: &FolderSpec,
+    message_id: bool,
     json: bool,
     debug: bool,
 ) -> Result<()> {
-    search_emails(out, config, "UNSEEN", spec, json, debug)
+    search_emails(out, config, "UNSEEN", spec, message_id, json, debug)
 }
 
 /// The IMAP-defined flag a bare word names, if it names one. The five
@@ -2788,7 +2811,7 @@ mod tests {
     #[test]
     fn search_prints_a_header_and_one_line_a_message() {
         let text = printed(|out| {
-            search_emails(out, &mock_config(), "ALL", &FolderSpec::default(), false, false)
+            search_emails(out, &mock_config(), "ALL", &FolderSpec::default(), false, false, false)
         });
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with("Found 5 email(s) in 'INBOX'"), "{}", lines[0]);
@@ -2806,7 +2829,7 @@ mod tests {
     fn the_sort_asked_for_decides_both_the_order_and_the_date_column() {
         let by_sent = printed(|out| {
             let config = Config { sort: Some("date".into()), ..mock_config() };
-            search_emails(out, &config, "ALL", &FolderSpec::default(), false, false)
+            search_emails(out, &config, "ALL", &FolderSpec::default(), false, false, false)
         });
         let uids: Vec<&str> = by_sent
             .lines()
@@ -2821,7 +2844,7 @@ mod tests {
     #[test]
     fn json_output_is_one_object_on_one_line_and_nothing_else() {
         let text = printed(|out| {
-            search_emails(out, &mock_config(), "ALL", &FolderSpec::default(), true, false)
+            search_emails(out, &mock_config(), "ALL", &FolderSpec::default(), false, true, false)
         });
         assert_eq!(text.lines().count(), 1, "one object, one line: {}", text);
         let value: serde_json::Value = serde_json::from_str(text.trim()).expect("valid JSON");
@@ -2830,6 +2853,152 @@ mod tests {
         // Both dates travel in JSON whichever one the text shows.
         assert!(value["results"][0]["date"].is_string());
         assert!(value["results"][0]["sent"].is_string());
+        // And the Message-ID, with no flag asked for: JSON carries
+        // every field whatever the text shows.
+        let uid1 = value["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .find(|r| r["uid"] == 1)
+            .expect("UID 1");
+        assert_eq!(uid1["message_id"], "<m1@mail>");
+    }
+
+    /// `--message-id` appends the ID to each line, two spaces after
+    /// the rest; without it the output is what it always was.
+    #[test]
+    fn search_and_unread_show_the_message_id_only_when_asked() {
+        let plain = printed(|out| {
+            search_emails(out, &mock_config(), "ALL", &FolderSpec::default(), false, false, false)
+        });
+        assert!(!plain.contains("@mail>"), "not unasked: {}", plain);
+
+        let with = printed(|out| {
+            search_emails(out, &mock_config(), "ALL", &FolderSpec::default(), true, false, false)
+        });
+        // The same lines, each with the ID appended and nothing else
+        // changed.
+        let plain_lines: Vec<&str> = plain.lines().collect();
+        let with_lines: Vec<&str> = with.lines().collect();
+        assert_eq!(plain_lines.len(), with_lines.len());
+        assert_eq!(plain_lines[0], with_lines[0], "the header line is untouched");
+        for (p, w) in plain_lines.iter().zip(&with_lines).skip(1) {
+            let uid: u32 = p
+                .trim()
+                .strip_prefix("UID ")
+                .and_then(|r| r.split(' ').next())
+                .and_then(|u| u.parse().ok())
+                .expect("a result line");
+            assert_eq!(*w, format!("{}  <m{}@mail>", p, uid), "appended to: {}", p);
+        }
+
+        let unread_with = printed(|out| {
+            unread(out, &mock_config(), &FolderSpec::default(), true, false, false)
+        });
+        assert!(unread_with.contains("  <m3@mail>"), "{}", unread_with);
+        let unread_plain = printed(|out| {
+            unread(out, &mock_config(), &FolderSpec::default(), false, false, false)
+        });
+        assert!(!unread_plain.contains("@mail>"), "{}", unread_plain);
+    }
+
+    #[test]
+    fn a_result_without_a_message_id_prints_nothing_for_it() {
+        let r = SearchResult {
+            uid: 1,
+            folder: "INBOX".into(),
+            subject: "Hi".into(),
+            from: "a@example.com".into(),
+            date: Some("2026-09-20 12:00:00 +0000".into()),
+            sent: None,
+            size: None,
+            flags: Vec::new(),
+            parts: 0,
+            message_id: None,
+        };
+        let without = printed(|out| print_search_result(out, "  ", &r, false, false));
+        let with = printed(|out| print_search_result(out, "  ", &r, false, true));
+        assert_eq!(with, without, "no ID, nothing appended -- not even the spaces");
+    }
+
+    /// `read -j` carries `message_id` always, and the flag does not
+    /// touch `content`.
+    #[test]
+    fn read_json_carries_the_message_id_whatever_the_flag() {
+        let run = |message_id: bool| {
+            printed(|out| {
+                read_emails(
+                    out,
+                    &mock_config(),
+                    &FolderSpec::default(),
+                    &[select::parse_selection("5").unwrap()],
+                    false,
+                    message_id,
+                    true,
+                    false,
+                )
+            })
+        };
+        let without = run(false);
+        let with = run(true);
+        assert_eq!(with, without, "the flag changes nothing in JSON");
+        let value: serde_json::Value = serde_json::from_str(without.trim()).expect("JSON");
+        assert_eq!(value["message_id"], "<m5@mail>");
+        assert!(!value["content"].as_str().expect("content").contains("Message-ID"));
+        // The existing fields stay, in place, and the new one is last.
+        let at = |k: &str| without.find(&format!("\"{}\":", k)).expect(k);
+        assert!(
+            at("folder") < at("uid")
+                && at("uid") < at("content")
+                && at("content") < at("source")
+                && at("source") < at("message_id"),
+            "{}",
+            without
+        );
+    }
+
+    #[test]
+    fn read_output_json_has_a_null_message_id_when_there_is_none() {
+        let out = ReadOutput {
+            folder: "INBOX",
+            uid: 1,
+            content: "x",
+            source: "text",
+            message_id: None,
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&out).unwrap()).expect("parse");
+        assert!(value.get("message_id").is_some_and(|v| v.is_null()));
+    }
+
+    #[test]
+    fn read_shows_the_message_id_in_its_header_summary_only_when_asked() {
+        let run = |message_id: bool, raw: bool| {
+            printed(|out| {
+                read_emails(
+                    out,
+                    &mock_config(),
+                    &FolderSpec::default(),
+                    &[select::parse_selection("5").unwrap()],
+                    raw,
+                    message_id,
+                    false,
+                    false,
+                )
+            })
+        };
+        for raw in [false, true] {
+            let with = run(true, raw);
+            let summary = with.split("\n\n").next().expect("a summary");
+            assert!(
+                summary.lines().any(|l| l == "Message-ID: <m5@mail>"),
+                "in the summary (raw={}): {}",
+                raw,
+                with
+            );
+        }
+        let plain = run(false, false);
+        assert!(!plain.contains("Message-ID"), "not unasked: {}", plain);
     }
 
     #[test]
@@ -2840,6 +3009,7 @@ mod tests {
                 &mock_config(),
                 &FolderSpec::default(),
                 &[select::parse_selection("1").unwrap()],
+                false,
                 false,
                 false,
                 false,
@@ -2877,6 +3047,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
             )
         });
         assert!(!one.contains("---"), "a single message needs no banner: {}", one);
@@ -2887,6 +3058,7 @@ mod tests {
                 &mock_config(),
                 &FolderSpec::default(),
                 &[select::parse_selection("1,2").unwrap()],
+                false,
                 false,
                 false,
                 false,
@@ -2919,6 +3091,7 @@ mod tests {
                 &FolderSpec::new(vec!["*".to_string()]),
                 false,
                 false,
+                false,
             )
         });
         assert!(many.starts_with("Found 25 email(s) in 5 folder(s)"), "{}", many);
@@ -2927,7 +3100,7 @@ mod tests {
         }
         // One folder says so instead, and names it rather than counting.
         let one = printed(|out| {
-            search_emails(out, &mock_config(), "ALL", &FolderSpec::default(), false, false)
+            search_emails(out, &mock_config(), "ALL", &FolderSpec::default(), false, false, false)
         });
         assert!(one.starts_with("Found 5 email(s) in 'INBOX'"), "{}", one);
         assert!(!one.contains("folder(s)"), "not the plural form: {}", one);
@@ -2945,11 +3118,12 @@ mod tests {
             size: None,
             flags: Vec::new(),
             parts: 0,
+            message_id: None,
         };
-        let line = printed(|out| print_search_result(out, "  ", &r, false));
+        let line = printed(|out| print_search_result(out, "  ", &r, false, false));
         assert!(!line.contains("part(s)"), "nothing to say about no parts: {}", line);
         r.parts = 2;
-        let line = printed(|out| print_search_result(out, "  ", &r, false));
+        let line = printed(|out| print_search_result(out, "  ", &r, false, false));
         assert!(line.contains("[2 part(s)]"), "{}", line);
     }
 
@@ -3014,6 +3188,7 @@ mod tests {
             size: None,
             flags: Vec::new(),
             parts: 0,
+            message_id: None,
         };
         assert_eq!(date_cell(&r, false), "arrived 2026-09-20 12:00:00 +0000");
         // Normalised to the arrival date's format so the column lines
@@ -3036,6 +3211,7 @@ mod tests {
             size: None,
             flags: Vec::new(),
             parts: 0,
+            message_id: None,
         };
         assert_eq!(date_cell(&r, true), "sent unknown");
         // A header that will not parse is shown as it came: it is what
@@ -3168,6 +3344,7 @@ mod tests {
             size: Some(120),
             flags: vec!["\\Seen".into()],
             parts: 2,
+            message_id: Some("<hi@example.com>".into()),
         }];
         let out = SearchOutput {
             folder: Some("INBOX"),
@@ -3192,6 +3369,7 @@ mod tests {
         // that sorted by `date` can see what it sorted by.
         assert_eq!(value["results"][0]["date"], "2026-09-20 12:00:00 +0000");
         assert_eq!(value["results"][0]["sent"], "Sun, 20 Sep 2026 11:00:00 +0000");
+        assert_eq!(value["results"][0]["message_id"], "<hi@example.com>");
     }
 
     #[test]
@@ -3207,6 +3385,7 @@ mod tests {
                 size: None,
                 flags: Vec::new(),
                 parts: 1,
+                message_id: None,
             },
             SearchResult {
                 uid: 2,
@@ -3218,6 +3397,7 @@ mod tests {
                 size: None,
                 flags: Vec::new(),
                 parts: 1,
+                message_id: None,
             },
         ];
         let folders = vec!["INBOX".to_string(), "Archive".to_string()];
@@ -3234,6 +3414,9 @@ mod tests {
         assert_eq!(value["folders"][0], "INBOX");
         assert_eq!(value["folders"][1], "Archive");
         assert_eq!(value["results"][1]["folder"], "Archive");
+        // No Message-ID is `null`, not a missing key.
+        assert!(value["results"][1]["message_id"].is_null());
+        assert!(value["results"][1].get("message_id").is_some());
     }
 
     #[test]

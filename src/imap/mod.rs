@@ -68,6 +68,12 @@ pub struct SearchResult {
     pub flags: Vec<String>,
     /// Number of MIME leaf parts of the message (0 when unknown).
     pub parts: u32,
+    /// The message's `Message-ID:` header, verbatim with its angle
+    /// brackets, or `None` when it carries none the server reported --
+    /// the first one when it has several, and never made up. It is a
+    /// locator: `search 'HEADER Message-ID <id>'` finds the message
+    /// again. Serialised always, as `null` when absent.
+    pub message_id: Option<String>,
 }
 
 /// Per-mailbox counters as reported by `STATUS`.

@@ -934,6 +934,9 @@ pub struct RenderedMessage {
     pub date: Option<String>,
     pub internal_date: Option<String>,
     pub flags: Vec<String>,
+    /// The first `Message-ID:` header, verbatim, or `None` when the
+    /// message has none. Printed only when `read --message-id` asks.
+    pub message_id: Option<String>,
     /// The readable body: the decoded `text/plain` leaf, the decoded
     /// `text/html` leaf with its tags stripped, the message's raw bytes
     /// under `--raw`, or a note naming what the message holds when
@@ -959,6 +962,13 @@ impl RenderedMessage {
     /// `--raw` this is exactly the header summary followed by the exact
     /// bytes the server sent, which is the whole point of the flag.
     pub fn to_text(&self) -> String {
+        self.to_text_with(false)
+    }
+
+    /// [`to_text`](Self::to_text), with a `Message-ID:` line closing
+    /// the header summary when `message_id` is set and the message has
+    /// one. Without it the text is exactly what `to_text` gives.
+    pub fn to_text_with(&self, message_id: bool) -> String {
         let mut out = String::new();
         if let Some(v) = &self.subject {
             out.push_str(&format!("Subject: {}\n", v));
@@ -977,6 +987,11 @@ impl RenderedMessage {
         }
         if !self.flags.is_empty() {
             out.push_str(&format!("Flags: {}\n", self.flags.join(", ")));
+        }
+        if message_id {
+            if let Some(v) = &self.message_id {
+                out.push_str(&format!("Message-ID: {}\n", v));
+            }
         }
         out.push('\n');
         out.push_str(&self.body);
@@ -1031,6 +1046,11 @@ pub fn render_message(
     let from = header_value(&headers, "from").map(|v| decode_rfc2047(v.to_string()));
     let to = header_value(&headers, "to").map(|v| decode_rfc2047(v.to_string()));
     let date = header_value(&headers, "date").map(|v| v.to_string());
+    // The first one, as it stands: not decoded, since an ID is matched
+    // byte for byte, and absent rather than empty when there is none.
+    let message_id = header_value(&headers, "message-id")
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
     let internal_date = internal_date.map(|d| d.format("%Y-%m-%d %H:%M:%S %z").to_string());
     let flags = flags.to_vec();
 
@@ -1042,6 +1062,7 @@ pub fn render_message(
             date,
             internal_date,
             flags,
+            message_id,
             body: String::from_utf8_lossy(bytes).to_string(),
             source: "raw",
             attachments: Vec::new(),
@@ -1119,6 +1140,7 @@ pub fn render_message(
         date,
         internal_date,
         flags,
+        message_id,
         body,
         source,
         attachments,
@@ -2067,6 +2089,35 @@ mod tests {
         let subject_pos = text.find("Subject:").unwrap();
         let blank_pos = text.find("\n\n").unwrap();
         assert!(subject_pos < blank_pos);
+    }
+
+    #[test]
+    fn the_message_id_line_is_there_only_when_asked_and_only_if_real() {
+        let msg = crlf(
+            "Subject: s\n\
+             Message-ID: <first@x>\n\
+             Message-ID: <second@x>\n\
+             Content-Type: text/plain\n\
+             \n\
+             body\n",
+        );
+        for raw in [false, true] {
+            let r = render_message(&msg, &[], None, raw).expect("render");
+            assert_eq!(r.message_id.as_deref(), Some("<first@x>"), "the first, verbatim");
+            // Without the flag, byte for byte what it always was.
+            assert_eq!(r.to_text_with(false), r.to_text());
+            // (Under `--raw` the body is the message itself, so only
+            // the summary above the first blank line is looked at.)
+            assert!(r.to_text().starts_with("Subject: s\n\n"), "{:?}", r.to_text());
+            let with = r.to_text_with(true);
+            // Closing the header summary, before the blank line.
+            assert!(with.starts_with("Subject: s\nMessage-ID: <first@x>\n\n"), "{:?}", with);
+        }
+
+        let none = render_message(&crlf("Subject: s\n\nbody\n"), &[], None, false)
+            .expect("render");
+        assert_eq!(none.message_id, None);
+        assert_eq!(none.to_text_with(true), none.to_text(), "nothing to print, nothing printed");
     }
 
     #[test]

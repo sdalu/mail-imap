@@ -1151,6 +1151,56 @@ fn a_reply_chain_is_threaded_from_the_headers() {
     }
 }
 
+/// The Message-ID a result carries is ENVELOPE's, verbatim -- and it
+/// is a locator: searching the header for it finds the message again.
+#[test]
+#[ignore = "needs an IMAP server: make tests-wire"]
+fn search_and_read_carry_the_message_id_and_it_finds_the_message_again() {
+    let mut c = client();
+    let token = unique("msgid");
+    let id = format!("<id.{}@example.com>", token);
+    deliver_raw(&format!(
+        "From: alice@example.com\r\nTo: {}\r\nSubject: {}\r\nMessage-ID: {}\r\n\r\nbody\r\n",
+        RECIPIENT, token, id
+    ));
+    let hits = c
+        .search_folders(
+            &["INBOX".to_string()],
+            &format!("HEADER SUBJECT \"{}\"", token),
+            0,
+            None,
+        )
+        .expect("UID SEARCH");
+    assert_eq!(hits.len(), 1, "the message carrying the token");
+    assert_eq!(hits[0].message_id.as_deref(), Some(id.as_str()), "angle brackets and all");
+
+    let again = c
+        .search_folders(&["INBOX".to_string()], &format!("HEADER Message-ID {}", id), 0, None)
+        .expect("search by Message-ID");
+    let uids: Vec<u32> = again.iter().map(|h| h.uid).collect();
+    assert_eq!(uids, vec![hits[0].uid], "the ID leads back to the message");
+
+    let rendered = c.read_message("INBOX", hits[0].uid, false).expect("read");
+    assert_eq!(rendered.message_id.as_deref(), Some(id.as_str()), "read agrees with search");
+
+    // And `read -j` carries it, through the handler that prints it.
+    let mut buf: Vec<u8> = Vec::new();
+    mail_imap::cli::read_emails(
+        &mut buf,
+        &config(),
+        &mail_imap::cli::FolderSpec::new(vec!["INBOX".to_string()]),
+        &[mail_imap::cli::select::parse_selection(&hits[0].uid.to_string()).expect("selection")],
+        false,
+        false,
+        true,
+        false,
+    )
+    .expect("read -j");
+    let value: serde_json::Value =
+        serde_json::from_str(String::from_utf8(buf).expect("UTF-8").trim()).expect("JSON");
+    assert_eq!(value["message_id"], id.as_str(), "read -j carries the ID");
+}
+
 #[test]
 #[ignore = "needs an IMAP server: make tests-wire"]
 fn a_line_break_in_a_folder_name_never_reaches_the_server() {

@@ -40,6 +40,11 @@ const FROM: &str = "Alice Example <alice@example.com>";
 /// format: this is when it was written, that is when it landed.
 const SENT: &str = "Fri, 18 Sep 2026 17:30:00 +0200";
 const INTERNALDATE: &str = "20-Sep-2026 09:05:00 +0000";
+/// The ID the last rung must carry up. The script sends a second
+/// `Message-ID:` after it, as a message with two would arrive: the
+/// first is the one reported.
+const MESSAGE_ID: &str = "<rescued.1@example.com>";
+const SECOND_MESSAGE_ID: &str = "<second.2@example.com>";
 
 /// How the script answers a `UID FETCH` that asked for an ENVELOPE.
 #[derive(Clone, Copy)]
@@ -141,13 +146,16 @@ fn serve(stream: TcpStream, log: &Log, answer: Answer) {
 /// is answered properly.
 fn fetch_reply(tag: &str, items: &str, answer: Answer) -> String {
     if items.contains("HEADER.FIELDS") {
-        let headers = format!("Subject: {}\r\nFrom: {}\r\nDate: {}\r\n\r\n", SUBJECT, FROM, SENT);
+        let headers = format!(
+            "Subject: {}\r\nFrom: {}\r\nDate: {}\r\nMessage-ID: {}\r\nMessage-ID: {}\r\n\r\n",
+            SUBJECT, FROM, SENT, MESSAGE_ID, SECOND_MESSAGE_ID
+        );
         // `\Recent` is in here because the tool must drop it: it is the
         // server's own bookkeeping, and every path that reports flags
         // omits it.
         return format!(
             "* 1 FETCH (UID 1 FLAGS (\\Seen \\Recent) INTERNALDATE \"{}\" \
-             RFC822.SIZE 321 BODY[HEADER.FIELDS (SUBJECT FROM DATE)] {{{}}}\r\n{})\r\n\
+             RFC822.SIZE 321 BODY[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)] {{{}}}\r\n{})\r\n\
              {} OK UID FETCH completed\r\n",
             INTERNALDATE,
             headers.len(),
@@ -288,6 +296,11 @@ fn an_unusable_fetch_reply_walks_down_to_the_header_fetch() {
     assert_eq!(hit.date.as_deref(), Some("2026-09-20 09:05:00 +0000"));
     assert_eq!(hit.sent.as_deref(), Some(SENT));
 
+    // The Message-ID survives the ladder too: ENVELOPE carries it on
+    // every rung above, so this one has to ask for the header -- and
+    // of the two the message carries, it reports the first, verbatim.
+    assert_eq!(hit.message_id.as_deref(), Some(MESSAGE_ID));
+
     // `\Recent` is the server's own and is never reported.
     assert!(
         hit.flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen")),
@@ -315,6 +328,11 @@ fn an_unusable_fetch_reply_walks_down_to_the_header_fetch() {
     assert!(
         asked.last().expect("at least one").contains("HEADER.FIELDS"),
         "the last attempt is the header fetch: {:?}",
+        asked
+    );
+    assert!(
+        asked.last().expect("at least one").contains("MESSAGE-ID"),
+        "and it asks for the Message-ID: {:?}",
         asked
     );
 }
@@ -366,6 +384,7 @@ fn a_refused_envelope_reconnects_at_each_rung_and_still_arrives() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].subject, SUBJECT, "rebuilt from the headers");
     assert_eq!(hits[0].sent.as_deref(), Some(SENT));
+    assert_eq!(hits[0].message_id.as_deref(), Some(MESSAGE_ID));
 
     // Each rung is asked for twice -- once, then again on a fresh
     // connection -- and the narrowing only happens after the second

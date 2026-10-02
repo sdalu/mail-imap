@@ -243,6 +243,10 @@ enum Command {
     Search {
         /// IMAP search query
         query: String,
+        /// Append each message's Message-ID to its result line (find it
+        /// again with search 'HEADER Message-ID <id>')
+        #[clap(long = "message-id")]
+        message_id: bool,
     },
     /// Read email(s) by message selection: the header summary, then
     /// the readable text -- text/plain if there is one, else text/html
@@ -255,6 +259,10 @@ enum Command {
         /// tool's MIME parser cannot make sense of
         #[clap(long = "raw")]
         raw: bool,
+        /// Add a Message-ID line to the header summary (find the message
+        /// again with search 'HEADER Message-ID <id>')
+        #[clap(long = "message-id")]
+        message_id: bool,
         #[clap(flatten)]
         sel: Sel,
     },
@@ -272,7 +280,12 @@ enum Command {
         sel: Sel,
     },
     /// List unread emails of the selected folder(s)
-    Unread,
+    Unread {
+        /// Append each message's Message-ID to its result line (find it
+        /// again with search 'HEADER Message-ID <id>')
+        #[clap(long = "message-id")]
+        message_id: bool,
+    },
     /// Move email(s) to another folder, named last, as `mv` does:
     /// `move 1-5 Archive` (needs access-level 'organize'; the folder
     /// must already exist)
@@ -707,16 +720,17 @@ fn main() {
             json,
             debug,
         ),
-        Command::Search { query } => {
-            cli::search_emails(out, &config, query, &folder_spec(&args), json, debug)
+        Command::Search { query, message_id } => {
+            cli::search_emails(out, &config, query, &folder_spec(&args), *message_id, json, debug)
         }
-        Command::Read { raw, sel } => {
+        Command::Read { raw, message_id, sel } => {
             let selections = sel.resolve(json);
             cli::read_emails(out, 
                 &config,
                 &folder_spec(&args),
                 &selections,
                 *raw,
+                *message_id,
                 json,
                 debug,
             )
@@ -733,7 +747,9 @@ fn main() {
                 debug,
             )
         }
-        Command::Unread => cli::unread(out, &config, &folder_spec(&args), json, debug),
+        Command::Unread { message_id } => {
+            cli::unread(out, &config, &folder_spec(&args), *message_id, json, debug)
+        }
         Command::Move { sel } => {
             // The last argument is the folder, as `mv` has it. A
             // forgotten one needs no guard: `move 1-5` leaves nothing
@@ -1083,5 +1099,36 @@ mod tests {
         assert!(!args(&["info"]).wants_mock(), "the real backend by default");
         #[cfg(feature = "mock")]
         assert!(args(&["--mock", "info"]).wants_mock());
+    }
+
+    /// `--message-id` is taken by the three commands that list or read
+    /// messages, long form only, and is off unless given.
+    #[test]
+    fn message_id_is_a_long_flag_on_search_unread_and_read() {
+        let search = |argv: &[&str]| match args(argv).command {
+            Command::Search { message_id, .. } => message_id,
+            _ => panic!("not a search"),
+        };
+        assert!(!search(&["search", "ALL"]));
+        assert!(search(&["search", "--message-id", "ALL"]));
+        assert!(search(&["search", "ALL", "--message-id"]));
+
+        let unread = |argv: &[&str]| match args(argv).command {
+            Command::Unread { message_id } => message_id,
+            _ => panic!("not unread"),
+        };
+        assert!(!unread(&["unread"]));
+        assert!(unread(&["unread", "--message-id"]));
+
+        let read = |argv: &[&str]| match args(argv).command {
+            Command::Read { message_id, raw, .. } => (message_id, raw),
+            _ => panic!("not a read"),
+        };
+        assert_eq!(read(&["read", "5"]), (false, false));
+        assert_eq!(read(&["read", "--message-id", "5"]), (true, false));
+        assert_eq!(read(&["read", "--raw", "--message-id", "5"]), (true, true));
+
+        // Not a global option: elsewhere it is refused, not ignored.
+        assert!(Args::try_parse_from(["mail-imap", "uid", "--message-id"]).is_err());
     }
 }

@@ -36,7 +36,11 @@ pub struct RealClient {
 /// request until the response parses again.
 const ITEMS_FULL: &str = "(UID ENVELOPE FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE)";
 const ITEMS_ENVELOPE: &str = "(UID ENVELOPE FLAGS INTERNALDATE RFC822.SIZE)";
-const ITEMS_HEADERS: &str = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])";
+/// The last rung asks for MESSAGE-ID as well: ENVELOPE carries it on the
+/// rungs above, and a server whose ENVELOPE is refused must not cost a
+/// result its Message-ID.
+const ITEMS_HEADERS: &str =
+    "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])";
 
 enum Attempt {
     Success(imap::types::Fetches),
@@ -759,6 +763,10 @@ impl RealClient {
             .and_then(|e| e.date.as_ref())
             .map(|d| bytes_to_string(d).trim().to_string())
             .filter(|d| !d.is_empty());
+        // ENVELOPE's tenth field, so it costs nothing extra either.
+        let message_id = env
+            .and_then(|e| e.message_id.as_ref())
+            .and_then(|v| message_id_of(v));
         let flags: Vec<String> = f
             .flags()
             .iter()
@@ -775,6 +783,7 @@ impl RealClient {
             size: f.size,
             flags,
             parts: f.bodystructure().map(count_leaf_parts).unwrap_or(0),
+            message_id,
         }
     }
 
@@ -811,6 +820,9 @@ impl RealClient {
         let sent = header_value(raw, b"Date")
             .map(|v| bytes_to_string(&v).trim().to_string())
             .filter(|d| !d.is_empty());
+        // `header_value` returns the first occurrence, which is the
+        // one to report when a message carries several.
+        let message_id = header_value(raw, b"Message-ID").and_then(|v| message_id_of(&v));
         let flags: Vec<String> = f
             .flags()
             .iter()
@@ -827,6 +839,7 @@ impl RealClient {
             size: f.size,
             flags,
             parts: 0,
+            message_id,
         }
     }
 }
@@ -1534,6 +1547,15 @@ fn header_value(raw: &[u8], name: &[u8]) -> Option<Vec<u8>> {
     out
 }
 
+/// A `Message-ID:` value as `search` reports it: the bytes as they
+/// came, angle brackets included, with only the surrounding whitespace
+/// a folded header leaves taken off -- or `None` for an empty one,
+/// which is no ID at all rather than an empty one.
+fn message_id_of(raw: &[u8]) -> Option<String> {
+    let v = bytes_to_string(raw).trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
 /// Extract the first e-mail address from a raw From header value
 /// (`"Name" <a@b>`, `a@b`, or `a@b, c@d`).
 fn address_from_header(raw: &[u8]) -> String {
@@ -1623,7 +1645,7 @@ fn format_address(addr: &imap_proto::types::Address) -> String {
 mod tests {
     use imap::Authenticator as _;
     use super::XOAuth2;
-    use super::{address_from_header, header_value, RealClient};
+    use super::{address_from_header, header_value, message_id_of, RealClient};
 
     #[test]
     fn header_value_basic_case_insensitive() {
@@ -1650,6 +1672,23 @@ mod tests {
             header_value(raw, b"Subject").unwrap(),
             b"Votre facture \xe9!"
         );
+    }
+
+    #[test]
+    fn the_message_id_is_the_first_one_verbatim_or_none() {
+        let id = |raw: &[u8]| header_value(raw, b"Message-ID").and_then(|v| message_id_of(&v));
+        // Brackets kept, case of the header name irrelevant.
+        assert_eq!(id(b"message-id: <a@b>\r\n").as_deref(), Some("<a@b>"));
+        // Several: the first, not the last and not a merge.
+        assert_eq!(
+            id(b"Message-ID: <one@x>\r\nSubject: s\r\nMessage-ID: <two@x>\r\n").as_deref(),
+            Some("<one@x>")
+        );
+        // Folded onto the next line: the folding whitespace goes.
+        assert_eq!(id(b"Message-ID:\r\n <f@x>\r\n").as_deref(), Some("<f@x>"));
+        // None, or an empty one: nothing is invented.
+        assert_eq!(id(b"Subject: s\r\n"), None);
+        assert_eq!(id(b"Message-ID:   \r\n"), None);
     }
 
     #[test]

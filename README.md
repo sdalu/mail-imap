@@ -122,6 +122,9 @@ cargo run -- --help
   `THREAD=REFERENCES`, otherwise client-side reconstruction from
   Message-ID / References headers)
 - List unread emails of one or more folders
+- Show each message's Message-ID (`--message-id` on `search`, `unread`
+  and `read`; always in `-j` output), a locator that
+  `search 'HEADER Message-ID <...>'` takes back
 - Sort search/unread results by uid/date/arrival/size/subject/from/to/cc
   (`date` is when it was sent, `arrival` when it reached the mailbox)
   (`-S`/`--sort`): server-side `UID SORT` (RFC 5256) when the server
@@ -183,12 +186,12 @@ takes the folder flags `-f`/`-A`; see [Folder selection](#folder-selection).
 | `folder subscribe`   | `folder subscribe <FOLDER>`                       | Subscribe to a mailbox (needs `restructure`)                                                                                                                                    |
 | `folder unsubscribe` | `folder unsubscribe <FOLDER>`                     | Unsubscribe from a mailbox (needs `restructure`)                                                                                                                                |
 | `folder delete`      | `folder delete <FOLDER> [--force]`                | Delete a mailbox and everything in it. INBOX is refused at every level; a mailbox holding messages is refused without `--force` (needs `full`)                                  |
-| `search`             | `search <QUERY>`                                  | Search emails with any IMAP `SEARCH` query in the selected folder(s); most recent first unless `-S`                                                                             |
-| `read`               | `read [--raw] <SELECTION...>`                     | Read the selected email(s): the readable text, then a list of the attachments. `--raw` prints the message's MIME body verbatim instead                                          |
+| `search`             | `search [--message-id] <QUERY>`                   | Search emails with any IMAP `SEARCH` query in the selected folder(s); most recent first unless `-S`. `--message-id` appends each one's Message-ID                               |
+| `read`               | `read [--raw] [--message-id] <SELECTION...>`      | Read the selected email(s): the readable text, then the attachments. `--raw` prints the MIME body verbatim instead; `--message-id` adds a `Message-ID:` line                    |
 | `count`              | `count`                                           | Message counts / status of the selected folder(s), or every mailbox if none is given (alias: `status`)                                                                          |
 | `uid`                | `uid`                                             | List the message UIDs of the selected folder(s), one block per folder                                                                                                           |
 | `thread`             | `thread <SELECTION...>`                           | List the UIDs of every message in the thread(s) containing the selected message(s)                                                                                              |
-| `unread`             | `unread`                                          | List unread emails of the selected folder(s) (`search UNSEEN`)                                                                                                                  |
+| `unread`             | `unread [--message-id]`                           | List unread emails of the selected folder(s) (`search UNSEEN`); `--message-id` as for `search`                                                                                  |
 | `part list`          | `part list <SELECTION...>`                        | List the MIME parts of the selected email(s)                                                                                                                                    |
 | `part save`          | `part save <SELECTION> <PART> [-o\|--out <FILE\|->]` | Save one MIME part of one message to a file, or to stdout with `-o -` (the selection must name exactly one message)                                                             |
 | `part strip`         | `part strip <SELECTION> <PART...>`                | Replace MIME part(s) with a stub recording what was there; the message survives, its UID changes. Needs `UIDPLUS` (needs `full`)                                               |
@@ -666,6 +669,23 @@ mail-imap -S -date -f INBOX search ALL
 mail-imap -S "subject,-size" -f INBOX search UNSEEN
 ```
 
+`--message-id` (on `search` and `unread`) appends each message's
+`Message-ID` header to its result line, two spaces after the rest,
+verbatim with its angle brackets. A message without one gets nothing
+appended; one with several shows the first. Without the option the
+lines are unchanged, and `-j` carries the ID either way (`message_id`).
+
+The ID is a locator: a later run finds the message again by searching
+the header for it, under whatever UID it has by then — in the folder(s)
+searched, so `-A` if it may have been filed elsewhere.
+
+```bash
+mail-imap -f INBOX search --message-id "SINCE 01-Jan-2026"
+mail-imap -f INBOX unread --message-id
+mail-imap search 'HEADER Message-ID <m5@mail>'
+mail-imap -A search 'HEADER Message-ID <m5@mail>'
+```
+
 #### Reading
 
 A selection is `[FOLDER::]UIDS`: separate arguments, a comma list, a
@@ -680,6 +700,15 @@ mail-imap -f INBOX read 12345,67890   # same thing
 mail-imap -f INBOX read 1-50
 mail-imap -f INBOX read '*'
 mail-imap read Archive::12345 "Sent Items::1-5"
+```
+
+`--message-id` ends the header summary with a `Message-ID:` line (the
+message's first, verbatim; none for a message without one), which
+`search 'HEADER Message-ID <...>'` takes back, as under
+[Searching](#searching). `-j` carries it as `message_id` either way.
+
+```bash
+mail-imap -f INBOX read --message-id 12345
 ```
 
 #### Moving mail
@@ -943,8 +972,8 @@ Each command prints one compact JSON object to stdout:
 | `info`                                                   | `{"tool", "config", "access", "folders", "defaults", "server"}` — see [`info`](#info) for the fields of each                                                                                                                |
 | `folder list`                                            | `{"count", "folders": [{"name", "delimiter", "no_inferiors", "attrs"}]}` (`delimiter` is `null` for a mailbox reported with none; `attrs` carries `\Marked` and the RFC 6154 special uses)                                  |
 | `folder create` / `rename` / `subscribe` / `unsubscribe` / `delete` | `{"action", "folder"}`, plus `"to"` for a `rename` and `"use"` for a `create` that declared a special use                                                                                               |
-| `search`                                                 | one folder: `{"folder", "query", "count", "results": [...]}`; several folders: `{"folders": [...], "query", "count", "results": [...]}`. Each result includes `"folder"` (its mailbox), `"parts"` (number of MIME parts), `"date"` (when it arrived — the internaldate) and `"sent"` (the message's own `Date:` header, `null` when it has none). Both are always present, whichever one the text output shows |
-| `read`                                                   | one `{"folder", "uid", "content", "source"}` object per selected UID; `source` is `text`, `html`, `raw` or `none`, naming which part `content` came from                                                                    |
+| `search`                                                 | one folder: `{"folder", "query", "count", "results": [...]}`; several folders: `{"folders": [...], "query", "count", "results": [...]}`. Each result includes `"folder"` (its mailbox), `"parts"` (number of MIME parts), `"date"` (when it arrived — the internaldate) and `"sent"` (the message's own `Date:` header, `null` when it has none). Both are always present, whichever one the text output shows. `"message_id"` is the first `Message-ID` header, verbatim with its angle brackets, `null` when it has none — always present, with or without `--message-id` |
+| `read`                                                   | one `{"folder", "uid", "content", "source", "message_id"}` object per selected UID; `source` is `text`, `html`, `raw` or `none`, naming which part `content` came from; `message_id` is as in `search`, always present, and `--message-id` leaves `content` alone                                                                    |
 | `count` / `status`                                       | `{"all", "counts": [{"name", "messages", "unseen", "recent", "uid_next", "uid_validity"}]}`                                                                                                                                 |
 | `uid`                                                    | one `{"folder", "count", "uids": [1, 2, ...]}` object per selected folder                                                                                                                                                   |
 | `thread`                                                 | one `{"folder", "uid", "count", "uids": [1, 2, ...]}` object per selected message (all UIDs of the thread containing `uid`, ascending, `uid` included)                                                                      |

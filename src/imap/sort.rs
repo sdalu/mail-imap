@@ -235,6 +235,7 @@ mod tests {
             size: Some(size),
             flags: Vec::new(),
             parts: 1,
+            message_id: None,
         }
     }
 
@@ -381,6 +382,7 @@ mod tests {
             size: None,
             flags: Vec::new(),
             parts: 0,
+            message_id: None,
         }
     }
 }

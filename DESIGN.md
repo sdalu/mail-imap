@@ -254,8 +254,11 @@ countermeasures (`src/imap/real.rs`):
   (`reconnect`) and retries once;
 - `fetch_chunk` degrades per batch: full items → without `BODYSTRUCTURE` →
   per-message → per-message via a literal `BODY.PEEK[HEADER.FIELDS
-  (SUBJECT FROM DATE)]` fetch with the metadata rebuilt from raw bytes
-  (`header_value` / `address_from_header`);
+  (SUBJECT FROM DATE MESSAGE-ID)]` fetch with the metadata rebuilt from
+  raw bytes (`header_value` / `address_from_header`). `MESSAGE-ID` is
+  in that list because the rungs above get it free as ENVELOPE's tenth
+  field, and a server whose ENVELOPE is refused must not cost a result
+  its Message-ID; of several, `header_value` keeps the first;
 - individual unparseable messages are skipped with a stderr warning, and
   `read` falls back to an `ENVELOPE`-less fetch whose summary is built from
   the raw RFC822 header block;
@@ -267,7 +270,8 @@ rather than a server: it speaks enough IMAP to be searched, and answers
 the ENVELOPE fetches badly on purpose, which is the one thing a real
 server cannot be asked to do. It walks the ladder down to the header
 rung and proves the message still arrives, with the two dates still
-distinct and `\Recent` still dropped. Both doors into the narrowing are
+distinct, its Message-ID (the first of two) still carried, and
+`\Recent` still dropped. Both doors into the narrowing are
 scripted, because they differ where it matters: a *well-formed response
 that is not a FETCH* is `Error::Unexpected` and narrows on one
 connection, while a *refused ENVELOPE* poisons the stream, so
@@ -652,11 +656,21 @@ own headers rather than reconstructed from the server's `ENVELOPE`, so
 an address the server re-spelled will be spelled the way the message
 spells it. The body under `--raw` is byte for byte what it always was.
 
+`--message-id` adds one line to that summary, `Message-ID:` and the
+message's first one verbatim, after everything the summary already
+held; a message without one gets no line. It comes out of the same
+header block as the rest of the summary, so `read` and `search` agree
+on the ID without either asking the other, and with the option off the
+text is byte for byte what it was (`RenderedMessage::to_text` is
+`to_text_with(false)`).
+
 JSON follows the same mode rather than a different one, per the rule in
 *Output* that text may show less than JSON but never something
 different: `content` is the same body the text shows, and a `source`
 field (`text`, `html`, `raw`, `none`) says which leaf it came from, so
-a caller knows what it was given.
+a caller knows what it was given. A `message_id` field, present always
+(`null` when there is none), carries what `--message-id` adds to the
+text, so `content` stays the message and is not changed by the flag.
 
 ### Passive read-only behaviour
 
@@ -1247,7 +1261,9 @@ deterministic placeholder file whose size matches the part reported by
 to its fixed message set with the same client-side comparator the real
 backend uses as fallback. `flag`/`tag` mutate an in-memory per-UID
 keyword set (`message_flags`), which shows up in the `flags` of subsequent
-mock `search` results.
+mock `search` results. Each message's Message-ID is the first of the IDs
+`thread` links it by, reported by `search` and written into the raw
+bytes `read` renders, so the two cannot name different IDs.
 
 ### It is a development aid, and does not ship
 
@@ -1443,7 +1459,12 @@ What is decided here is how they are shaped.
   name can go back into `-f`, and a name trailed by parentheses is
   worse to read off and to copy. JSON ignores `-l` and always carries
   every field: a caller cannot ask again, and a field that appears
-  only under a flag is a field no caller can rely on.
+  only under a flag is a field no caller can rely on. `--message-id`
+  on `search`/`unread` is the same rule: the text line gains the ID
+  only when asked, while each JSON result carries `message_id`
+  always, `null` for a message without one. `read` follows it too:
+  its JSON object gains `message_id` the same way, and the flag
+  leaves `content` -- the message itself -- untouched.
 - **The shapes are types, not `serde_json::json!` literals.** Every
   object above is a `#[derive(Serialize)]` struct in `src/cli/mod.rs`
   (or, for `FolderInfo`, `SearchResult`, `Mailbox` and `PartInfo`, the
