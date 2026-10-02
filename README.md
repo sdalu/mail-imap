@@ -304,7 +304,7 @@ and `LIST`, and changes nothing.
 
 ```console
 $ mail-imap info
-mail-imap 0.4.0 (real backend)
+mail-imap 0.5.0 (real backend)
   config      /home/you/.config/mail-imap.conf
   account     user@example.com@imap.example.com:993 (implicit TLS)
   auth        login
@@ -368,7 +368,7 @@ What each block is for:
 `-j` gives the same thing as one object:
 
 ```json
-{"tool":{"name":"mail-imap","version":"0.4.0","backend":"real"},
+{"tool":{"name":"mail-imap","version":"0.5.0","backend":"real"},
  "config":{"path":"/home/you/.config/mail-imap.conf",
            "server":"imap.example.com","port":993,
            "tls":"implicit","insecure":false,"auth":"login",
