@@ -10,33 +10,47 @@ use cli::select::{parse_selections, Selection};
 use cli::FolderSpec;
 
 /// Text shown under every command that takes a message selection.
+/// Laid out by hand within 76 columns, so clap's wrapping (capped at
+/// 80) never has to fold it and break the alignment.
 const SELECTION_HELP: &str = "\
-A message selection is [FOLDER::]UIDS — 5, 1,4,7, 1-9 (a UID range), '*' \
-(every message, and '*' is only ever that), 9- (from 9 to the end of the \
-mailbox), last:20 / first:5 (a count of messages, which no range can \
-express), Archive::1-5. '::' binds the folder; a single ':' introduces a \
-count and nothing else, so IMAP's own range operator is not taken — write \
-1-5, not 1:5. A range is an \
-interval of the UID space, so it may match fewer messages than its span. \
-Without a folder a selection means the -f folder (or \
-\"folder\" from the config).";
+Message selection: [FOLDER::]UIDS
+  5  1,4,7          single UIDs
+  1-9               a UID range: an interval of the UID space, so it may
+                    match fewer messages than its span
+  9-                from UID 9 to the end of the mailbox
+  '*'               every message (and '*' is only ever that)
+  last:20  first:5  a count of messages, which no range can express
+  Archive::1-5      in a named folder
+
+'::' binds the folder; a single ':' introduces a count and nothing else,
+so IMAP's own range operator is not taken: write 1-5, not 1:5. Without a
+folder a selection means the -f folder (or \"folder\" from the config).";
 
 #[derive(Parser)]
-#[clap(name = "mail-imap", version = env!("CARGO_PKG_VERSION"), author = "AI Assistant")]
+#[clap(
+    name = "mail-imap",
+    version = env!("CARGO_PKG_VERSION"),
+    author = "AI Assistant",
+    max_term_width = 80
+)]
 struct Args {
-    /// Profile to use from a config that names several accounts.
-    /// Without it the config's `default = "..."` decides; a config
-    /// with no profiles needs neither
-    #[clap(short = 'p', long = "profile", global = true, value_name = "NAME")]
+    /// Profile (account) to use from the config
+    ///
+    /// For a config that names several accounts. Without it the config's `default = "..."` decides; a config
+    /// with no profiles needs neither.
+    #[clap(short = 'p', long = "profile", global = true, value_name = "NAME", help_heading = "Account options")]
     profile: Option<String>,
 
-    /// Configuration file path (or set MAIL_IMAP_CONFIG). The file
-    /// must exist: a path given here is an answer, not a candidate
-    #[clap(short = 'c', long = "config", global = true, value_name = "PATH")]
+    /// Configuration file path (or set MAIL_IMAP_CONFIG)
+    ///
+    /// The file must exist: a path given here is an answer, not a
+    /// candidate.
+    #[clap(short = 'c', long = "config", global = true, value_name = "PATH", help_heading = "Account options")]
     config_file: Option<String>,
 
-    /// Folder(s) to operate on: a name, or an IMAP LIST pattern
-    /// ('Archive/*' crosses the hierarchy, 'Archive/%' does not).
+    /// Folder(s) to operate on: a name or an IMAP LIST pattern
+    ///
+    /// 'Archive/*' crosses the hierarchy, 'Archive/%' does not.
     /// Repeatable and comma-separated. Default: "folder" from the config
     /// (INBOX), except for `count`, which defaults to every mailbox.
     #[clap(
@@ -44,36 +58,40 @@ struct Args {
         long = "folder",
         global = true,
         value_name = "NAME",
-        value_delimiter = ','
+        value_delimiter = ',',
+        help_heading = "Folder options"
     )]
     folder: Vec<String>,
 
-    /// Every selectable mailbox of the account (shorthand for -f '*')
-    #[clap(short = 'A', long = "all-folders", global = true)]
+    /// Every selectable mailbox of the account (same as -f '*')
+    #[clap(short = 'A', long = "all-folders", global = true, help_heading = "Folder options")]
     all_folders: bool,
 
-    /// Use the in-memory mock backend (no real server; for testing/demos).
-    /// Development builds only: the released binary is built without it
+    /// In-memory mock backend, no server (tests and demos)
+    ///
+    /// Development builds only: the released binary is built without it.
     #[cfg(feature = "mock")]
-    #[clap(long = "mock", global = true)]
+    #[clap(long = "mock", global = true, help_heading = "Account options")]
     mock: bool,
 
-    /// Enable debug output (show connection attempts, login failures, etc.)
-    #[clap(short = 'd', long = "debug", global = true)]
+    /// Debug output (connection attempts, login failures, ...)
+    #[clap(short = 'd', long = "debug", global = true, help_heading = "Output options")]
     debug: bool,
 
-    /// Output results as compact single-line JSON (for programmatic use)
-    #[clap(short = 'j', long = "json", global = true)]
+    /// Output results as compact single-line JSON
+    #[clap(short = 'j', long = "json", global = true, help_heading = "Output options")]
     json: bool,
 
-    /// Maximum number of search results to fetch (overrides the config
-    /// "max"; 0 = unlimited)
-    #[clap(short = 'M', long = "max", global = true)]
+    /// Maximum number of search results to fetch (0 = unlimited)
+    ///
+    /// Overrides the config "max".
+    #[clap(short = 'M', long = "max", global = true, help_heading = "Output options")]
     max: Option<usize>,
 
-    /// Sort search/unread results: comma-separated criteria
-    /// (uid, date, arrival, size, subject, from, to, cc), first = primary,
-    /// '-' prefix = descending; e.g. "-date" or "subject,-size".
+    /// Sort search/unread results, e.g. "-date" or "subject,-size"
+    ///
+    /// Comma-separated criteria (uid, date, arrival, size, subject,
+    /// from, to, cc), first = primary, '-' prefix = descending.
     /// Overrides the config "sort"; default is most recent first. Uses
     /// server-side UID SORT (RFC 5256) when advertised, else sorts
     /// client-side.
@@ -82,15 +100,17 @@ struct Args {
         long = "sort",
         global = true,
         allow_hyphen_values = true,
-        value_name = "SPEC"
+        value_name = "SPEC",
+        help_heading = "Output options"
     )]
     sort: Option<String>,
 
-    /// Narrow what this run may change: survey, organize,
-    /// restructure or full.
+    /// Narrow what this run may change: survey, organize, restructure,
+    /// full
+    ///
     /// The config's "access-level" sets the ceiling; this can only lower
-    /// it, never raise it
-    #[clap(long = "access-level", global = true, value_name = "LEVEL")]
+    /// it, never raise it.
+    #[clap(long = "access-level", global = true, value_name = "LEVEL", help_heading = "Account options")]
     access_level: Option<String>,
 
     /// Subcommand to execute
@@ -225,21 +245,25 @@ impl Sel {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// List folders, or change the folder tree (create / rename /
-    /// subscribe / unsubscribe need access-level 'restructure'; delete
-    /// needs 'full')
+    /// List folders, or change the folder tree
+    ///
+    /// create / rename / subscribe / unsubscribe need access-level
+    /// 'restructure'; delete needs 'full'.
     Folder {
         /// What to do with the folders
         #[clap(subcommand)]
         action: FolderAction,
     },
-    /// What this run can do and what the server is: the access level
-    /// in force, the hierarchy delimiter to build folder paths with,
-    /// the special-use mailboxes, and which wire path each operation
-    /// takes here
+    /// What this run can do, and what the server is
+    ///
+    /// The access level in force, the hierarchy delimiter to build
+    /// folder paths with, the special-use mailboxes, and which wire path
+    /// each operation takes here.
     Info,
-    /// Search emails in the selected folders (IMAP SEARCH query: "ALL"
-    /// for every message, "UNSEEN", 'HEADER FROM "foo"')
+    /// Search emails in the selected folders
+    ///
+    /// QUERY is an IMAP SEARCH query: "ALL" for every message, "UNSEEN",
+    /// 'HEADER FROM "foo"'.
     Search {
         /// IMAP search query
         query: String,
@@ -248,10 +272,12 @@ enum Command {
         #[clap(long = "message-id")]
         message_id: bool,
     },
-    /// Read email(s) by message selection: the header summary, then
-    /// the readable text -- text/plain if there is one, else text/html
-    /// with its tags stripped, else a note naming what the message
-    /// holds -- and a brief listing of anything else it carries
+    /// Read email(s) by message selection
+    ///
+    /// The header summary, then the readable text -- text/plain if there
+    /// is one, else text/html with its tags stripped, else a note naming
+    /// what the message holds -- and a brief listing of anything else it
+    /// carries.
     Read {
         /// Show the message the way it always printed here: the header
         /// summary followed by the exact fetched bytes, unparsed --
@@ -266,14 +292,15 @@ enum Command {
         #[clap(flatten)]
         sel: Sel,
     },
-    /// Show message counts / status of mailboxes (IMAP STATUS)
+    /// Message counts / status of mailboxes (IMAP STATUS)
     #[clap(alias = "status")]
     Count,
     /// List the message UIDs of the selected folder(s)
     Uid,
-    /// List the UIDs of every message in the thread containing the
-    /// selected message(s) (server-side RFC 5256 THREAD when advertised,
-    /// else client-side reconstruction from Message-ID / References)
+    /// List the UIDs of the thread(s) holding the selected message(s)
+    ///
+    /// Server-side RFC 5256 THREAD when advertised, else client-side
+    /// reconstruction from Message-ID / References.
     #[clap(after_help = SELECTION_HELP)]
     Thread {
         #[clap(flatten)]
@@ -286,39 +313,43 @@ enum Command {
         #[clap(long = "message-id")]
         message_id: bool,
     },
-    /// Move email(s) to another folder, named last, as `mv` does:
-    /// `move 1-5 Archive` (needs access-level 'organize'; the folder
-    /// must already exist)
+    /// Move email(s) to another folder, named last: `move 1-5 Archive`
+    ///
+    /// The folder comes last, as `mv` takes it, and must already exist.
+    /// Needs access-level 'organize'.
     #[clap(after_help = SELECTION_HELP)]
     Move {
         #[clap(flatten)]
         sel: Sel,
     },
-    /// Copy email(s) into another folder, named last, as `move` takes
-    /// it: `copy 1-5 Archive` (needs access-level 'organize'; the
-    /// folder must already exist; the originals are left where they are)
+    /// Copy email(s) to another folder, named last: `copy 1-5 Archive`
+    ///
+    /// The folder comes last, as `move` takes it, and must already
+    /// exist; the originals are left where they are. Needs access-level
+    /// 'organize'.
     #[clap(after_help = SELECTION_HELP)]
     Copy {
         #[clap(flatten)]
         sel: Sel,
     },
-    /// Permanently remove the selected email(s) that are already marked
-    /// \Deleted (UID EXPUNGE, RFC 4315; needs access-level 'full' and a
-    /// server advertising UIDPLUS). Never marks a message itself --
-    /// `flag add <selection> deleted` does that, and `search DELETED`
-    /// finds what is already marked. There is no form that expunges an
-    /// entire mailbox
+    /// Permanently remove selected email(s) already marked \Deleted
+    ///
+    /// UID EXPUNGE (RFC 4315): needs access-level 'full' and a server
+    /// advertising UIDPLUS. Never marks a message itself -- `flag add
+    /// <selection> deleted` does that, and `search DELETED` finds what is
+    /// already marked. There is no form that expunges an entire mailbox.
     #[clap(after_help = SELECTION_HELP)]
     Expunge {
         #[clap(flatten)]
         sel: Sel,
     },
-    /// Put a message into a mailbox (APPEND, RFC 3501 6.3.11): `append
-    /// INBOX msg.eml`, or `-` as FILE to read it from stdin. Needs
-    /// access-level 'full'; the folder must already exist -- this does
-    /// not create it. The content must be shaped like an RFC 5322
-    /// message (a header block ended by a blank line); a lone LF line
-    /// ending is normalized to CRLF before it is sent
+    /// Put a message into a mailbox: `append INBOX msg.eml`
+    ///
+    /// APPEND (RFC 3501 6.3.11); `-` as FILE reads the message from
+    /// stdin. Needs access-level 'full'; the folder must already exist
+    /// -- this does not create it. The content must be shaped like an
+    /// RFC 5322 message (a header block ended by a blank line); a lone
+    /// LF line ending is normalized to CRLF before it is sent.
     Append {
         /// Mailbox to append into
         folder: String,
@@ -340,25 +371,29 @@ enum Command {
         #[clap(subcommand)]
         action: PartsAction,
     },
-    /// Enable/disable the IMAP-defined message flags (\Seen,
-    /// \Answered, \Flagged, \Deleted, \Draft) via UID STORE.
-    /// User-defined keywords are the `tag` command's
+    /// List, set or clear the IMAP system flags of email(s)
+    ///
+    /// \Seen, \Answered, \Flagged, \Deleted, \Draft, via UID STORE.
+    /// User-defined keywords are the `tag` command's.
     Flag {
         /// What to do with the flags
         #[clap(subcommand)]
         action: FlagAction,
     },
-    /// Add/remove custom keyword tags on emails (plain keywords, no
-    /// system flags) via UID STORE
+    /// List, add or remove keyword tags on email(s)
+    ///
+    /// Plain keywords, not system flags (those are the `flag` command's),
+    /// via UID STORE.
     Tag {
         /// What to do with the tags
         #[clap(subcommand)]
         action: TagAction,
     },
-    /// Print a shell completion script to stdout, generated from this
-    /// binary's own clap command so it cannot drift from what the CLI
-    /// actually accepts (`make install` places one for bash, zsh and
-    /// fish under PREFIX)
+    /// Print a shell completion script to stdout
+    ///
+    /// Generated from this binary's own clap command, so it cannot drift
+    /// from what the CLI actually accepts. `make install` places one for
+    /// bash, zsh and fish under PREFIX.
     Completion {
         /// Shell to generate the script for
         shell: Shell,
@@ -431,8 +466,9 @@ enum FolderAction {
         name: String,
     },
     /// Delete a mailbox, permanently and with everything it holds
-    /// (INBOX is refused, at every access level; needs access-level
-    /// 'full')
+    ///
+    /// INBOX is refused, at every access level. Needs access-level
+    /// 'full'.
     Delete {
         /// The mailbox to delete
         name: String,
@@ -481,11 +517,14 @@ enum FlagAction {
 
 #[derive(clap::Subcommand)]
 enum TagAction {
-    /// List the keywords with an agreed meaning: the IANA registry,
-    /// and the conventions no registry covers (no server needed)
+    /// List the keywords with an agreed meaning (no server needed)
+    ///
+    /// The IANA registry, and the conventions no registry covers.
     Known,
-    /// Mark the selected email(s) junk: set every spelling of it the
-    /// mailbox keeps, and clear every spelling of the opposite
+    /// Mark the selected email(s) junk
+    ///
+    /// Sets every spelling of it the mailbox keeps, and clears every
+    /// spelling of the opposite.
     #[clap(after_help = SELECTION_HELP)]
     Junk {
         #[clap(flatten)]
@@ -540,10 +579,11 @@ enum PartsAction {
         #[clap(flatten)]
         sel: Sel,
     },
-    /// Replace one or more MIME parts of a message with a stub
-    /// recording what was there, keeping the message. IMAP cannot edit
-    /// a message, so this appends the rebuilt one and removes the
-    /// original: the UID changes (needs access-level 'full')
+    /// Replace MIME part(s) of a message with a stub
+    ///
+    /// The stub records what was there, and the message is kept. IMAP
+    /// cannot edit a message, so this appends the rebuilt one and
+    /// removes the original: the UID changes. Needs access-level 'full'.
     #[clap(after_help = SELECTION_HELP)]
     Strip {
         /// Message selection naming exactly one message (5, Archive::5)
